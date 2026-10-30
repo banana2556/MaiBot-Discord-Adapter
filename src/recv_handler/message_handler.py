@@ -6,6 +6,7 @@
 import base64
 import re
 import time
+import aiohttp
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -343,6 +344,46 @@ class DiscordMessageHandler:
         normalized = str(value)
         return normalized if normalized else ""
 
+
+    _EMOJI_FETCH_LIMIT = 5 * 1024 * 1024
+
+
+    @staticmethod
+    def _is_complete_image(data: bytes) -> bool:
+        """确认下载到的是完整图片，拒绝截断或非图片内容。"""
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return data.endswith(b"IEND\xaeB`\x82")
+        if data.startswith(b"\xff\xd8"):
+            return data.endswith(b"\xff\xd9")
+        if data.startswith((b"GIF87a", b"GIF89a")):
+            return data.endswith(b"\x00;")
+        if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            return True
+        return False
+
+    async def _fetch_emoji_bytes(self, url: str, size: int = 48) -> Optional[str]:
+        """下载自定义表情或贴纸的图片，返回 base64；超过大小上限或失败时返回 None。"""
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            # Discord CDN 的表情与贴纸支持 ?size= 指定边长（16 到 4096 的 2 的幂），
+            # 直接取小图，避免下载原图再上传时比原生表情大。
+            request_url = url + (("&" if "?" in url else "?") + f"size={size}")
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(request_url) as resp:
+                    if resp.status != 200:
+                        return None
+                    # read(n) 只读一次，不一定读满；用 readexactly 读完整个 body，
+                    # 否则存下来的图片是截断的，视觉模型会报 image file is truncated。
+                    data = await resp.content.readexactly(resp.content_length) if resp.content_length else await resp.read()
+            if not data or len(data) > self._EMOJI_FETCH_LIMIT:
+                return None
+            if not self._is_complete_image(data):
+                return None
+            return base64.b64encode(data).decode("utf-8")
+        except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            self._logger.debug(f"下载表情或贴纸失败: {exc}")
+            return None
+
     async def _convert_discord_to_maim(self, message: discord.Message) -> Optional[MessageBase]:
         """将单条 Discord 消息装配为 `MessageBase`（用户、群组、分段、引用与线程上下文）。
 
@@ -434,7 +475,7 @@ class DiscordMessageHandler:
                     content_formats.append("mention")
 
             if message.content:
-                processed = self._process_text_with_emojis(message.content, message)
+                processed = await self._process_text_with_emojis(message.content, message)
                 message_segments.extend(processed)
                 for seg in processed:
                     if seg.type not in content_formats:
@@ -451,13 +492,22 @@ class DiscordMessageHandler:
                         self._logger.error(f"处理图片附件失败: {exc}")
 
             for sticker in message.stickers:
-                sticker_text = f"[贴纸: {sticker.name}]"
-                if not message.content:
-                    message_segments.append(Seg(type="text", data=sticker_text))
-                    if "text" not in content_formats:
-                        content_formats.append("text")
-                elif message_segments and message_segments[-1].type == "text":
-                    message_segments[-1].data += f" {sticker_text}"
+                sticker_b64 = None
+                sticker_url = getattr(sticker, "url", None)
+                if sticker_url:
+                    sticker_b64 = await self._fetch_emoji_bytes(str(sticker_url))
+                if sticker_b64:
+                    message_segments.append(Seg(type="emoji", data=sticker_b64))
+                    if "emoji" not in content_formats:
+                        content_formats.append("emoji")
+                else:
+                    sticker_text = f"[贴纸: {sticker.name}]"
+                    if not message.content:
+                        message_segments.append(Seg(type="text", data=sticker_text))
+                        if "text" not in content_formats:
+                            content_formats.append("text")
+                    elif message_segments and message_segments[-1].type == "text":
+                        message_segments[-1].data += f" {sticker_text}"
 
             if message.reference and message.reference.message_id:
                 reply_message_id = str(message.reference.message_id)
@@ -580,7 +630,7 @@ class DiscordMessageHandler:
 
         return mentions_data if mentions_data else None
 
-    def _process_text_with_emojis(
+    async def _process_text_with_emojis(
         self, text: str, message: Optional[discord.Message] = None
     ) -> List[Seg]:
         """将原始文本中的 Discord 提及占位符替换为可读形式，再拆分为文本/表情分段。
@@ -614,9 +664,9 @@ class DiscordMessageHandler:
                 if channel_pattern in processed_text:
                     processed_text = processed_text.replace(channel_pattern, f"#{channel.name}")
 
-        return self._process_emoji_text(processed_text)
+        return await self._process_emoji_text(processed_text)
 
-    def _process_emoji_text(self, text: str) -> List[Seg]:
+    async def _process_emoji_text(self, text: str) -> List[Seg]:
         """按 Discord 自定义表情语法与 Unicode 表情规则将正文拆成多个 `Seg`（以文本为主）。
 
         Args:
@@ -654,9 +704,23 @@ class DiscordMessageHandler:
                     segments.append(Seg(type="text", data=before))
 
             emoji_name = match.group(1)
+            emoji_id = match.group(2)
             is_animated = text[match.start() : match.end()].startswith("<a:")
             emoji_text = f"[动画:{emoji_name}]" if is_animated else f"[{emoji_name}]"
-            segments.append(Seg(type="text", data=emoji_text))
+            # 动态表情的 .gif 端点常返回 415，Discord CDN 对同一 id 的 .png 始终给静态帧，
+            # 所以先试标记对应的后缀，失败再退回另一种。
+            primary = "gif" if is_animated else "png"
+            emoji_b64 = None
+            for ext in (primary, "png" if primary == "gif" else "gif"):
+                emoji_b64 = await self._fetch_emoji_bytes(
+                    f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}"
+                )
+                if emoji_b64:
+                    break
+            if emoji_b64:
+                segments.append(Seg(type="emoji", data=emoji_b64))
+            else:
+                segments.append(Seg(type="text", data=emoji_text))
             current_pos = match.end()
 
         if current_pos < len(text):
