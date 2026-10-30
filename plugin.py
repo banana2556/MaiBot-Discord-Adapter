@@ -532,10 +532,29 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         if str(message.get("platform") or "").strip() != settings.platform.platform_name:
             return {"action": "continue"}
 
+        # 只记录 typing 目标，不在消息进入时就启动。Discord 的 typing 一次显示约 10 秒，
+        # 如果麦麦决定不回复就没有东西去停它。真正开始 reply 时才由 before_request 启动。
         session_id = str(message.get("session_id") or "").strip()
         channel_id = self._extract_discord_typing_channel_id(message)
         if session_id and isinstance(channel_id, int):
             self._client_manager.remember_typing_target(session_id, channel_id)
+        return {"action": "continue"}
+
+    @HookHandler(
+        "maisaka.replyer.before_request",
+        name="discord_typing_on_reply",
+        mode="observe",
+        order="early",
+        timeout_ms=1000,
+    )
+    async def start_discord_typing_on_reply(
+        self,
+        session_id: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """只有真正开始生成回复时才启动 Discord typing。"""
+        del kwargs
+        if self._client_manager is not None and str(session_id or "").strip():
             await self._client_manager.start_typing_for_session(session_id)
         return {"action": "continue"}
 
@@ -1460,6 +1479,8 @@ class DiscordAdapterPlugin(MaiBotPlugin):
                     account_id=str(bot_user.id),
                     bot_name=str(bot_user),
                 )
+                if self._message_handler is not None:
+                    self._message_handler.set_account_id(str(bot_user.id))
                 if voice_manager:
                     voice_manager.bot = self._client_manager.client
                     await voice_manager.start()

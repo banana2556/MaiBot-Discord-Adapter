@@ -33,6 +33,11 @@ class DiscordMessageHandler:
         self._logger = logger
         self._platform_name = platform_name
         self._chat_config = chat_config
+        self._account_id = ""
+
+    def set_account_id(self, account_id: str) -> None:
+        """记录 bot 自身的账号 ID，作为新版路由归属写入每条入站消息。"""
+        self._account_id = str(account_id or "").strip()
 
     def update_config(self, platform_name: str, chat_config: Any) -> None:
         """热更新平台名与聊天配置（不改变已缓存的其他状态）。
@@ -156,6 +161,9 @@ class DiscordMessageHandler:
             "message_id": message_id,
             "timestamp": timestamp,
             "platform": str(getattr(message_info, "platform", "") or self._platform_name),
+            # 新版路由归属：顶层 account_id 是正式字段，scope 可选。
+            # 旧版把归属塞在 additional_config，MaiBot 会警告并在下个版本移除。
+            "account_id": self._account_id or None,
             "message_info": message_info_dict,
             "raw_message": raw_message,
             "is_mentioned": traits["is_mentioned"],
