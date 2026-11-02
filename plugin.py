@@ -1219,28 +1219,18 @@ class DiscordAdapterPlugin(MaiBotPlugin):
     @Tool(
         "discord_react",
         description=(
-            "用一個表情回應 Discord 訊息（reaction）。遇到適合輕輕附和、笑一下、表示收到、無語或驚訝的時刻，"
-            "可以比只回文字更自然，請偶爾主動選用；純反應時用它就夠了，不必再 reply。"
-            "需要說明、回答問題或安慰時仍優先用文字，不要每則都加表情。不指定 emoji 時會從本伺服器表情挑選。"
+            "用伺服器的 Discord 自訂表情回應訊息，可偶爾代替一句簡短文字。只傳目標訊息與想表達的情緒，"
+            "工具會看聊天上下文與候選圖片自行挑選。挑不到就不要送；不使用普通 Unicode emoji。"
+            "需要回答問題或安慰時仍用文字，不要每則都加表情。"
         ),
         parameters=[
             ToolParameterInfo(
-                name="msg_id", param_type=ToolParamType.STRING, description="要回应的消息 msg_id。", required=True
+                name="msg_id", param_type=ToolParamType.STRING, description="要回應的訊息 msg_id。", required=True
             ),
             ToolParameterInfo(
                 name="feeling",
                 param_type=ToolParamType.STRING,
-                description="可选。想表达的情绪或态度，如 笑翻了、认同、无语、心疼。",
-                required=False,
-            ),
-            ToolParameterInfo(
-                name="emoji",
-                param_type=ToolParamType.STRING,
-                description=(
-                    "可選。優先留空並用 feeling 描述情緒，工具會從本伺服器挑自訂表情。"
-                    "已知具體的 <:名稱:id> 或 :名稱: 才填 emoji；填普通 Unicode 只作挑選自訂表情的提示，"
-                    "伺服器沒有可用自訂表情或挑選失敗時才用原 Unicode。貼圖不能用來回應。"
-                ),
+                description="想表達的情緒或態度，如笑翻、認同、無語、心疼；只描述情緒，不指定表情符號。",
                 required=False,
             ),
         ],
@@ -1251,7 +1241,6 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         self,
         msg_id: str = "",
         feeling: str = "",
-        emoji: str = "",
         group_id: str = "",
         user_id: str = "",
         stream_id: str = "",
@@ -1261,8 +1250,7 @@ class DiscordAdapterPlugin(MaiBotPlugin):
 
         Args:
             msg_id: 目标消息 ID（Host 已把模型可见的别名换回原始 ID）。
-            feeling: 可选的情绪提示，挑表情时一并给选择模型参考。
-            emoji: 可选的指定表情：Unicode 字符、``:名称:`` 或 ``<:名称:id>``。
+            feeling: 想表達的情緒提示；選圖模型會依上下文挑選伺服器自訂表情。
             group_id: Host 注入的会话频道 ID。
             user_id: Host 注入的私聊对象用户 ID。
             stream_id: Host 注入的聊天流 ID，用于取挑表情时的聊天上下文。
@@ -1278,25 +1266,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         if target is None:
             return {"success": False, "error": f"找不到消息 {msg_id}"}
 
-        emoji = str(emoji or "").strip()
-        guild_has_custom = bool(target.guild and any(item.is_usable() for item in target.guild.emojis))
-        # Unicode 是語氣提示，不應跳過自訂表情選圖；明確的自訂表情名稱/ID 則照指定值送出。
-        unicode_hint = bool(emoji and not self._CUSTOM_EMOJI_NAME_PATTERN.fullmatch(emoji)
-                            and not re.fullmatch(r"<a?:[A-Za-z0-9_]{2,32}:\d+>", emoji))
-        if emoji and (not unicode_hint or not guild_has_custom):
-            reaction = self._resolve_reaction_emoji(emoji, target.guild, self._client_manager.client)
-            if reaction is None:
-                return {"success": False, "error": f"找不到表情 {emoji}；不填 emoji 会由工具挑服务器表情，或改填 Unicode 表情"}
-        else:
-            hint = " ".join(part for part in (str(feeling or "").strip(), emoji if unicode_hint else "") if part)
-            reaction = await self._pick_reaction_emoji(target, hint, str(stream_id or "").strip())
-            if reaction is None and unicode_hint:
-                reaction = self._resolve_reaction_emoji(emoji, target.guild, self._client_manager.client)
-            if reaction is None:
-                return {
-                    "success": False,
-                    "error": "没能挑出服务器表情（本服务器没有可用表情或视觉模型不可用），可以在 emoji 直接填一个 Unicode 表情",
-                }
+        reaction = await self._pick_reaction_emoji(target, str(feeling or "").strip(), str(stream_id or "").strip())
+        if reaction is None:
+            return {"success": False, "error": "本伺服器沒有可用自訂表情，或選圖失敗；沒有送出 reaction"}
 
         try:
             await target.add_reaction(reaction)
@@ -1386,35 +1358,12 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         try:
             index = int(json.loads(response[response.find("{") : response.rfind("}") + 1])["emoji_index"])
         except (ValueError, KeyError, TypeError):
-            index = 1  # 与 MaiBot 一致：解析失败回退到第 1 张
+            self.ctx.logger.warning("選圖模型未回傳有效 emoji_index；不送 reaction")
+            return None
         if not 1 <= index <= len(loaded):
-            index = 1
+            self.ctx.logger.warning(f"選圖模型回傳超出候選範圍的序號 {index}；不送 reaction")
+            return None
         return loaded[index - 1][0]
-
-    @classmethod
-    def _resolve_reaction_emoji(
-        cls, emoji: str, guild: Optional[discord.Guild], client: discord.Client
-    ) -> Union[str, discord.Emoji, discord.PartialEmoji, None]:
-        """把模型给的表情转换为 ``add_reaction`` 可用的形式。
-
-        Args:
-            emoji: Unicode 表情字符、``:名称:`` 或 ``<:名称:id>`` / ``<a:名称:id>``。
-            guild: 目标消息所在服务器；私聊时为 None。
-            client: 用于查找其他服务器自定义表情的 Discord 客户端。
-
-        Returns:
-            Unicode 字符或 ``<:名称:id>`` 原样返回；自定义表情名优先取本服务器，其次取 bot 所在其他服务器；
-            找不到时返回 None。
-        """
-        if emoji.startswith("<") and emoji.endswith(">"):
-            # 字符串会被原样剥成 a:名称:id，动态表情要先解析成 名称:id
-            return discord.PartialEmoji.from_str(emoji)
-        match = cls._CUSTOM_EMOJI_NAME_PATTERN.fullmatch(emoji)
-        if match is None:
-            return emoji
-        name = match.group(1)
-        local = discord.utils.get(guild.emojis, name=name) if guild is not None else None
-        return local or discord.utils.get(client.emojis, name=name)
 
     @API("adapter.discord.channel.send_message", description="发送 Discord 频道消息", version="1", public=True)
     async def send_channel_message(self, channel_id: str, text: str) -> Dict[str, Any]:

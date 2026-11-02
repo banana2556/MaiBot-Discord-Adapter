@@ -43,20 +43,6 @@ def test_find_message_checks_group_channel_then_dm() -> None:
     asyncio.run(run())
 
 
-def test_resolve_reaction_emoji_prefers_local_guild() -> None:
-    plugin_cls = _load_plugin_class()
-    local, remote = SimpleNamespace(name="pepe"), SimpleNamespace(name="wave")
-    guild = SimpleNamespace(emojis=[local])
-    client = SimpleNamespace(emojis=[SimpleNamespace(name="pepe"), remote])
-
-    assert plugin_cls._resolve_reaction_emoji("👍", guild, client) == "👍"
-    animated = plugin_cls._resolve_reaction_emoji("<a:x:1339569745908731994>", guild, client)
-    assert animated._as_reaction() == "x:1339569745908731994"
-    assert plugin_cls._resolve_reaction_emoji(":pepe:", guild, client) is local
-    assert plugin_cls._resolve_reaction_emoji("wave", guild, client) is remote
-    assert plugin_cls._resolve_reaction_emoji(":thumbsup:", guild, client) is None
-
-
 def _png(color: str) -> str:
     from PIL import Image
 
@@ -114,11 +100,8 @@ def test_discord_react_tool_picks_emoji_from_grid_like_send_emoji() -> None:
         return await plugin.handle_discord_react(msg_id="555", group_id="10", stream_id="stream-1", **kwargs)
 
     async def run() -> None:
-        # 指定了表情就不问模型
-        assert (await react(emoji=":e0:"))["success"] is True
-        assert added == [emojis[0]] and requests == []
-
-        # 不指定：emoji 任务没配好就退到 vlm，看拼图和聊天记录选序号
+        # 只传情绪，由视觉模型从服务器自定义表情拼图挑图
+        # emoji 任务没配好就退到 vlm，看拼图和聊天记录选序号
         replies[:] = [{"success": False, "error": "未找到名为 '' 的模型"}, {"success": True, "response": '{"emoji_index":2,"reason":"笑"}'}]
         result = await react(feeling="笑翻了")
         assert result["success"] is True
@@ -131,14 +114,17 @@ def test_discord_react_tool_picks_emoji_from_grid_like_send_emoji() -> None:
         picked = added[-1]
         assert picked in emojis
 
-        # 回复不是 JSON 或序号越界：照 MaiBot 回退到第 1 张
+        # 回覆不是 JSON 或序號越界：不可假裝選了第 1 張
         for response in ("看不懂", '{"emoji_index": 99}'):
             replies[:] = [{"success": True, "response": response}]
-            assert (await react())["success"] is True
+            before = len(added)
+            assert (await react())["success"] is False
+            assert len(added) == before
 
-        # 两个任务都失败：让 planner 改填 Unicode
+        # 視覺選圖失敗：不送出 reaction，也不退回 Unicode
         replies[:] = [{"success": False}, {"success": False}]
-        assert "Unicode" in (await react())["error"]
+        assert (await react())["success"] is False
+        assert len(added) == 1
 
     asyncio.run(run())
 
@@ -179,43 +165,16 @@ def test_discord_react_does_not_need_unregistered_config_capability() -> None:
     assert result["success"] is True and selected == [emoji]
 
 
-def test_unicode_hint_prefers_guild_custom_emoji() -> None:
+def test_custom_selection_failure_does_not_send_unicode() -> None:
     plugin_cls = _load_plugin_class()
     plugin = plugin_cls.__new__(plugin_cls)
     sent = []
-    picked = []
-    custom = SimpleNamespace(id=42, is_usable=lambda: True)
 
     async def add_reaction(value):
         sent.append(value)
 
     async def find_message(*args):
-        return SimpleNamespace(guild=SimpleNamespace(emojis=[custom]), add_reaction=add_reaction)
-
-    async def pick(target, feeling, stream_id):
-        picked.append(feeling)
-        return custom
-
-    plugin._client_manager = SimpleNamespace(client=SimpleNamespace(emojis=[]))
-    plugin._thread_routing = SimpleNamespace(find_message=find_message)
-    plugin._pick_reaction_emoji = pick
-    result = asyncio.run(plugin.handle_discord_react(msg_id="55", group_id="10", emoji="🐟"))
-    assert result["success"] is True
-    assert sent == [custom], "伺服器有可用自訂表情時不應直接送 Unicode"
-    assert picked == ["🐟"], "Unicode 應作為情緒提示給選圖路徑"
-
-
-def test_unicode_hint_falls_back_when_custom_selection_fails() -> None:
-    plugin_cls = _load_plugin_class()
-    plugin = plugin_cls.__new__(plugin_cls)
-    sent = []
-    custom = SimpleNamespace(id=42, is_usable=lambda: True)
-
-    async def add_reaction(value):
-        sent.append(value)
-
-    async def find_message(*args):
-        return SimpleNamespace(guild=SimpleNamespace(emojis=[custom]), add_reaction=add_reaction)
+        return SimpleNamespace(guild=SimpleNamespace(emojis=[]), add_reaction=add_reaction)
 
     async def pick(*args):
         return None
@@ -223,8 +182,14 @@ def test_unicode_hint_falls_back_when_custom_selection_fails() -> None:
     plugin._client_manager = SimpleNamespace(client=SimpleNamespace(emojis=[]))
     plugin._thread_routing = SimpleNamespace(find_message=find_message)
     plugin._pick_reaction_emoji = pick
-    result = asyncio.run(plugin.handle_discord_react(msg_id="55", group_id="10", emoji="🐟"))
-    assert result["success"] is True and sent == ["🐟"]
+    result = asyncio.run(plugin.handle_discord_react(msg_id="55", group_id="10", feeling="魚"))
+    assert result["success"] is False and sent == []
+
+
+def test_discord_react_schema_only_takes_message_and_feeling() -> None:
+    cls = _load_plugin_class()
+    parameters = cls.handle_discord_react.__maibot_component_info__.parameters
+    assert {item.name for item in parameters} == {"msg_id", "feeling"}
 
 
 def test_emoji_grid_numbers_every_candidate() -> None:
