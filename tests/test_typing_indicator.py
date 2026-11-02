@@ -121,17 +121,18 @@ async def _run_outbound_message_stops_typing_before_channel_send() -> None:
     events: list[tuple[str, int | str]] = []
 
     plugin._client_manager = SimpleNamespace(
-        stop_typing_indicator=lambda channel_id: events.append(("stop", channel_id))
+        client=None,
+        stop_typing_indicator=lambda channel_id: events.append(("stop", channel_id)),
     )
     plugin._thread_routing = SimpleNamespace(
         resolve_target_channel=lambda message: _value_async(target_channel),
         get_reply_reference=lambda message, channel: _value_async(None),
     )
-    plugin._content_builder = SimpleNamespace(build=lambda segment: ("pong", ()))
+    plugin._content_builder = SimpleNamespace(build=lambda segment, client=None, channel=None: ("pong", (), []))
     plugin._voice_manager = None
     plugin._ctx = SimpleNamespace(logger=SimpleNamespace(debug=lambda *args, **kwargs: None))
 
-    async def fake_send_with_length_check(channel, content, files, reference):
+    async def fake_send_with_length_check(channel, content, files, reference, stickers=()):
         events.append(("send", channel.id))
         return SimpleNamespace(id=333333333)
 
