@@ -1,9 +1,10 @@
 import asyncio
 import json
 from pathlib import Path
+import re
 import time
 import tomllib
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, cast
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Union, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -11,12 +12,13 @@ from urllib.request import Request, urlopen
 import discord
 from maim_message import BaseMessageInfo, MessageBase, Seg
 
-from maibot_sdk import API, HookHandler, MaiBotPlugin, MessageGateway, PluginConfigBase
+from maibot_sdk import API, HookHandler, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
+from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from maim_message import FormatInfo, GroupInfo, UserInfo
 
 from .config import DiscordPluginSettings
-from .constants import DISCORD_GATEWAY_NAME
+from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
 from .src.native_emoji import NativeEmojiRegistry
@@ -1179,6 +1181,92 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         except (ValueError, TypeError) as exc:
             return {"success": False, "error": f"参数格式错误: {exc}"}
 
+    # Discord 自定义表情名只允许字母、数字、下划线，2 到 32 个字符
+    _CUSTOM_EMOJI_NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r":?([A-Za-z0-9_]{2,32}):?")
+
+    # ponytail: platforms 写死默认平台名，platform_name 改成别的名字时工具不会出现
+    @Tool(
+        "discord_react",
+        description="给一条 Discord 消息添加表情回应（reaction），用来表态；不能代替回复。",
+        parameters=[
+            ToolParameterInfo(
+                name="msg_id", param_type=ToolParamType.STRING, description="要回应的消息 msg_id。", required=True
+            ),
+            ToolParameterInfo(
+                name="emoji",
+                param_type=ToolParamType.STRING,
+                description="Unicode 表情直接填字符（如 👍）；服务器自定义表情填 :名称:。",
+                required=True,
+            ),
+        ],
+        platforms=DEFAULT_PLATFORM_NAME,
+        visibility="visible",
+    )
+    async def handle_discord_react(
+        self, msg_id: str = "", emoji: str = "", group_id: str = "", user_id: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
+        """Maisaka 工具：在当前会话中定位消息并添加 reaction。
+
+        Args:
+            msg_id: 目标消息 ID（Host 已把模型可见的别名换回原始 ID）。
+            emoji: Unicode 表情字符、``:名称:`` 或 ``<:名称:id>``。
+            group_id: Host 注入的会话频道 ID。
+            user_id: Host 注入的私聊对象用户 ID。
+
+        Returns:
+            dict: ``success`` 与给模型看的 ``content`` 或 ``error``。
+        """
+        del kwargs
+        if self._thread_routing is None or self._client_manager is None or self._client_manager.client is None:
+            return {"success": False, "error": "Discord 客户端未就绪"}
+        emoji = str(emoji or "").strip()
+        if not emoji:
+            return {"success": False, "error": "缺少 emoji"}
+
+        target = await self._thread_routing.find_message(str(msg_id or "").strip(), group_id, user_id)
+        if target is None:
+            return {"success": False, "error": f"找不到消息 {msg_id}"}
+
+        reaction = self._resolve_reaction_emoji(emoji, target.guild, self._client_manager.client)
+        if reaction is None:
+            names = [f":{item.name}:" for item in (target.guild.emojis if target.guild else [])][:50]
+            return {
+                "success": False,
+                "error": (
+                    f"找不到自定义表情 {emoji}。本服务器可用：{'、'.join(names) or '无'}。"
+                    "Unicode 表情请直接填字符（如 👍）。"
+                ),
+            }
+
+        try:
+            await target.add_reaction(reaction)
+        except discord.HTTPException as exc:
+            return {"success": False, "error": f"添加表情回应失败：{exc}"}
+        return {"success": True, "content": f"已对消息 {msg_id} 添加表情回应 {emoji}"}
+
+    @classmethod
+    def _resolve_reaction_emoji(
+        cls, emoji: str, guild: Optional[discord.Guild], client: discord.Client
+    ) -> Union[str, discord.Emoji, None]:
+        """把模型给的表情转换为 ``add_reaction`` 可用的形式。
+
+        Args:
+            emoji: Unicode 表情字符、``:名称:`` 或 ``<:名称:id>``。
+            guild: 目标消息所在服务器；私聊时为 None。
+            client: 用于查找其他服务器自定义表情的 Discord 客户端。
+
+        Returns:
+            Unicode 字符或 ``<:名称:id>`` 原样返回；自定义表情名优先取本服务器，其次取 bot 所在其他服务器；
+            找不到时返回 None。
+        """
+        if emoji.startswith("<") and emoji.endswith(">"):
+            return emoji
+        match = cls._CUSTOM_EMOJI_NAME_PATTERN.fullmatch(emoji)
+        if match is None:
+            return emoji
+        name = match.group(1)
+        local = discord.utils.get(guild.emojis, name=name) if guild is not None else None
+        return local or discord.utils.get(client.emojis, name=name)
 
     @API("adapter.discord.channel.send_message", description="发送 Discord 频道消息", version="1", public=True)
     async def send_channel_message(self, channel_id: str, text: str) -> Dict[str, Any]:

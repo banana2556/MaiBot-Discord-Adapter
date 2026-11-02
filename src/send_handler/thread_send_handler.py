@@ -144,6 +144,54 @@ class ThreadRoutingManager:
             self._logger.warning(f"获取被回复消息失败：{exc}")
         return None
 
+    async def find_message(
+        self, message_id: str, group_id: Optional[str] = None, user_id: Optional[str] = None
+    ) -> Optional[discord.Message]:
+        """按会话定位消息：群聊先查会话频道本身，再查其子区；私聊查 DM。
+
+        Args:
+            message_id: Discord 消息 ID。
+            group_id: 会话频道 ID（继承子区记忆时为父频道）。
+            user_id: 私聊对象的用户 ID，仅在没有 ``group_id`` 时使用。
+
+        Returns:
+            找到的 `discord.Message`；无客户端、ID 无效或找不到时返回 None。
+        """
+        if self._client is None:
+            return None
+        try:
+            message_int = int(message_id)
+            channel_id = int(group_id) if group_id else None
+        except (TypeError, ValueError):
+            return None
+
+        if channel_id is not None:
+            channel = (
+                self._get_cached_channel(channel_id)
+                or self._client.get_channel(channel_id)
+                or await self._fetch_channel(channel_id)
+            )
+        elif user_id:
+            channel = await self._resolve_direct_target(user_id)
+        else:
+            return None
+        if channel is None or not hasattr(channel, "fetch_message"):
+            return None
+
+        try:
+            return await channel.fetch_message(message_int)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+        if channel_id is None:
+            return None
+        thread = await self._find_thread_by_message_id(message_id, channel_id)
+        if thread is None:
+            return None
+        try:
+            return await thread.fetch_message(message_int)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
     async def _resolve_guild_target(
         self, message: MessageBase, target_group_id: Optional[str] = None
     ) -> Optional[discord.abc.Messageable]:
