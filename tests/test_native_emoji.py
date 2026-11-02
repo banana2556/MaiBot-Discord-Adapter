@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import asyncio
 import base64
 import importlib
 import importlib.util
@@ -59,6 +60,36 @@ def test_registry_persists_and_reloads(tmp_path: Path) -> None:
     assert reloaded.lookup(SMILE) == ("emoji", 111)
     assert reloaded.lookup(UNKNOWN) is None
     assert reloaded.lookup("not base64!") is None
+
+
+def test_inbound_custom_emoji_keeps_raw_syntax_and_records_id() -> None:
+    registry_module = _load_adapter_module("src.native_emoji")
+    handler_module = _load_adapter_module("src.recv_handler.message_handler")
+    registry = registry_module.NativeEmojiRegistry()
+    handler = handler_module.DiscordMessageHandler(
+        logger=SimpleNamespace(), platform_name="discord", chat_config=SimpleNamespace(), native_emoji=registry
+    )
+
+    async def fetch_ok(url: str, size: int = 48) -> str:
+        return SMILE
+
+    async def fetch_fail(url: str, size: int = 48) -> None:
+        return None
+
+    handler._fetch_emoji_bytes = fetch_ok
+    segments = asyncio.run(handler._process_emoji_text("看 <:pepe:111> 這個"))
+    assert [(seg.type, seg.data) for seg in segments] == [
+        ("text", "看 "),
+        ("text", "<:pepe:111>"),
+        ("emoji", SMILE),
+        ("text", " 這個"),
+    ]
+    assert registry.lookup(SMILE) == ("emoji", 111)
+
+    # 下载失败时仍保留原始语法，模型照样能用它回复或回应
+    handler._fetch_emoji_bytes = fetch_fail
+    segments = asyncio.run(handler._process_emoji_text("<a:dance:222>"))
+    assert [(seg.type, seg.data) for seg in segments] == [("text", "<a:dance:222>")]
 
 
 def test_builder_restores_native_emoji_and_stickers() -> None:

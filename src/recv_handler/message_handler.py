@@ -501,6 +501,10 @@ class DiscordMessageHandler:
                         self._logger.error(f"处理图片附件失败: {exc}")
 
             for sticker in message.stickers:
+                # 图片在 MaiBot 里只显示为「[表情包: 描述]」，附上名称让模型分得清是贴纸（不能用来回应）
+                message_segments.append(Seg(type="text", data=f"[贴纸: {sticker.name}]"))
+                if "text" not in content_formats:
+                    content_formats.append("text")
                 sticker_b64 = None
                 sticker_url = getattr(sticker, "url", None)
                 if sticker_url:
@@ -511,14 +515,6 @@ class DiscordMessageHandler:
                     message_segments.append(Seg(type="emoji", data=sticker_b64))
                     if "emoji" not in content_formats:
                         content_formats.append("emoji")
-                else:
-                    sticker_text = f"[贴纸: {sticker.name}]"
-                    if not message.content:
-                        message_segments.append(Seg(type="text", data=sticker_text))
-                        if "text" not in content_formats:
-                            content_formats.append("text")
-                    elif message_segments and message_segments[-1].type == "text":
-                        message_segments[-1].data += f" {sticker_text}"
 
             if message.reference and message.reference.message_id:
                 reply_message_id = str(message.reference.message_id)
@@ -714,10 +710,11 @@ class DiscordMessageHandler:
                 if before.strip():
                     segments.append(Seg(type="text", data=before))
 
-            emoji_name = match.group(1)
             emoji_id = match.group(2)
             is_animated = text[match.start() : match.end()].startswith("<a:")
-            emoji_text = f"[动画:{emoji_name}]" if is_animated else f"[{emoji_name}]"
+            # 图片在 MaiBot 里只显示为「[表情包: 描述]」；保留原始 <:名称:id>，模型可原样写进回复
+            # （Discord 直接渲染）或用来回应
+            segments.append(Seg(type="text", data=match.group(0)))
             # 动态表情的 .gif 端点常返回 415，Discord CDN 对同一 id 的 .png 始终给静态帧，
             # 所以先试标记对应的后缀，失败再退回另一种。
             primary = "gif" if is_animated else "png"
@@ -732,8 +729,6 @@ class DiscordMessageHandler:
                 if self._native_emoji is not None:
                     self._native_emoji.remember(emoji_b64, "emoji", emoji_id)
                 segments.append(Seg(type="emoji", data=emoji_b64))
-            else:
-                segments.append(Seg(type="text", data=emoji_text))
             current_pos = match.end()
 
         if current_pos < len(text):

@@ -1195,7 +1195,10 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="emoji",
                 param_type=ToolParamType.STRING,
-                description="Unicode 表情直接填字符（如 👍）；服务器自定义表情填 :名称:。",
+                description=(
+                    "Unicode 表情直接填字符（如 👍）；自定义表情直接填消息里的 <:名称:id>。"
+                    "「[贴纸: …]」是贴纸，不能用来回应。"
+                ),
                 required=True,
             ),
         ],
