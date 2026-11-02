@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import discord
 from maim_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Seg, UserInfo
 
+from ..native_emoji import NativeEmojiRegistry
 from .emoji_mapping import format_reaction_for_ai, get_emoji_meaning
 
 
@@ -23,17 +24,25 @@ class DiscordMessageHandler:
     不直接与 gateway 交互，仅负责转换。
     """
 
-    def __init__(self, logger: Any, platform_name: str, chat_config: Any) -> None:
+    def __init__(
+        self,
+        logger: Any,
+        platform_name: str,
+        chat_config: Any,
+        native_emoji: Optional[NativeEmojiRegistry] = None,
+    ) -> None:
         """创建处理器并保存平台名与聊天相关配置。
 
         Args:
             logger: 日志记录器。
             platform_name: 写入 `MessageBase` 等平台字段的平台标识。
             chat_config: 聊天/子区记忆继承等行为的配置对象。
+            native_emoji: 可选的原生表情映射，记录下载的表情/贴纸图片对应的 Discord id。
         """
         self._logger = logger
         self._platform_name = platform_name
         self._chat_config = chat_config
+        self._native_emoji = native_emoji
         self._account_id = ""
 
     def set_account_id(self, account_id: str) -> None:
@@ -497,6 +506,8 @@ class DiscordMessageHandler:
                 if sticker_url:
                     sticker_b64 = await self._fetch_emoji_bytes(str(sticker_url))
                 if sticker_b64:
+                    if self._native_emoji is not None:
+                        self._native_emoji.remember(sticker_b64, "sticker", sticker.id)
                     message_segments.append(Seg(type="emoji", data=sticker_b64))
                     if "emoji" not in content_formats:
                         content_formats.append("emoji")
@@ -718,6 +729,8 @@ class DiscordMessageHandler:
                 if emoji_b64:
                     break
             if emoji_b64:
+                if self._native_emoji is not None:
+                    self._native_emoji.remember(emoji_b64, "emoji", emoji_id)
                 segments.append(Seg(type="emoji", data=emoji_b64))
             else:
                 segments.append(Seg(type="text", data=emoji_text))

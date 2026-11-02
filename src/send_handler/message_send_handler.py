@@ -6,10 +6,12 @@ import io
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import discord
 from maim_message import Seg
+
+from ..native_emoji import NativeEmojiRegistry
 
 _logger = logging.getLogger("discord_adapter.content_builder")
 
@@ -20,29 +22,40 @@ class DiscordContentBuilder:
     """将 MaiBot 的 Seg 片段树递归解析为 Discord 可用的正文与附件列表。
 
     支持文本、提及、表情/图片（base64）、语音等类型；会跳过 thread_context 与嵌套
-    seglist，并对无法处理的类型输出占位说明文本。
+    seglist，并对无法处理的类型输出占位说明文本。来自 Discord 自定义表情/贴纸的表情
+    会还原为原生表情或贴纸，其余表情作为图片附件上传。
     """
 
-    def __init__(self, logger: Any = None) -> None:
+    def __init__(self, logger: Any = None, native_emoji: Optional[NativeEmojiRegistry] = None) -> None:
         """初始化内容构建器。
 
         Args:
             logger: 可选日志记录器；未传入时使用模块默认 logger。
+            native_emoji: 可选的原生表情映射，用于把表情图片还原为 Discord 表情/贴纸。
         """
 
         self._logger = logger or _logger
+        self._native_emoji = native_emoji
 
-    def build(self, message_segment: Seg) -> Tuple[Optional[str], List[discord.File]]:
-        """从根 Seg 递归构建 Discord 消息正文与附件列表。
+    def build(
+        self,
+        message_segment: Seg,
+        client: Optional[discord.Client] = None,
+        channel: Any = None,
+    ) -> Tuple[Optional[str], List[discord.File], List[discord.GuildSticker]]:
+        """从根 Seg 递归构建 Discord 消息正文、附件与贴纸列表。
 
         Args:
             message_segment: MaiBot 消息根片段（可含 seglist 嵌套）。
+            client: 用于查询表情/贴纸缓存的 Discord 客户端；为 None 时表情一律作为图片上传。
+            channel: 目标频道，用于判断贴纸归属与外部表情权限。
 
         Returns:
-            二元组：(正文字符串，若无有效文本则为 None)、`discord.File` 附件列表。
+            三元组：(正文字符串，若无有效文本则为 None)、`discord.File` 附件列表、贴纸列表。
         """
         content_parts: List[str] = []
         files: List[discord.File] = []
+        stickers: List[discord.GuildSticker] = []
 
         def process(seg: Seg) -> None:
             if not getattr(seg, "type", None):
@@ -69,6 +82,14 @@ class DiscordContentBuilder:
                 return
 
             if seg.type in {"emoji", "image"}:
+                if seg.type == "emoji" and isinstance(seg.data, str):
+                    native = self._resolve_native_emoji(seg.data, client, channel)
+                    if isinstance(native, str):
+                        content_parts.append(native)
+                        return
+                    if native is not None:
+                        stickers.append(native)
+                        return
                 file_item: Optional[discord.File] = None
                 if isinstance(seg.data, str):
                     file_item = self._decode_image_to_attachment(seg.type, seg.data)
@@ -108,7 +129,47 @@ class DiscordContentBuilder:
 
         process(message_segment)
         content_text = "\n".join(part for part in content_parts if part)
-        return (content_text if content_text else None, files)
+        return (content_text if content_text else None, files, stickers)
+
+    def _resolve_native_emoji(
+        self, data: str, client: Optional[discord.Client], channel: Any
+    ) -> Union[str, discord.GuildSticker, None]:
+        """若表情图片来自 bot 当前可用的 Discord 自定义表情或贴纸，返回其原生形式。
+
+        Args:
+            data: 表情图片的 base64。
+            client: 用于查询表情/贴纸缓存的 Discord 客户端。
+            channel: 目标频道。
+
+        Returns:
+            自定义表情返回 ``<:name:id>`` 文本，贴纸返回 `GuildSticker`；不可用时返回 None（退回上传图片）。
+        """
+        if self._native_emoji is None or client is None:
+            return None
+        found = self._native_emoji.lookup(data)
+        if found is None:
+            return None
+        kind, item_id = found
+        guild = getattr(channel, "guild", None)
+
+        if kind == "emoji":
+            emoji = client.get_emoji(item_id)
+            if emoji is None or not emoji.is_usable():
+                return None
+            # 跨服务器表情需要“使用外部表情”权限，否则 Discord 只显示 :name: 文字
+            if (
+                guild is not None
+                and emoji.guild_id != guild.id
+                and not channel.permissions_for(guild.me).use_external_emojis
+            ):
+                return None
+            return str(emoji)
+
+        # bot 只能发送目标服务器自己的贴纸
+        sticker = client.get_sticker(item_id)
+        if sticker is None or not sticker.available or guild is None or sticker.guild_id != guild.id:
+            return None
+        return sticker
 
     def _render_mention(self, mention_data: Any) -> str:
         """将提及载荷规范化为 Discord 可发送的 @ 文本。

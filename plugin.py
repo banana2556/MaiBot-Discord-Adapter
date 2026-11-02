@@ -19,6 +19,7 @@ from .config import DiscordPluginSettings
 from .constants import DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
+from .src.native_emoji import NativeEmojiRegistry
 from .src.recv_handler.discord_client import DiscordClientManager
 from .src.recv_handler.message_handler import DiscordMessageHandler
 from .src.send_handler.message_send_handler import DiscordContentBuilder
@@ -48,6 +49,7 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         self._thread_routing: Optional[ThreadRoutingManager] = None
         self._message_handler: Optional[DiscordMessageHandler] = None
         self._content_builder: Optional[DiscordContentBuilder] = None
+        self._native_emoji: Optional[NativeEmojiRegistry] = None
         self._chat_filter: Optional[DiscordChatFilter] = None
         self._voice_manager: Optional[VoiceManager] = None
         self._client_task: Optional[asyncio.Task[None]] = None
@@ -1005,15 +1007,16 @@ class DiscordAdapterPlugin(MaiBotPlugin):
                     f"falling back to text chat delivery [channel_id={target_channel.id}]"
                 )
 
-        content, files = self._content_builder.build(message.message_segment)
+        client = self._client_manager.client if self._client_manager is not None else None
+        content, files, stickers = self._content_builder.build(message.message_segment, client, target_channel)
         reference = await self._thread_routing.get_reply_reference(message, target_channel)
 
-        if not content and not files:
+        if not content and not files and not stickers:
             self._stop_typing_for_outbound_channels(source_channel_id, target_channel_id)
             return {"success": False, "error": "消息内容为空且无附件"}
 
         try:
-            sent_message = await self._send_with_length_check(target_channel, content, files, reference)
+            sent_message = await self._send_with_length_check(target_channel, content, files, reference, stickers)
             result: Dict[str, Any] = {"success": True}
             if sent_message is not None:
                 result["external_message_id"] = str(sent_message.id)
@@ -1036,7 +1039,7 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             self.ctx.logger.error("Discord voice outbound aborted: voice components are not initialized")
             return {"success": False, "error": "语音组件未初始化", "text_sent": False}
 
-        content, _ = self._content_builder.build(message.message_segment)
+        content, _, _ = self._content_builder.build(message.message_segment)
         if not content or not content.strip():
             self.ctx.logger.error("Discord voice outbound aborted: message content is empty after rendering")
             return {"success": False, "error": "语音出站消息无文本内容", "text_sent": False}
@@ -1223,6 +1226,7 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         content: Optional[str],
         files: Sequence[discord.File],
         reference: Optional[discord.Message],
+        stickers: Sequence[discord.GuildSticker] = (),
     ) -> Optional[discord.Message]:
         """在 Discord 消息长度与附件数量限制下发送内容；超长文本会拆分发送。
 
@@ -1231,16 +1235,24 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             content: 文本内容，可为空（仅发附件时）。
             files: 待上传的附件序列，超过上限时截断为前 10 个。
             reference: 可选的回复引用消息。
+            stickers: 随第一条消息发送的贴纸，超过上限时截断为前 3 个。
         """
         MAX_FILES = 10
+        MAX_STICKERS = 3
         first_sent_message: Optional[discord.Message] = None
-        if files:
+        if files or stickers:
             file_list = list(files)
             if len(file_list) > MAX_FILES:
                 self.ctx.logger.warning(
                     f"消息包含 {len(file_list)} 个文件，超过限制，仅发送前 {MAX_FILES} 个"
                 )
                 file_list = file_list[:MAX_FILES]
+            sticker_list = list(stickers)
+            if len(sticker_list) > MAX_STICKERS:
+                self.ctx.logger.warning(
+                    f"消息包含 {len(sticker_list)} 个贴纸，超过限制，仅发送前 {MAX_STICKERS} 个"
+                )
+                sticker_list = sticker_list[:MAX_STICKERS]
 
             send_content: Optional[str] = None
             if content and len(content) <= self.MAX_MESSAGE_LENGTH:
@@ -1248,19 +1260,19 @@ class DiscordAdapterPlugin(MaiBotPlugin):
                 content = None
 
             first_sent_message = await channel.send(
-                content=send_content, files=file_list, reference=reference
+                content=send_content, files=file_list, stickers=sticker_list, reference=reference
             )
 
         if content:
             if len(content) <= self.MAX_MESSAGE_LENGTH:
                 sent_message = await channel.send(
-                    content=content, reference=reference if not files else None
+                    content=content, reference=reference if first_sent_message is None else None
                 )
                 if first_sent_message is None:
                     first_sent_message = sent_message
             else:
                 sent_message = await self._send_long_message(
-                    channel, content, reference if not files else None
+                    channel, content, reference if first_sent_message is None else None
                 )
                 if first_sent_message is None:
                     first_sent_message = sent_message
@@ -1430,17 +1442,26 @@ class DiscordAdapterPlugin(MaiBotPlugin):
                 gateway_name=DISCORD_GATEWAY_NAME,
             )
 
+        if self._native_emoji is None:
+            # 旧版 SDK 没有 ctx.paths，此时映射只保存在内存中
+            paths = getattr(self.ctx, "paths", None)
+            self._native_emoji = NativeEmojiRegistry(
+                path=paths.data_dir / "native_emoji.json" if paths is not None else None,
+                logger=self.ctx.logger,
+            )
+
         if self._message_handler is None:
             self._message_handler = DiscordMessageHandler(
                 logger=self.ctx.logger,
                 platform_name=platform_name,
                 chat_config=settings.chat,
+                native_emoji=self._native_emoji,
             )
         else:
             self._message_handler.update_config(platform_name, settings.chat)
 
         if self._content_builder is None:
-            self._content_builder = DiscordContentBuilder(logger=self.ctx.logger)
+            self._content_builder = DiscordContentBuilder(logger=self.ctx.logger, native_emoji=self._native_emoji)
 
         if self._thread_routing is None:
             self._thread_routing = ThreadRoutingManager(
