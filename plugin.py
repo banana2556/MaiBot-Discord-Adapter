@@ -1237,8 +1237,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
                 name="emoji",
                 param_type=ToolParamType.STRING,
                 description=(
-                    "可选。已经想好用哪个表情时直接填：Unicode 字符，或聊天记录里的 <:名称:id>；不填就由工具挑服务器表情。"
-                    "「[贴纸: …]」是贴纸，不能用来回应。"
+                    "可選。優先留空並用 feeling 描述情緒，工具會從本伺服器挑自訂表情。"
+                    "已知具體的 <:名稱:id> 或 :名稱: 才填 emoji；填普通 Unicode 只作挑選自訂表情的提示，"
+                    "伺服器沒有可用自訂表情或挑選失敗時才用原 Unicode。貼圖不能用來回應。"
                 ),
                 required=False,
             ),
@@ -1278,12 +1279,19 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             return {"success": False, "error": f"找不到消息 {msg_id}"}
 
         emoji = str(emoji or "").strip()
-        if emoji:
+        guild_has_custom = bool(target.guild and any(item.is_usable() for item in target.guild.emojis))
+        # Unicode 是語氣提示，不應跳過自訂表情選圖；明確的自訂表情名稱/ID 則照指定值送出。
+        unicode_hint = bool(emoji and not self._CUSTOM_EMOJI_NAME_PATTERN.fullmatch(emoji)
+                            and not re.fullmatch(r"<a?:[A-Za-z0-9_]{2,32}:\d+>", emoji))
+        if emoji and (not unicode_hint or not guild_has_custom):
             reaction = self._resolve_reaction_emoji(emoji, target.guild, self._client_manager.client)
             if reaction is None:
                 return {"success": False, "error": f"找不到表情 {emoji}；不填 emoji 会由工具挑服务器表情，或改填 Unicode 表情"}
         else:
-            reaction = await self._pick_reaction_emoji(target, str(feeling or "").strip(), str(stream_id or "").strip())
+            hint = " ".join(part for part in (str(feeling or "").strip(), emoji if unicode_hint else "") if part)
+            reaction = await self._pick_reaction_emoji(target, hint, str(stream_id or "").strip())
+            if reaction is None and unicode_hint:
+                reaction = self._resolve_reaction_emoji(emoji, target.guild, self._client_manager.client)
             if reaction is None:
                 return {
                     "success": False,

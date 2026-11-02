@@ -179,6 +179,54 @@ def test_discord_react_does_not_need_unregistered_config_capability() -> None:
     assert result["success"] is True and selected == [emoji]
 
 
+def test_unicode_hint_prefers_guild_custom_emoji() -> None:
+    plugin_cls = _load_plugin_class()
+    plugin = plugin_cls.__new__(plugin_cls)
+    sent = []
+    picked = []
+    custom = SimpleNamespace(id=42, is_usable=lambda: True)
+
+    async def add_reaction(value):
+        sent.append(value)
+
+    async def find_message(*args):
+        return SimpleNamespace(guild=SimpleNamespace(emojis=[custom]), add_reaction=add_reaction)
+
+    async def pick(target, feeling, stream_id):
+        picked.append(feeling)
+        return custom
+
+    plugin._client_manager = SimpleNamespace(client=SimpleNamespace(emojis=[]))
+    plugin._thread_routing = SimpleNamespace(find_message=find_message)
+    plugin._pick_reaction_emoji = pick
+    result = asyncio.run(plugin.handle_discord_react(msg_id="55", group_id="10", emoji="🐟"))
+    assert result["success"] is True
+    assert sent == [custom], "伺服器有可用自訂表情時不應直接送 Unicode"
+    assert picked == ["🐟"], "Unicode 應作為情緒提示給選圖路徑"
+
+
+def test_unicode_hint_falls_back_when_custom_selection_fails() -> None:
+    plugin_cls = _load_plugin_class()
+    plugin = plugin_cls.__new__(plugin_cls)
+    sent = []
+    custom = SimpleNamespace(id=42, is_usable=lambda: True)
+
+    async def add_reaction(value):
+        sent.append(value)
+
+    async def find_message(*args):
+        return SimpleNamespace(guild=SimpleNamespace(emojis=[custom]), add_reaction=add_reaction)
+
+    async def pick(*args):
+        return None
+
+    plugin._client_manager = SimpleNamespace(client=SimpleNamespace(emojis=[]))
+    plugin._thread_routing = SimpleNamespace(find_message=find_message)
+    plugin._pick_reaction_emoji = pick
+    result = asyncio.run(plugin.handle_discord_react(msg_id="55", group_id="10", emoji="🐟"))
+    assert result["success"] is True and sent == ["🐟"]
+
+
 def test_emoji_grid_numbers_every_candidate() -> None:
     grid_module = _load_adapter_module("src.emoji_grid")
     from PIL import Image
