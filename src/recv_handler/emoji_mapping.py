@@ -197,21 +197,18 @@ def get_emoji_meaning(emoji_str: str, emoji_name: str = None) -> tuple[str, str]
     return (f"表情「{display_name}」", display_name)
 
 
-def format_reaction_for_ai(emoji_str: str, emoji_name: str, count: int, user_name: str) -> str:
-    """格式化reaction信息为AI可理解的文本
-    
+def format_reaction_for_ai(emoji_str: str, emoji_name: str, user_name: str, action: str = "添加了") -> str:
+    """格式化reaction信息为AI可理解的文本，保留原始表情写法以便模型用同一个表情回应
+
     Args:
-        emoji_str: emoji字符串
-        emoji_name: emoji名称
-        count: reaction数量
+        emoji_str: Unicode 表情字符或 <:名称:id> / <a:名称:id>
+        emoji_name: 自定义表情名称；Unicode 表情为空
         user_name: 用户名
-        
+        action: 「添加了」或「移除了」
+
     Returns:
         str: 格式化后的文本描述
     """
-    meaning, _ = get_emoji_meaning(emoji_str, emoji_name)
-
-    if count == 1:
-        return f"用户{user_name}添加了{meaning}表情"
-    else:
-        return f"用户{user_name}添加了{meaning}表情（共{count}个）"
+    known = UNICODE_EMOJI_MAPPING.get(emoji_str) or CUSTOM_EMOJI_MAPPING.get(emoji_name)
+    meaning = f"（{known[0]}）" if known else ""
+    return f"用户{user_name}{action}表情回应 {emoji_str}{meaning}"

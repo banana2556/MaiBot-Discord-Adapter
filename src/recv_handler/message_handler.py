@@ -250,16 +250,8 @@ class DiscordMessageHandler:
                 return
 
             if seg.type == "reply":
-                reply_id = self._normalize_text(seg.data)
-                if reply_id:
-                    serialized.append(
-                        {
-                            "type": "reply",
-                            "data": {
-                                "target_message_id": reply_id,
-                            },
-                        }
-                    )
+                if isinstance(seg.data, dict) and seg.data.get("target_message_id"):
+                    serialized.append({"type": "reply", "data": dict(seg.data)})
                 return
 
             if seg.type == "video":
@@ -337,10 +329,8 @@ class DiscordMessageHandler:
                 traits["is_emoji"] = True
                 return
 
-            if seg.type == "reply" and traits["reply_to"] is None:
-                reply_id = self._normalize_text(seg.data)
-                if reply_id:
-                    traits["reply_to"] = reply_id
+            if seg.type == "reply" and traits["reply_to"] is None and isinstance(seg.data, dict):
+                traits["reply_to"] = seg.data.get("target_message_id") or None
 
         walk(segment)
         return traits
@@ -517,11 +507,12 @@ class DiscordMessageHandler:
                         content_formats.append("emoji")
 
             if message.reference and message.reference.message_id:
-                reply_message_id = str(message.reference.message_id)
-                reply_context = await self._get_reply_context(message)
-                if reply_context:
-                    message_segments.insert(0, Seg(type="text", data=reply_context))
-                message_segments.append(Seg(type="reply", data=reply_message_id))
+                # 引用内容放进 reply 片段，由 MaiBot 渲染成「[回复了X的消息: ...]」；
+                # 不再往正文插前缀，否则存库后的正文会被下一次引用层层叠加
+                reply_data = await self._get_reply_context(
+                    message.channel, message.reference.message_id, message.reference.cached_message
+                )
+                message_segments.insert(0, Seg(type="reply", data=reply_data))
                 if "reply" not in content_formats:
                     content_formats.append("reply")
 
@@ -741,51 +732,40 @@ class DiscordMessageHandler:
 
         return segments if segments else [Seg(type="text", data=text)]
 
-    async def _get_reply_context(self, message: discord.Message) -> Optional[str]:
-        """拉取被引用消息的摘要字符串，用于插入回复链上下文（作者、截断正文与附件提示）。
+    async def _get_reply_context(
+        self, channel: Any, message_id: int, cached: Optional[discord.Message] = None
+    ) -> Dict[str, Any]:
+        """拉取被引用（或被回应）的消息，构造 Host reply 片段数据（作者与截断正文、附件提示）。
 
         Args:
-            message: 带 `reference` 的 `Message`。
+            channel: 目标消息所在频道，需支持 `fetch_message`。
+            message_id: 目标消息 ID。
+            cached: 已缓存的目标消息，有则不再请求。
 
         Returns:
-            可读的引用前缀字符串；无引用时返回 None；拉取失败时返回带消息 ID 的占位说明。
+            至少含 `target_message_id` 的字典；拉取失败时只有 ID，由 MaiBot 自行按 ID 查库。
         """
+        reply_data: Dict[str, Any] = {"target_message_id": str(message_id)}
         try:
-            if not message.reference or not message.reference.message_id:
-                return None
+            referenced_message = cached or await channel.fetch_message(message_id)
+        except Exception as exc:  # 拉不到引用不能连累整条消息
+            self._logger.warning(f"拉取被回复消息失败: {exc}")
+            return reply_data
 
-            referenced_message = None
-            try:
-                cached = getattr(message.reference, "cached_message", None)
-                if cached:
-                    referenced_message = cached
-                else:
-                    referenced_message = await message.channel.fetch_message(
-                        message.reference.message_id
-                    )
-            except (discord.NotFound, discord.Forbidden):
-                return f"[回复消息{message.reference.message_id}]，说："
-            except (discord.HTTPException, AttributeError):
-                return f"[回复消息{message.reference.message_id}]，说："
+        content = referenced_message.content or "[无文本内容]"
+        if len(content) > 100:
+            content = content[:100] + "..."
+        if referenced_message.attachments:
+            content += f"[包含{len(referenced_message.attachments)}个附件]"
 
-            if not referenced_message:
-                return f"[回复消息{message.reference.message_id}]，说："
-
-            author_name = referenced_message.author.display_name
-            author_id = referenced_message.author.id
-            is_bot = referenced_message.author.bot
-            content = referenced_message.content or "[无文本内容]"
-            if len(content) > 100:
-                content = content[:100] + "..."
-            if referenced_message.attachments:
-                content += f"[包含{len(referenced_message.attachments)}个附件]"
-
-            user_type = "机器人" if is_bot else "用户"
-            return f"[回复<{user_type}{author_name}:{author_id}>：{content}]，说："
-
-        except Exception as exc:
-            self._logger.error(f"处理回复上下文时发生错误: {exc}")
-            return f"[回复消息{message.reference.message_id}]，说："
+        author = referenced_message.author
+        reply_data.update(
+            target_message_content=content,
+            target_message_sender_id=str(author.id),
+            target_message_sender_nickname=author.display_name,
+            target_message_sender_cardname=getattr(author, "nick", None),
+        )
+        return reply_data
 
     async def _convert_reaction_to_maim(
         self,
@@ -829,20 +809,20 @@ class DiscordMessageHandler:
                 )
 
             emoji = payload.emoji
-            if emoji.is_unicode_emoji():
-                emoji_str = emoji.name
-                emoji_name = None
-            else:
-                emoji_str = f"<:{emoji.name}:{emoji.id}>"
-                emoji_name = emoji.name
+            # str() 给出可直接用于 discord_react 的写法：Unicode 字符或 <:名称:id> / <a:名称:id>
+            emoji_str = str(emoji)
+            emoji_name = None if emoji.is_unicode_emoji() else emoji.name
 
             emoji_meaning, emoji_display = get_emoji_meaning(emoji_str, emoji_name or "")
             action_text = "添加了" if event_type == "reaction_add" else "移除了"
-            description = format_reaction_for_ai(emoji_str, emoji_name or "", 1, user_display_name)
-            description = description.replace("添加了", action_text)
+            description = format_reaction_for_ai(emoji_str, emoji_name or "", user_display_name, action_text)
 
-            message_segments: List[Seg] = []
-            message_segments.append(Seg(type="text", data=description))
+            # 被回应的消息挂成 reply 片段，模型能看到「[引用消息]msg_id」，可直接拿去 discord_react
+            reacted_message = discord.utils.get(client.cached_messages, id=payload.message_id)
+            reply_data = await self._get_reply_context(
+                client.get_partial_messageable(payload.channel_id), payload.message_id, reacted_message
+            )
+            message_segments: List[Seg] = [Seg(type="reply", data=reply_data), Seg(type="text", data=description)]
 
             reaction_metadata = {
                 "event_type": event_type,
@@ -862,7 +842,7 @@ class DiscordMessageHandler:
             message_segments.append(Seg(type="reaction_event", data=reaction_metadata))
 
             format_info = FormatInfo(
-                content_format=["text", "reaction_event"],
+                content_format=["reply", "text", "reaction_event"],
                 accept_format=["text", "image", "emoji", "reply", "voice", "command", "file", "video", "reaction"],
             )
 
