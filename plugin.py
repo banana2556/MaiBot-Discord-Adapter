@@ -1219,8 +1219,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
     @Tool(
         "discord_react",
         description=(
-            "用一个表情回应一条 Discord 消息（reaction），可以代替文字回复：只想附和、笑一下、表示收到或惊讶时，"
-            "用它就够了，不必再 reply。不指定 emoji 时，工具会看着聊天上下文从本服务器表情里挑一个合适的。"
+            "用一個表情回應 Discord 訊息（reaction）。遇到適合輕輕附和、笑一下、表示收到、無語或驚訝的時刻，"
+            "可以比只回文字更自然，請偶爾主動選用；純反應時用它就夠了，不必再 reply。"
+            "需要說明、回答問題或安慰時仍優先用文字，不要每則都加表情。不指定 emoji 時會從本伺服器表情挑選。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -1321,8 +1322,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         usable = [item for item in target.guild.emojis if item.is_usable()] if target.guild else []
         if not usable or self._message_handler is None:
             return None
-        count = await self.ctx.config.get("emoji.emoji_send_num", 25)
-        candidates = random.sample(usable, min(len(usable), max(1, min(int(count or 25), 64))))
+        # 插件没有跨模块读取 emoji.emoji_send_num 的能力令牌；
+        # Discord reaction 只需少量候选，固定抽 25 张即可避免整条路径被拒绝。
+        candidates = random.sample(usable, min(len(usable), 25))
         # 动态表情取第一帧 png，视觉模型多半不收动图
         images = await asyncio.gather(
             *(

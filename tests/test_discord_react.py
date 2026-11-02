@@ -143,6 +143,42 @@ def test_discord_react_tool_picks_emoji_from_grid_like_send_emoji() -> None:
     asyncio.run(run())
 
 
+def test_discord_react_does_not_need_unregistered_config_capability() -> None:
+    plugin_cls = _load_plugin_class()
+    plugin = plugin_cls.__new__(plugin_cls)
+    selected = []
+
+    async def add_reaction(emoji):
+        selected.append(emoji)
+
+    async def forbidden_config_get(*args, **kwargs):
+        raise RuntimeError("[E_CAPABILITY_DENIED] 未注册能力令牌")
+
+    async def fetch(url, size=48):
+        return _png("green")
+
+    async def generate(prompt, task_name=""):
+        return {"success": True, "response": '{"emoji_index":1}'}
+
+    emoji = SimpleNamespace(id=42, is_usable=lambda: True)
+    target = SimpleNamespace(content="好耶", guild=SimpleNamespace(emojis=[emoji]), add_reaction=add_reaction)
+
+    async def find_message(*args):
+        return target
+
+    plugin._client_manager = SimpleNamespace(client=SimpleNamespace(emojis=[]))
+    plugin._thread_routing = SimpleNamespace(find_message=find_message)
+    plugin._message_handler = SimpleNamespace(_fetch_emoji_bytes=fetch)
+    plugin._ctx = SimpleNamespace(
+        config=SimpleNamespace(get=forbidden_config_get),
+        llm=SimpleNamespace(generate=generate),
+        message=SimpleNamespace(get_recent=lambda **kwargs: None),
+        logger=SimpleNamespace(warning=lambda *args: None, debug=lambda *args: None),
+    )
+    result = asyncio.run(plugin.handle_discord_react(msg_id="55", group_id="10"))
+    assert result["success"] is True and selected == [emoji]
+
+
 def test_emoji_grid_numbers_every_candidate() -> None:
     grid_module = _load_adapter_module("src.emoji_grid")
     from PIL import Image
