@@ -5,6 +5,7 @@ import binascii
 import io
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -72,7 +73,7 @@ class DiscordContentBuilder:
 
             if seg.type == "text":
                 if seg.data is not None:
-                    content_parts.append(str(seg.data))
+                    content_parts.append(self._render_emoji_names(str(seg.data), channel))
                 return
 
             if seg.type == "mention":
@@ -130,6 +131,22 @@ class DiscordContentBuilder:
         process(message_segment)
         content_text = "\n".join(part for part in content_parts if part)
         return (content_text if content_text else None, files, stickers)
+
+    # 前面紧贴 < 或字母数字的是已成形的 <:名称:id> / <a:名称:id>，不再处理
+    _EMOJI_NAME_PATTERN = re.compile(r"(?<![<A-Za-z0-9_]):([A-Za-z0-9_]{2,32}):(?!\d)")
+
+    @classmethod
+    def _render_emoji_names(cls, text: str, channel: Any) -> str:
+        """把模型写的 ``:名称:`` 换成目标服务器的原生表情；不认识的名称原样保留。"""
+        guild = getattr(channel, "guild", None)
+        if guild is None or ":" not in text:
+            return text
+
+        def replace(match: re.Match[str]) -> str:
+            emoji = discord.utils.get(guild.emojis, name=match.group(1))
+            return str(emoji) if emoji is not None and emoji.is_usable() else match.group(0)
+
+        return cls._EMOJI_NAME_PATTERN.sub(replace, text)
 
     def _resolve_native_emoji(
         self, data: str, client: Optional[discord.Client], channel: Any

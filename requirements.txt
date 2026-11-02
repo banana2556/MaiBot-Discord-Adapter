@@ -5,3 +5,4 @@ loguru>=0.7.0
 tomlkit
 aiofiles
 aiohttp>=3.9.0
+pillow

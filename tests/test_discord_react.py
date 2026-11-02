@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 import asyncio
+import base64
+import io
 
 import discord
 
@@ -48,13 +50,22 @@ def test_resolve_reaction_emoji_prefers_local_guild() -> None:
     client = SimpleNamespace(emojis=[SimpleNamespace(name="pepe"), remote])
 
     assert plugin_cls._resolve_reaction_emoji("👍", guild, client) == "👍"
-    assert plugin_cls._resolve_reaction_emoji("<:x:123>", guild, client) == "<:x:123>"
+    animated = plugin_cls._resolve_reaction_emoji("<a:x:1339569745908731994>", guild, client)
+    assert animated._as_reaction() == "x:1339569745908731994"
     assert plugin_cls._resolve_reaction_emoji(":pepe:", guild, client) is local
     assert plugin_cls._resolve_reaction_emoji("wave", guild, client) is remote
     assert plugin_cls._resolve_reaction_emoji(":thumbsup:", guild, client) is None
 
 
-def test_discord_react_tool_adds_reaction_or_lists_emojis() -> None:
+def _png(color: str) -> str:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (16, 16), color).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def test_discord_react_tool_picks_emoji_from_grid_like_send_emoji() -> None:
     plugin_cls = _load_plugin_class()
     plugin = plugin_cls.__new__(plugin_cls)
     added: list[object] = []
@@ -62,25 +73,81 @@ def test_discord_react_tool_adds_reaction_or_lists_emojis() -> None:
     async def add_reaction(emoji: object) -> None:
         added.append(emoji)
 
-    pepe = SimpleNamespace(name="pepe")
-    target = SimpleNamespace(guild=SimpleNamespace(emojis=[pepe]), add_reaction=add_reaction)
-    lookups: list[tuple] = []
+    emojis = [SimpleNamespace(id=i, name=f"e{i}", is_usable=lambda: True) for i in range(3)]
+    guild = SimpleNamespace(emojis=[*emojis, SimpleNamespace(id=9, name="locked", is_usable=lambda: False)])
+    target = SimpleNamespace(content="笑死", guild=guild, add_reaction=add_reaction)
+    requests: list[tuple[str, list]] = []
+    replies: list[dict] = []
 
     async def find_message(msg_id, group_id, user_id):
-        lookups.append((msg_id, group_id, user_id))
         return target
+
+    async def fetch(url, size=48):
+        return _png("red")
+
+    async def generate(prompt, task_name=""):
+        requests.append((task_name, prompt))
+        return replies.pop(0)
+
+    async def config_get(key, default=None):
+        assert key == "emoji.emoji_send_num"
+        return 25
+
+    async def get_recent(chat_id, limit=10):
+        assert (chat_id, limit) == ("stream-1", 12)
+        return [{"id": "m"}]
+
+    async def build_readable(messages):
+        return "A: 笑死"
 
     plugin._client_manager = SimpleNamespace(client=SimpleNamespace(emojis=[]))
     plugin._thread_routing = SimpleNamespace(find_message=find_message)
+    plugin._message_handler = SimpleNamespace(_fetch_emoji_bytes=fetch)
+    plugin._ctx = SimpleNamespace(
+        llm=SimpleNamespace(generate=generate),
+        config=SimpleNamespace(get=config_get),
+        message=SimpleNamespace(get_recent=get_recent, build_readable=build_readable),
+        logger=SimpleNamespace(warning=print, debug=print),
+    )
+
+    async def react(**kwargs):
+        return await plugin.handle_discord_react(msg_id="555", group_id="10", stream_id="stream-1", **kwargs)
 
     async def run() -> None:
-        result = await plugin.handle_discord_react(msg_id="555", emoji=":pepe:", group_id="10", stream_id="s")
-        assert result["success"] is True
-        assert added == [pepe]
-        assert lookups == [("555", "10", "")]
+        # 指定了表情就不问模型
+        assert (await react(emoji=":e0:"))["success"] is True
+        assert added == [emojis[0]] and requests == []
 
-        result = await plugin.handle_discord_react(msg_id="555", emoji=":thumbsup:", group_id="10")
-        assert result["success"] is False
-        assert ":pepe:" in result["error"]
+        # 不指定：emoji 任务没配好就退到 vlm，看拼图和聊天记录选序号
+        replies[:] = [{"success": False, "error": "未找到名为 '' 的模型"}, {"success": True, "response": '{"emoji_index":2,"reason":"笑"}'}]
+        result = await react(feeling="笑翻了")
+        assert result["success"] is True
+        assert [task for task, _ in requests] == ["emoji", "vlm"]
+        system, user = requests[-1][1]
+        assert "3 个位置" in system["content"] and "emoji_index" in system["content"]
+        text, image = user["content"]
+        assert "A: 笑死" in text["text"] and "笑翻了" in text["text"] and "候选总数: 3" in text["text"]
+        assert base64.b64decode(image["image_base64"]).startswith(b"\x89PNG")
+        picked = added[-1]
+        assert picked in emojis
+
+        # 回复不是 JSON 或序号越界：照 MaiBot 回退到第 1 张
+        for response in ("看不懂", '{"emoji_index": 99}'):
+            replies[:] = [{"success": True, "response": response}]
+            assert (await react())["success"] is True
+
+        # 两个任务都失败：让 planner 改填 Unicode
+        replies[:] = [{"success": False}, {"success": False}]
+        assert "Unicode" in (await react())["error"]
 
     asyncio.run(run())
+
+
+def test_emoji_grid_numbers_every_candidate() -> None:
+    grid_module = _load_adapter_module("src.emoji_grid")
+    from PIL import Image
+
+    assert grid_module.grid_shape(25) == (5, 5) and grid_module.grid_shape(3) == (2, 2)
+    grid = grid_module.build_numbered_grid([base64.b64decode(_png("red"))] * 3 + [b"broken"])
+    with Image.open(io.BytesIO(grid)) as image:
+        assert image.size == (2 * 136 - 8, 2 * 136 - 8)

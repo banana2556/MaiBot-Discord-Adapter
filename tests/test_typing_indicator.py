@@ -260,6 +260,7 @@ def test_sdk_hooks_start_and_stop_typing() -> None:
 async def _run_sdk_hooks_start_and_stop_typing() -> None:
     plugin_cls = _load_plugin_class()
     plugin = plugin_cls.__new__(plugin_cls)
+    plugin._discord_session_channels = {}
 
     calls: list[tuple[str, str | int]] = []
 
@@ -342,6 +343,7 @@ def test_inbound_discord_message_records_and_starts_typing() -> None:
 async def _run_inbound_discord_message_records_and_starts_typing() -> None:
     plugin_cls = _load_plugin_class()
     plugin = plugin_cls.__new__(plugin_cls)
+    plugin._discord_session_channels = {}
 
     calls: list[tuple[str, str | int]] = []
 
