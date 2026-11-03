@@ -25,7 +25,7 @@ from .runtime_state import DiscordRuntimeStateManager
 from .src.emoji_grid import build_numbered_grid, grid_shape
 from .src.native_emoji import NativeEmojiRegistry
 from .src.recv_handler.discord_client import DiscordClientManager, build_presence
-from .src.recv_handler.message_handler import DiscordMessageHandler
+from .src.recv_handler.message_handler import DiscordMessageHandler, quote_name
 from .src.send_handler.message_send_handler import DiscordContentBuilder
 from .src.send_handler.thread_send_handler import ThreadRoutingManager
 from .src.voice.tts.gptsovits_tts import GPTSoVITSTTSProvider
@@ -2000,8 +2000,8 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             user_info = UserInfo(
                 platform=platform_name,
                 user_id=str(member.id),
-                user_nickname=member.display_name,
-                user_cardname=getattr(member, "nick", None),
+                user_nickname=quote_name(member.display_name),
+                user_cardname=quote_name(getattr(member, "nick", None)),
             )
             voice_state = getattr(member, "voice", None)
             channel = getattr(voice_state, "channel", None)

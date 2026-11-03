@@ -28,7 +28,7 @@ def test_reply_goes_into_reply_segment_not_text() -> None:
         "target_message_id": "42",
         "target_message_content": "原文",
         "target_message_sender_id": "228",
-        "target_message_sender_nickname": "nelu meow",
+        "target_message_sender_nickname": "「nelu meow」",
         "target_message_sender_cardname": None,
     }
 
@@ -65,4 +65,4 @@ def test_reaction_points_at_reacted_message_with_usable_emoji() -> None:
         result = handler.build_host_message_dict(asyncio.run(handler._convert_reaction_to_maim("reaction_add", payload, client)))
         assert result["reply_to"] == "42"
         assert result["raw_message"][0]["data"]["target_message_content"] == "原文"
-        assert result["processed_plain_text"] == f"用户Daemi添加了表情回应 {expected}"
+        assert result["processed_plain_text"] == f"用户「Daemi」添加了表情回应 {expected}"

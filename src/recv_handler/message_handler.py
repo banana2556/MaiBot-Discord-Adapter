@@ -17,6 +17,22 @@ from maim_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Se
 from ..native_emoji import NativeEmojiRegistry
 from .emoji_mapping import format_reaction_for_ai, get_emoji_meaning
 
+# MaiBot 用 [名字] 切说话人、用「名字说：」拼回复上下文，ASCII 方括号会把名字切进正文
+_NAME_ESCAPES = str.maketrans({"[": "［", "]": "］", "「": "『", "」": "』"})
+
+
+def quote_name(name: Optional[str]) -> Optional[str]:
+    """把昵称包进「」，让模型分得清名字到哪里结束（昵称带空格或像一句话时尤其需要）。
+
+    Args:
+        name: Discord 昵称，可为空。
+
+    Returns:
+        「昵称」；空昵称返回 None。
+    """
+    name = (name or "").strip()
+    return f"「{name.translate(_NAME_ESCAPES)}」" if name else None
+
 
 class DiscordMessageHandler:
     """Discord 入站消息处理器。
@@ -682,13 +698,13 @@ class DiscordMessageHandler:
         """
         try:
             group_info, additional_config, _ = self._build_chat_context(message)
-            name = message.author.display_name
+            name = quote_name(message.author.display_name)
             if before is None:
                 notice = "message_delete"
-                text = f"[事件-消息撤回] {name} 撤回了消息：{self._summarize(message)}"
+                text = f"[事件-消息撤回] {name}撤回了消息：{self._summarize(message)}"
             else:
                 notice = "message_edit"
-                text = f"[事件-消息编辑] {name} 把消息「{self._summarize(before)}」改成了：{self._summarize(message, 300)}"
+                text = f"[事件-消息编辑] {name}把消息「{self._summarize(before)}」改成了：{self._summarize(message, 300)}"
             additional_config["discord_notice_type"] = notice
             message_info = BaseMessageInfo(
                 platform=self._platform_name,
@@ -716,13 +732,11 @@ class DiscordMessageHandler:
         Returns:
             包含平台、用户 ID、昵称与服务器卡片的 `UserInfo`。
         """
-        display_name = author.display_name
-        server_nickname = getattr(author, "nick", None)
         return UserInfo(
             platform=self._platform_name,
             user_id=str(author.id),
-            user_nickname=display_name,
-            user_cardname=server_nickname,
+            user_nickname=quote_name(author.display_name),
+            user_cardname=quote_name(getattr(author, "nick", None)),
         )
 
     def _process_mentions(self, message: discord.Message) -> Optional[Dict[str, Any]]:
@@ -797,7 +811,7 @@ class DiscordMessageHandler:
                         server_nick = getattr(user, "nick", None)
                         global_name = getattr(user, "global_name", None)
                         display = server_nick or global_name or user.display_name
-                        processed_text = processed_text.replace(pattern, f"@{display}")
+                        processed_text = processed_text.replace(pattern, f"@{quote_name(display)}")
 
         if message and message.role_mentions:
             for role in message.role_mentions:
@@ -905,8 +919,8 @@ class DiscordMessageHandler:
         reply_data.update(
             target_message_content=self._summarize(referenced_message),
             target_message_sender_id=str(author.id),
-            target_message_sender_nickname=author.display_name,
-            target_message_sender_cardname=getattr(author, "nick", None),
+            target_message_sender_nickname=quote_name(author.display_name),
+            target_message_sender_cardname=quote_name(getattr(author, "nick", None)),
         )
         return reply_data
 
@@ -938,8 +952,8 @@ class DiscordMessageHandler:
             user_info = UserInfo(
                 platform=self._platform_name,
                 user_id=str(user.id),
-                user_nickname=user_display_name,
-                user_cardname=server_nickname,
+                user_nickname=quote_name(user_display_name),
+                user_cardname=quote_name(server_nickname),
             )
 
             group_info = None
@@ -958,7 +972,7 @@ class DiscordMessageHandler:
 
             emoji_meaning, emoji_display = get_emoji_meaning(emoji_str, emoji_name or "")
             action_text = "添加了" if event_type == "reaction_add" else "移除了"
-            description = format_reaction_for_ai(emoji_str, emoji_name or "", user_display_name, action_text)
+            description = format_reaction_for_ai(emoji_str, emoji_name or "", quote_name(user_display_name), action_text)
 
             # 被回应的消息挂成 reply 片段，模型能看到「[引用消息]msg_id」，可直接拿去 discord_react
             reacted_message = discord.utils.get(client.cached_messages, id=payload.message_id)

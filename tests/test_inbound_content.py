@@ -121,11 +121,11 @@ def test_edit_and_delete_become_notices() -> None:
 
     edited = asyncio.run(handler.handle_message_change(after, before))
     assert edited["is_notify"] is True
-    assert edited["processed_plain_text"] == "[事件-消息编辑] Daemi 把消息「今天下雨」改成了：今天放晴"
+    assert edited["processed_plain_text"] == "[事件-消息编辑] 「Daemi」把消息「今天下雨」改成了：今天放晴"
     assert edited["message_info"]["group_info"]["group_id"] == "10"
 
     deleted = asyncio.run(handler.handle_message_change(_message(stickers=[SimpleNamespace(name="wave")])))
-    assert deleted["processed_plain_text"] == "[事件-消息撤回] Daemi 撤回了消息：[贴纸: wave]"
+    assert deleted["processed_plain_text"] == "[事件-消息撤回] 「Daemi」撤回了消息：[贴纸: wave]"
     assert deleted["message_id"].startswith("message_delete_99_")
 
     # 一般消息不是通知
@@ -153,7 +153,7 @@ def test_message_change_is_filtered_like_messages() -> None:
     asyncio.run(manager._on_message_change(_message(author=SimpleNamespace(id=1, display_name="bot", nick=None, bot=True))))
     allowed["ok"] = False
     asyncio.run(manager._on_message_change(_message(content="y")))
-    assert [item["processed_plain_text"] for item in routed] == ["[事件-消息撤回] Daemi 撤回了消息：x"]
+    assert [item["processed_plain_text"] for item in routed] == ["[事件-消息撤回] 「Daemi」撤回了消息：x"]
 
 
 def _tool_plugin(target: object):
@@ -192,3 +192,14 @@ def test_edit_and_delete_tools_only_touch_own_messages() -> None:
     asyncio.run(run())
     assert calls == [("edit", "打错字"), "delete"]
 
+
+
+def test_names_are_quoted_so_model_can_tell_them_from_content() -> None:
+    handler = _handler()
+    odd = SimpleNamespace(id=8, name="x", display_name="[GM] 小 明", nick="[GM] 小 明", global_name=None, bot=False, discriminator="0")
+    result = _convert(handler, _message(author=odd, content="<@8> 早", mentions=[odd]))
+    # ASCII 方括号会被 MaiBot 当成 [说话人] 的边界，换成全角；名字整体包进「」
+    assert result["message_info"]["user_info"]["user_nickname"] == "「［GM］ 小 明」"
+    assert result["message_info"]["user_info"]["user_cardname"] == "「［GM］ 小 明」"
+    assert result["processed_plain_text"] == "@「［GM］ 小 明」 早"
+    assert _convert(handler, _message(content="hi"))["message_info"]["user_info"]["user_cardname"] is None
