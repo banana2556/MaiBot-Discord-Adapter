@@ -3,7 +3,6 @@ import base64
 import json
 from pathlib import Path
 import random
-import re
 import time
 import tomllib
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Union, cast
@@ -1212,18 +1211,18 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         except (ValueError, TypeError) as exc:
             return {"success": False, "error": f"参数格式错误: {exc}"}
 
-    # Discord 自定义表情名只允许字母、数字、下划线，2 到 32 个字符
-    _CUSTOM_EMOJI_NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r":?([A-Za-z0-9_]{2,32}):?")
+    _EMOTE_FORMS: ClassVar[Dict[str, str]] = {"reaction": "表情回应", "emoji": "表情", "sticker": "贴图"}
 
     # ponytail: platforms 写死默认平台名，platform_name 改成别的名字时工具不会出现
+    # 按表情、单发表情、发贴图是同一种「不用文字回应」的情境，合成一个工具，只用 form 区分送出形式；
     # 首轮就可能用来代替回复，保持 visible；描述兼作检索索引，写进用户会说的动词和同义词
     @Tool(
-        "discord_react",
+        "discord_emote",
         description=(
-            "Discord 表情回應（reaction／react）：對一則訊息按表情、貼表情、加反應、表態，"
-            "可偶爾代替一句簡短文字，例如附和、按讚、笑一下、表示收到、驚訝、無語、心疼。"
-            "只傳目標訊息與想表達的情緒，工具會看聊天上下文與伺服器自訂表情圖自行挑選；"
-            "挑不到就不要送，不使用普通 Unicode emoji。需要回答問題或安慰時仍用文字，不要每則都加表情。"
+            "用 Discord 伺服器的原生表情代替文字回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張伺服器貼圖（sticker）。"
+            "適合附和、按讚、笑一下、表示收到、驚訝、無語、心疼這類不必說話的時候。"
+            "只傳目標訊息、想表達的情緒與形式，工具會看聊天上下文與候選圖自行挑選；挑不到就不要送，不使用普通 Unicode emoji。"
+            "需要回答問題或安慰時仍用文字，不要每則都加。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -1235,27 +1234,36 @@ class DiscordAdapterPlugin(MaiBotPlugin):
                 description="想表達的情緒或態度，如笑翻、認同、無語、心疼；只描述情緒，不指定表情符號。",
                 required=False,
             ),
+            ToolParameterInfo(
+                name="form",
+                param_type=ToolParamType.STRING,
+                description="送出形式：reaction 按在該訊息上（最輕），emoji 單獨發一個表情，sticker 發一張貼圖。預設 reaction。",
+                required=False,
+                enum_values=list(_EMOTE_FORMS),
+            ),
         ],
         platforms=DEFAULT_PLATFORM_NAME,
         visibility="visible",
     )
-    async def handle_discord_react(
+    async def handle_discord_emote(
         self,
         msg_id: str = "",
         feeling: str = "",
+        form: str = "reaction",
         group_id: str = "",
         user_id: str = "",
         stream_id: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Maisaka 工具：在当前会话中定位消息并添加 reaction；未指定表情时挑一个服务器表情。
+        """Maisaka 工具：挑一个服务器表情或贴图，按 form 加成 reaction 或单独发出。
 
         Args:
             msg_id: 目标消息 ID（Host 已把模型可见的别名换回原始 ID）。
-            feeling: 想表達的情緒提示；選圖模型會依上下文挑選伺服器自訂表情。
+            feeling: 想表達的情緒提示；選圖模型會依上下文挑選。
+            form: ``reaction`` 加在目标消息上，``emoji`` 单发服务器表情，``sticker`` 发服务器贴图。
             group_id: Host 注入的会话频道 ID。
             user_id: Host 注入的私聊对象用户 ID。
-            stream_id: Host 注入的聊天流 ID，用于取挑表情时的聊天上下文。
+            stream_id: Host 注入的聊天流 ID，用于取挑图时的聊天上下文，也是单发时的目标。
 
         Returns:
             dict: ``success`` 与给模型看的 ``content`` 或 ``error``。
@@ -1263,46 +1271,78 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         del kwargs
         if self._thread_routing is None or self._client_manager is None or self._client_manager.client is None:
             return {"success": False, "error": "Discord 客户端未就绪"}
+        form = str(form or "reaction").strip()
+        if form not in self._EMOTE_FORMS:
+            return {"success": False, "error": f"form 只能是 {'、'.join(self._EMOTE_FORMS)}"}
+        stream_id = str(stream_id or "").strip()
+        if form != "reaction" and not stream_id:
+            return {"success": False, "error": "缺少聊天流，无法单独发送"}
 
         target = await self._thread_routing.find_message(str(msg_id or "").strip(), group_id, user_id)
         if target is None:
             return {"success": False, "error": f"找不到消息 {msg_id}"}
 
-        reaction = await self._pick_reaction_emoji(target, str(feeling or "").strip(), str(stream_id or "").strip())
-        if reaction is None:
-            return {"success": False, "error": "本伺服器沒有可用自訂表情，或選圖失敗；沒有送出 reaction"}
+        label = self._EMOTE_FORMS[form]
+        picked = await self._pick_native_item(target, str(feeling or "").strip(), stream_id, stickers=form == "sticker")
+        if picked is None:
+            return {"success": False, "error": f"本伺服器沒有可用的{label}，或選圖失敗；沒有送出"}
+        item, image_b64 = picked
 
-        try:
-            await target.add_reaction(reaction)
-        except discord.HTTPException as exc:
-            return {"success": False, "error": f"添加表情回应 {reaction} 失败：{exc}"}
-        return {"success": True, "content": f"已用 {reaction} 回应消息 {msg_id}"}
+        if form == "reaction":
+            try:
+                await target.add_reaction(item)
+            except discord.HTTPException as exc:
+                return {"success": False, "error": f"添加表情回应 {item} 失败：{exc}"}
+            return {"success": True, "content": f"已用 {item} 回应消息 {msg_id}"}
+
+        # 走 Host 发送链路，消息才会进聊天记录
+        if form == "emoji":
+            sent = await self.ctx.send.text(str(item), stream_id, sync_to_maisaka_history=True)
+        else:
+            if self._native_emoji is None:
+                return {"success": False, "error": "原生贴图映射未就绪"}
+            # 发送链路只收表情图片：先登记这张图的哈希，出站时 DiscordContentBuilder 会还原成原生贴图
+            self._native_emoji.remember(image_b64, "sticker", item.id)
+            sent = await self.ctx.send.emoji(image_b64, stream_id, sync_to_maisaka_history=True)
+        if not sent:
+            return {"success": False, "error": f"发送{label}失败"}
+        return {"success": True, "content": f"已发送{label} {item if form == 'emoji' else item.name}"}
 
     _EMOJI_CONTEXT_LIMIT: ClassVar[int] = 12  # 与 MaiBot 表情子代理带的上下文条数一致
     _EMOJI_SELECTION_PROMPT: ClassVar[str] = (
-        "你需要根据上下文和当前语气，选择一个合适的表情来回应（reaction）指定的消息。\n"
-        "其中包含一张 {rows}x{columns} 的表情拼图，一共 {count} 个位置。\n"
+        "你需要根据上下文和当前语气，选择一个合适的{kind}来回应指定的消息。\n"
+        "其中包含一张 {rows}x{columns} 的{kind}拼图，一共 {count} 个位置。\n"
         "每张小图左上角都有一个较大的序号，范围是 1 到 {count}。\n"
-        "你需要从这 {count} 张图里选出最合适的一张表情。\n"
+        "你需要从这 {count} 张图里选出最合适的一张。\n"
         "你必须返回一个 JSON 对象（json object），不要输出任何 JSON 之外的内容。\n"
         '返回格式为：{{"emoji_index":1,"reason":"简短理由"}}'
     )
 
-    async def _pick_reaction_emoji(
-        self, target: discord.Message, feeling: str, stream_id: str
-    ) -> Optional[discord.Emoji]:
-        """照 MaiBot send_emoji：随机抽候选表情拼成带序号的图，让视觉模型看着聊天上下文挑一张。
+    async def _pick_native_item(
+        self, target: discord.Message, feeling: str, stream_id: str, *, stickers: bool = False
+    ) -> Optional[tuple[Union[discord.Emoji, discord.GuildSticker], str]]:
+        """照 MaiBot send_emoji：随机抽候选表情或贴图拼成带序号的图，让视觉模型看着聊天上下文挑一张。
 
         Args:
             target: 要回应的消息。
             feeling: planner 给的情绪提示，可为空。
             stream_id: 聊天流 ID，用于取最近的聊天记录。
+            stickers: True 时从服务器贴图里挑，否则从服务器自定义表情里挑。
 
         Returns:
-            选中的服务器表情；没有可用表情、图片全部下载失败或模型不可用时返回 None。
+            选中的表情或贴图及其图片 base64；没有可用候选、图片全部下载失败或模型不可用时返回 None。
         """
-        usable = [item for item in target.guild.emojis if item.is_usable()] if target.guild else []
-        if not usable or self._message_handler is None:
+        guild = target.guild
+        if guild is None or self._message_handler is None:
+            return None
+        if stickers:
+            # Lottie 贴图是动画 JSON，不是图片，视觉模型看不了
+            usable: List[Any] = [
+                item for item in guild.stickers if item.available and item.format != discord.StickerFormatType.lottie
+            ]
+        else:
+            usable = [item for item in guild.emojis if item.is_usable()]
+        if not usable:
             return None
         # 插件没有跨模块读取 emoji.emoji_send_num 的能力令牌；
         # Discord reaction 只需少量候选，固定抽 25 张即可避免整条路径被拒绝。
@@ -1310,7 +1350,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         # 动态表情取第一帧 png，视觉模型多半不收动图
         images = await asyncio.gather(
             *(
-                self._message_handler._fetch_emoji_bytes(f"{discord.Asset.BASE}/emojis/{item.id}.png", size=128)
+                self._message_handler._fetch_emoji_bytes(
+                    str(item.url) if stickers else f"{discord.Asset.BASE}/emojis/{item.id}.png", size=128
+                )
                 for item in candidates
             )
         )
@@ -1333,8 +1375,11 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             + (f"[想表达]{feeling}\n" if feeling else "")
             + f"[选择任务]\n候选总数: {len(loaded)}\n拼图布局: {rows}x{columns}\n请只输出 JSON。"
         )
+        system_prompt = self._EMOJI_SELECTION_PROMPT.format(
+            kind="贴图" if stickers else "表情", rows=rows, columns=columns, count=len(loaded)
+        )
         prompt = [
-            {"role": "system", "content": self._EMOJI_SELECTION_PROMPT.format(rows=rows, columns=columns, count=len(loaded))},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": [
@@ -1353,19 +1398,19 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             if result.get("success"):
                 break
         else:
-            self.ctx.logger.warning(f"挑选表情回应失败：{result.get('error')}")
+            self.ctx.logger.warning(f"挑选表情失败：{result.get('error')}")
             return None
 
         response = str(result.get("response") or "")
         try:
             index = int(json.loads(response[response.find("{") : response.rfind("}") + 1])["emoji_index"])
         except (ValueError, KeyError, TypeError):
-            self.ctx.logger.warning("選圖模型未回傳有效 emoji_index；不送 reaction")
+            self.ctx.logger.warning("選圖模型未回傳有效 emoji_index；不送出")
             return None
         if not 1 <= index <= len(loaded):
-            self.ctx.logger.warning(f"選圖模型回傳超出候選範圍的序號 {index}；不送 reaction")
+            self.ctx.logger.warning(f"選圖模型回傳超出候選範圍的序號 {index}；不送出")
             return None
-        return loaded[index - 1][0]
+        return loaded[index - 1]
 
     # 以下工具首轮用不到，设为 deferred：名称统一 discord_ 前缀，tool_search 搜 discord 时会一起命中；
     # MaiBot 的检索按子串匹配，描述里简繁两种写法的常用说法都放进去
