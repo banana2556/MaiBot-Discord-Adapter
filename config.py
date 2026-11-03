@@ -361,11 +361,44 @@ class DiscordFilterConfig(PluginConfigBase):
     )
 
 
+class DiscordPresenceConfig(PluginConfigBase):
+    """机器人在线状态配置。"""
+
+    __ui_label__: ClassVar[str] = "在线状态"
+    __ui_order__: ClassVar[int] = 5
+
+    status: Literal["online", "idle", "dnd", "invisible"] = Field(
+        default="online",
+        description="在线状态：online=在线, idle=闲置, dnd=请勿打扰, invisible=隐身。",
+        json_schema_extra={"label": "在线状态", "order": 0},
+    )
+    activity_type: Literal["custom", "playing", "listening", "watching", "competing"] = Field(
+        default="custom",
+        description="状态文字的显示方式：custom=自定义状态, playing=正在玩, listening=正在听, watching=正在看, competing=正在参加。",
+        json_schema_extra={"label": "显示方式", "order": 1},
+    )
+    activity_text: str = Field(
+        default="",
+        description="显示在机器人名字下方的状态文字。",
+        json_schema_extra={
+            "label": "状态文字",
+            "hint": "留空不显示；最多 128 字。custom 直接显示文字，其他方式显示成「正在玩 / 正在听… + 文字」。",
+            "order": 2,
+            "placeholder": "例如：在想晚餐吃什么",
+        },
+    )
+
+    @field_validator("activity_text", mode="before")
+    @classmethod
+    def _normalize_activity_text(cls, value: Any) -> str:
+        return _normalize_string(value)[:128]
+
+
 class DiscordVoiceConfig(PluginConfigBase):
     """语音功能配置。"""
 
     __ui_label__: ClassVar[str] = "语音功能"
-    __ui_order__: ClassVar[int] = 5
+    __ui_order__: ClassVar[int] = 6
 
     enabled: bool = Field(
         default=False,
@@ -475,7 +508,7 @@ class SiliconFlowTTSConfig(PluginConfigBase):
     """SiliconFlow TTS 配置。"""
 
     __ui_label__: ClassVar[str] = "SiliconFlow TTS"
-    __ui_order__: ClassVar[int] = 6
+    __ui_order__: ClassVar[int] = 7
 
     api_key: str = Field(
         default="",
@@ -541,7 +574,7 @@ class GPTSoVITSConfig(PluginConfigBase):
     """GPT-SoVITS TTS 配置。"""
 
     __ui_label__: ClassVar[str] = "GPT-SoVITS TTS"
-    __ui_order__: ClassVar[int] = 7
+    __ui_order__: ClassVar[int] = 8
 
     api_base: str = Field(
         default="http://127.0.0.1:8000",
@@ -616,7 +649,7 @@ class MiniMaxTTSConfig(PluginConfigBase):
     """MiniMax TTS 配置。"""
 
     __ui_label__: ClassVar[str] = "MiniMax TTS"
-    __ui_order__: ClassVar[int] = 8
+    __ui_order__: ClassVar[int] = 9
 
     api_key: str = Field(
         default="",
@@ -698,7 +731,7 @@ class SiliconFlowSTTConfig(PluginConfigBase):
     """SiliconFlow STT (SenseVoice) 配置。"""
 
     __ui_label__: ClassVar[str] = "SiliconFlow STT"
-    __ui_order__: ClassVar[int] = 9
+    __ui_order__: ClassVar[int] = 10
 
     api_key: str = Field(
         default="",
@@ -730,7 +763,7 @@ class AliyunSTTConfig(PluginConfigBase):
     """阿里云 STT 配置。"""
 
     __ui_label__: ClassVar[str] = "阿里云语音识别"
-    __ui_order__: ClassVar[int] = 11
+    __ui_order__: ClassVar[int] = 12
 
     access_key_id: str = Field(
         default="",
@@ -770,7 +803,7 @@ class TencentSTTConfig(PluginConfigBase):
     """腾讯云 STT 配置。"""
 
     __ui_label__: ClassVar[str] = "腾讯云语音识别"
-    __ui_order__: ClassVar[int] = 12
+    __ui_order__: ClassVar[int] = 13
 
     secret_id: str = Field(
         default="",
@@ -814,6 +847,7 @@ class DiscordPluginSettings(PluginConfigBase):
     chat: DiscordChatConfig = Field(default_factory=DiscordChatConfig)
     platform: DiscordPlatformConfig = Field(default_factory=DiscordPlatformConfig)
     filters: DiscordFilterConfig = Field(default_factory=DiscordFilterConfig)
+    presence: DiscordPresenceConfig = Field(default_factory=DiscordPresenceConfig)
     voice: DiscordVoiceConfig = Field(default_factory=DiscordVoiceConfig)
     siliconflow_tts: SiliconFlowTTSConfig = Field(default_factory=SiliconFlowTTSConfig)
     gptsovits_tts: GPTSoVITSConfig = Field(default_factory=GPTSoVITSConfig)

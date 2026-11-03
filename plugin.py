@@ -24,7 +24,7 @@ from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
 from .src.emoji_grid import build_numbered_grid, grid_shape
 from .src.native_emoji import NativeEmojiRegistry
-from .src.recv_handler.discord_client import DiscordClientManager
+from .src.recv_handler.discord_client import DiscordClientManager, build_presence
 from .src.recv_handler.message_handler import DiscordMessageHandler
 from .src.send_handler.message_send_handler import DiscordContentBuilder
 from .src.send_handler.thread_send_handler import ThreadRoutingManager
@@ -1448,6 +1448,87 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             return {"success": False, "error": f"收回表情回应失败：{exc}"}
         return {"success": True, "content": f"已收回消息 {msg_id} 上的 {' '.join(str(emoji) for emoji in mine)}"}
 
+    async def _find_own_message(
+        self, msg_id: str, group_id: str, user_id: str
+    ) -> tuple[Optional[discord.Message], Optional[str]]:
+        """找出 bot 自己发的消息；找不到或不是自己的时返回给模型看的错误。"""
+        if self._thread_routing is None or self._client_manager is None or self._client_manager.client is None:
+            return None, "Discord 客户端未就绪"
+        target = await self._thread_routing.find_message(str(msg_id or "").strip(), group_id, user_id)
+        if target is None:
+            return None, f"找不到消息 {msg_id}"
+        if target.author.id != self._client_manager.client.user.id:
+            return None, f"消息 {msg_id} 不是自己发的，只能改或删自己的发言"
+        return target, None
+
+    @Tool(
+        "discord_message_edit",
+        description=(
+            "修改、編輯自己在 Discord 已經發出的一則訊息內容，例如打錯字、說錯話想更正、補充內容；只能改自己的發言。"
+            "（改訊息、改消息、编辑消息、修改发言、改错字、更正、订正、edit）"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="msg_id", param_type=ToolParamType.STRING, description="要修改的自己那則訊息的 msg_id。", required=True
+            ),
+            ToolParameterInfo(
+                name="content",
+                param_type=ToolParamType.STRING,
+                description="改好後的完整訊息內容，會整則取代原本的文字。",
+                required=True,
+            ),
+        ],
+        platforms=DEFAULT_PLATFORM_NAME,
+        visibility="deferred",
+    )
+    async def handle_discord_message_edit(
+        self, msg_id: str = "", content: str = "", group_id: str = "", user_id: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
+        """把 bot 自己的一则消息整则改成新内容。"""
+        del kwargs
+        content = str(content or "").strip()
+        if not content:
+            return {"success": False, "error": "缺少修改后的内容；想整则删掉请用 discord_message_delete"}
+        if len(content) > 2000:
+            return {"success": False, "error": "Discord 单则消息最多 2000 字"}
+        target, error = await self._find_own_message(msg_id, group_id, user_id)
+        if target is None:
+            return {"success": False, "error": error}
+        try:
+            await target.edit(content=content)
+        except discord.HTTPException as exc:
+            return {"success": False, "error": f"修改消息失败：{exc}"}
+        return {"success": True, "content": f"已把消息 {msg_id} 改成：{content}"}
+
+    @Tool(
+        "discord_message_delete",
+        description=(
+            "刪除、收回、撤回自己在 Discord 已經發出的一則訊息，例如說錯話、發錯頻道或不該說的內容；只能刪自己的發言。"
+            "（删除消息、刪訊息、撤回消息、收回发言、撤回、收回、delete）"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="msg_id", param_type=ToolParamType.STRING, description="要刪除的自己那則訊息的 msg_id。", required=True
+            ),
+        ],
+        platforms=DEFAULT_PLATFORM_NAME,
+        visibility="deferred",
+    )
+    async def handle_discord_message_delete(
+        self, msg_id: str = "", group_id: str = "", user_id: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
+        """删除 bot 自己的一则消息。"""
+        del kwargs
+        target, error = await self._find_own_message(msg_id, group_id, user_id)
+        if target is None:
+            return {"success": False, "error": error}
+        summary = (target.content or "")[:50]
+        try:
+            await target.delete()
+        except discord.HTTPException as exc:
+            return {"success": False, "error": f"删除消息失败：{exc}"}
+        return {"success": True, "content": f"已删除消息 {msg_id}（{summary}）"}
+
     @Tool(
         "discord_voice_join",
         description=(
@@ -1554,6 +1635,27 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             return result
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
             return {"success": False, "error": str(exc)}
+
+    @API("adapter.discord.presence.set", description="设置 Discord 机器人的状态文字与在线状态", version="1", public=True)
+    async def set_presence(
+        self, text: str = "", activity_type: str = "custom", status: str = "online"
+    ) -> Dict[str, Any]:
+        """给其他插件或之后的功能改机器人状态；改到配置重载前，重载后回到配置里的内容。
+
+        Args:
+            text: 状态文字，空字符串清掉活动，最多 128 字。
+            activity_type: ``custom`` / ``playing`` / ``listening`` / ``watching`` / ``competing``。
+            status: ``online`` / ``idle`` / ``dnd`` / ``invisible``。
+        """
+        if self._client_manager is None:
+            return {"success": False, "error": "Discord 客户端未就绪"}
+        try:
+            await self._client_manager.set_presence(text, activity_type, status)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        except discord.HTTPException as exc:
+            return {"success": False, "error": f"设置状态失败：{exc}"}
+        return {"success": True}
 
     MAX_MESSAGE_LENGTH: int = 2000
 
@@ -1823,6 +1925,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             typing_indicator_enabled=settings.chat.show_typing_indicator,
             typing_indicator_delay_ms=settings.chat.typing_indicator_delay_ms,
             typing_indicator_timeout_sec=settings.chat.typing_indicator_timeout_sec,
+            presence=build_presence(
+                settings.presence.activity_text, settings.presence.activity_type, settings.presence.status
+            ),
         )
 
         self._voice_manager = self._build_voice_manager(settings)

@@ -3,6 +3,7 @@
 将 Discord 消息/事件转换为 Host 侧 message_dict 结构。
 """
 
+import asyncio
 import base64
 import re
 import time
@@ -181,7 +182,7 @@ class DiscordMessageHandler:
             "is_emoji": traits["is_emoji"],
             "is_picture": traits["is_picture"],
             "is_command": bool(processed_plain_text) and processed_plain_text.lstrip().startswith("/"),
-            "is_notify": False,
+            "is_notify": bool(additional_config.get("discord_notice_type")),
             "session_id": "",
             "processed_plain_text": processed_plain_text,
             "display_message": processed_plain_text,
@@ -360,13 +361,16 @@ class DiscordMessageHandler:
             return True
         return False
 
-    async def _fetch_emoji_bytes(self, url: str, size: int = 48) -> Optional[str]:
-        """下载自定义表情或贴纸的图片，返回 base64；超过大小上限或失败时返回 None。"""
+    async def _fetch_emoji_bytes(self, url: str, size: Optional[int] = 48) -> Optional[str]:
+        """下载自定义表情、贴纸或嵌入预览图，返回 base64；超过大小上限或失败时返回 None。
+
+        ``size`` 为 None 时不加尺寸参数（非表情 CDN 的图片）。
+        """
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             # Discord CDN 的表情与贴纸支持 ?size= 指定边长（16 到 4096 的 2 的幂），
             # 直接取小图，避免下载原图再上传时比原生表情大。
-            request_url = url + (("&" if "?" in url else "?") + f"size={size}")
+            request_url = url if size is None else url + (("&" if "?" in url else "?") + f"size={size}")
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(request_url) as resp:
                     if resp.status != 200:
@@ -383,6 +387,80 @@ class DiscordMessageHandler:
             self._logger.debug(f"下载表情或贴纸失败: {exc}")
             return None
 
+    def _build_chat_context(
+        self, message: discord.Message
+    ) -> tuple[Optional[GroupInfo], Dict[str, Any], Optional[Dict[str, Any]]]:
+        """按消息所在频道构造 `GroupInfo`、路由用的 additional_config，以及继承子区记忆时的子区路由信息。
+
+        Args:
+            message: Discord `Message`。
+
+        Returns:
+            `(GroupInfo 或 None（私聊）, additional_config, thread_context 数据或 None)`。
+        """
+        group_info = None
+        additional_config: Dict[str, Any] = {"platform_io_target_channel_id": str(message.channel.id)}
+        thread_context: Optional[Dict[str, Any]] = None
+        if not message.guild:
+            return group_info, additional_config, thread_context
+
+        is_thread = hasattr(message.channel, "parent") and message.channel.parent is not None
+        if is_thread:
+            thread_name = message.channel.name
+            thread_id = str(message.channel.id)
+            parent_channel_id = str(message.channel.parent.id)
+            parent_channel_name = (
+                message.channel.parent.name
+                if hasattr(message.channel.parent, "name")
+                else f"频道{message.channel.parent.id}"
+            )
+            inherit = getattr(self._chat_config, "inherit_channel_memory", True)
+            additional_config.update(
+                {
+                    "discord_is_thread": True,
+                    "discord_inherit_channel_memory": inherit,
+                    "thread_id": thread_id,
+                    "original_thread_id": thread_id,
+                    "parent_channel_id": parent_channel_id,
+                    "discord_thread_name": thread_name or "",
+                }
+            )
+
+            if inherit:
+                group_name = f"{parent_channel_name} @ {message.guild.name}"
+                group_info = GroupInfo(
+                    platform=self._platform_name,
+                    group_id=parent_channel_id,
+                    group_name=f"[当前子区: {thread_name}] {group_name}",
+                )
+                thread_context = {
+                    "original_thread_id": thread_id,
+                    "thread_name": thread_name,
+                    "parent_channel_id": parent_channel_id,
+                    "inherit_memory": True,
+                }
+            else:
+                group_info = GroupInfo(
+                    platform=self._platform_name,
+                    group_id=thread_id,
+                    group_name=f"{thread_name} [{parent_channel_name}] @ {message.guild.name}",
+                )
+            return group_info, additional_config, thread_context
+
+        channel_name = message.channel.name if hasattr(message.channel, "name") else f"频道{message.channel.id}"
+        group_info = GroupInfo(
+            platform=self._platform_name,
+            group_id=str(message.channel.id),
+            group_name=f"{channel_name} @ {message.guild.name}",
+        )
+        if isinstance(message.channel, discord.VoiceChannel):
+            additional_config["discord_channel_type"] = "voice"
+        elif isinstance(message.channel, discord.StageChannel):
+            additional_config["discord_channel_type"] = "stage"
+        elif isinstance(message.channel, discord.TextChannel):
+            additional_config["discord_channel_type"] = "text"
+        return group_info, additional_config, thread_context
+
     async def _convert_discord_to_maim(self, message: discord.Message) -> Optional[MessageBase]:
         """将单条 Discord 消息装配为 `MessageBase`（用户、群组、分段、引用与线程上下文）。
 
@@ -394,142 +472,38 @@ class DiscordMessageHandler:
         """
         try:
             user_info = self._build_user_info(message.author)
-
-            group_info = None
-            additional_config: Dict[str, Any] = {}
-            additional_config["platform_io_target_channel_id"] = str(message.channel.id)
-            thread_context_marker = False
-            original_thread_id: Optional[str] = None
-            thread_name: Optional[str] = None
-
-            if message.guild:
-                is_thread = hasattr(message.channel, "parent") and message.channel.parent is not None
-
-                if is_thread:
-                    thread_name = message.channel.name
-                    thread_id = str(message.channel.id)
-                    parent_channel_id = str(message.channel.parent.id)
-                    parent_channel_name = (
-                        message.channel.parent.name
-                        if hasattr(message.channel.parent, "name")
-                        else f"频道{message.channel.parent.id}"
-                    )
-                    inherit = getattr(self._chat_config, "inherit_channel_memory", True)
-                    additional_config.update(
-                        {
-                            "discord_is_thread": True,
-                            "discord_inherit_channel_memory": inherit,
-                            "thread_id": thread_id,
-                            "original_thread_id": thread_id,
-                            "parent_channel_id": parent_channel_id,
-                            "discord_thread_name": thread_name or "",
-                        }
-                    )
-
-                    if inherit:
-                        group_id = str(message.channel.parent.id)
-                        group_name = f"{parent_channel_name} @ {message.guild.name}"
-                        actual_context = f"[当前子区: {thread_name}] {group_name}"
-                        group_info = GroupInfo(
-                            platform=self._platform_name,
-                            group_id=group_id,
-                            group_name=actual_context,
-                        )
-                        thread_context_marker = True
-                        original_thread_id = thread_id
-                    else:
-                        group_id = thread_id
-                        group_name = f"{thread_name} [{parent_channel_name}] @ {message.guild.name}"
-                        group_info = GroupInfo(
-                            platform=self._platform_name,
-                            group_id=group_id,
-                            group_name=group_name,
-                        )
-                else:
-                    channel_name = (
-                        message.channel.name
-                        if hasattr(message.channel, "name")
-                        else f"频道{message.channel.id}"
-                    )
-                    group_name = f"{channel_name} @ {message.guild.name}"
-                    group_info = GroupInfo(
-                        platform=self._platform_name,
-                        group_id=str(message.channel.id),
-                        group_name=group_name,
-                    )
-                    if isinstance(message.channel, discord.VoiceChannel):
-                        additional_config["discord_channel_type"] = "voice"
-                    elif isinstance(message.channel, discord.StageChannel):
-                        additional_config["discord_channel_type"] = "stage"
-                    elif isinstance(message.channel, discord.TextChannel):
-                        additional_config["discord_channel_type"] = "text"
+            group_info, additional_config, thread_context = self._build_chat_context(message)
 
             message_segments: List[Seg] = []
-            content_formats: List[str] = []
-
             mentions_info = self._process_mentions(message)
             if mentions_info:
                 message_segments.append(Seg(type="mention", data=mentions_info))
-                if "mention" not in content_formats:
-                    content_formats.append("mention")
+            message_segments.extend(await self._build_content_segments(message, message))
 
-            if message.content:
-                processed = await self._process_text_with_emojis(message.content, message)
-                message_segments.extend(processed)
-                for seg in processed:
-                    if seg.type not in content_formats:
-                        content_formats.append(seg.type)
-
-            for attachment in message.attachments:
-                if attachment.content_type and attachment.content_type.startswith("image/"):
-                    try:
-                        image_data = await attachment.read()
-                        image_base64 = base64.b64encode(image_data).decode("utf-8")
-                        message_segments.append(Seg(type="image", data=image_base64))
-                        content_formats.append("image")
-                    except (discord.HTTPException, discord.NotFound, OSError) as exc:
-                        self._logger.error(f"处理图片附件失败: {exc}")
-
-            for sticker in message.stickers:
-                # 图片在 MaiBot 里只显示为「[表情包: 描述]」，附上名称让模型分得清是贴纸（不能用来回应）
-                message_segments.append(Seg(type="text", data=f"[贴纸: {sticker.name}]"))
-                if "text" not in content_formats:
-                    content_formats.append("text")
-                sticker_b64 = None
-                sticker_url = getattr(sticker, "url", None)
-                if sticker_url:
-                    sticker_b64 = await self._fetch_emoji_bytes(str(sticker_url))
-                if sticker_b64:
-                    if self._native_emoji is not None:
-                        self._native_emoji.remember(sticker_b64, "sticker", sticker.id)
-                    message_segments.append(Seg(type="emoji", data=sticker_b64))
-                    if "emoji" not in content_formats:
-                        content_formats.append("emoji")
-
-            if message.reference and message.reference.message_id:
+            reference = message.reference
+            if reference and reference.type == discord.MessageReferenceType.forward:
+                # 转发的消息本身没有正文，内容都在快照里
+                for snapshot in message.message_snapshots:
+                    snapshot_segments = await self._build_content_segments(snapshot)
+                    if snapshot_segments:
+                        message_segments.append(Seg(type="text", data="[转发的消息]"))
+                        message_segments.extend(snapshot_segments)
+            elif reference and reference.message_id:
                 # 引用内容放进 reply 片段，由 MaiBot 渲染成「[回复了X的消息: ...]」；
                 # 不再往正文插前缀，否则存库后的正文会被下一次引用层层叠加
                 reply_data = await self._get_reply_context(
-                    message.channel, message.reference.message_id, message.reference.cached_message
+                    message.channel, reference.message_id, reference.cached_message
                 )
                 message_segments.insert(0, Seg(type="reply", data=reply_data))
-                if "reply" not in content_formats:
-                    content_formats.append("reply")
-
-            if thread_context_marker and original_thread_id:
-                thread_routing_info = {
-                    "original_thread_id": original_thread_id,
-                    "thread_name": thread_name,
-                    "parent_channel_id": str(message.channel.parent.id),
-                    "inherit_memory": True,
-                }
-                message_segments.append(Seg(type="thread_context", data=thread_routing_info))
 
             if not message_segments:
                 return None
+            content_formats = list(dict.fromkeys(seg.type for seg in message_segments))
+            if thread_context:
+                message_segments.append(Seg(type="thread_context", data=thread_context))
 
             format_info = FormatInfo(
-                content_format=content_formats if content_formats else ["text"],
+                content_format=content_formats,
                 accept_format=["text", "image", "emoji", "reply", "voice", "command", "file", "video"],
             )
 
@@ -540,7 +514,7 @@ class DiscordMessageHandler:
                 user_info=user_info,
                 group_info=group_info,
                 format_info=format_info,
-                additional_config=additional_config or None,
+                additional_config=additional_config,
             )
 
             if len(message_segments) == 1:
@@ -556,6 +530,181 @@ class DiscordMessageHandler:
 
         except Exception as exc:
             self._logger.error(f"转换 Discord 消息时发生错误: {exc}")
+            return None
+
+    async def _build_content_segments(self, source: Any, message: Optional[discord.Message] = None) -> List[Seg]:
+        """把正文、附件、贴纸、嵌入内容和投票转成分段。
+
+        Args:
+            source: `Message`，或转发消息里的 `MessageSnapshot`。
+            message: 用来把 ``<@id>`` 换成名字的原消息；快照只有原始 ID，不传。
+
+        Returns:
+            按出现顺序排好的 `Seg` 列表，可能为空。
+        """
+        segments: List[Seg] = []
+        if source.content:
+            segments.extend(await self._process_text_with_emojis(source.content, message))
+
+        for attachment in source.attachments:
+            segment = await self._attachment_segment(attachment)
+            if segment is not None:
+                segments.append(segment)
+
+        for sticker in source.stickers:
+            # 图片在 MaiBot 里只显示为「[表情包: 描述]」，附上名称让模型分得清是贴纸
+            segments.append(Seg(type="text", data=f"[贴纸: {sticker.name}]"))
+            sticker_url = getattr(sticker, "url", None)
+            sticker_b64 = await self._fetch_emoji_bytes(str(sticker_url)) if sticker_url else None
+            if sticker_b64:
+                if self._native_emoji is not None:
+                    self._native_emoji.remember(sticker_b64, "sticker", sticker.id)
+                segments.append(Seg(type="emoji", data=sticker_b64))
+
+        for embed in source.embeds:
+            segment = await self._embed_segment(embed)
+            if segment is not None:
+                segments.append(segment)
+
+        poll = getattr(source, "poll", None)
+        if poll is not None:
+            answers = " / ".join(answer.text or "" for answer in poll.answers)
+            mode = "，可多选" if poll.multiple else ""
+            segments.append(Seg(type="text", data=f"[投票: {poll.question}｜选项: {answers}{mode}]"))
+        return segments
+
+    async def _attachment_segment(self, attachment: discord.Attachment) -> Optional[Seg]:
+        """图片和语音消息读成二进制分段（语音由 MaiBot 转写），其余附件只留类型和文件名。"""
+        content_type = attachment.content_type or ""
+        if content_type.startswith("image/"):
+            kind = "image"
+        elif attachment.is_voice_message():
+            kind = "voice"
+        else:
+            label = "视频" if content_type.startswith("video/") else "音频" if content_type.startswith("audio/") else "文件"
+            return Seg(type="text", data=f"[{label}: {attachment.filename}]")
+
+        try:
+            data = await attachment.read()
+        except (discord.HTTPException, discord.NotFound, OSError) as exc:
+            self._logger.error(f"读取附件 {attachment.filename} 失败: {exc}")
+            return None
+        if kind == "voice":
+            data = await self._voice_message_to_wav(data)
+        return Seg(type=kind, data=base64.b64encode(data).decode("utf-8"))
+
+    async def _voice_message_to_wav(self, data: bytes) -> bytes:
+        """Discord 语音消息是 ogg/opus，MaiBot 转写时一律当 audio.wav 上传，先转成 16kHz 单声道 wav。
+
+        没有 FFmpeg 或转换失败时原样交出，由转写服务自己判断能不能认。
+        """
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-i", "pipe:0", "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            wav, stderr = await process.communicate(data)
+        except (FileNotFoundError, NotImplementedError) as exc:
+            self._logger.warning(f"无法启动 FFmpeg 转换语音消息，原样交给转写: {exc}")
+            return data
+        if process.returncode != 0 or not wav:
+            self._logger.warning(f"FFmpeg 转换语音消息失败，原样交给转写: {stderr.decode(errors='ignore')[-200:]}")
+            return data
+        return wav
+
+    _EMBED_TEXT_LIMIT = 300
+
+    async def _embed_segment(self, embed: discord.Embed) -> Optional[Seg]:
+        """动图（Tenor/Giphy）和图片链接只有预览图，当成表情/图片给模型看；其余取标题、描述和字段转成文字。"""
+        if embed.type in ("gifv", "image"):
+            preview = embed.thumbnail.proxy_url or embed.thumbnail.url or embed.image.proxy_url or embed.image.url
+            image_b64 = await self._fetch_emoji_bytes(str(preview), size=None) if preview else None
+            if image_b64:
+                return Seg(type="emoji" if embed.type == "gifv" else "image", data=image_b64)
+            return None
+
+        lines = [
+            embed.provider.name,
+            embed.author.name,
+            embed.title,
+            embed.description,
+            *(f"{field.name}: {field.value}" for field in embed.fields),
+            embed.footer.text,
+        ]
+        text = "\n".join(str(line) for line in lines if line)
+        if not text:
+            return None
+        if len(text) > self._EMBED_TEXT_LIMIT:
+            text = text[: self._EMBED_TEXT_LIMIT] + "..."
+        label = "卡片" if embed.type == "rich" else "链接预览"
+        return Seg(type="text", data=f"[{label}: {text}]")
+
+    @staticmethod
+    def _summarize(message: Any, limit: int = 100) -> str:
+        """给引用和编辑、撤回通知用的一行摘要；没有正文时说明是转发、贴纸、投票还是卡片。"""
+        text = message.content or ""
+        if not text:
+            snapshots = getattr(message, "message_snapshots", None) or []
+            embeds = getattr(message, "embeds", None) or []
+            stickers = getattr(message, "stickers", None) or []
+            poll = getattr(message, "poll", None)
+            if snapshots:
+                text = f"[转发的消息] {snapshots[0].content}".strip()
+            elif stickers:
+                text = f"[贴纸: {stickers[0].name}]"
+            elif poll is not None:
+                text = f"[投票: {poll.question}]"
+            elif embeds and (embeds[0].title or embeds[0].description):
+                text = f"[卡片: {embeds[0].title or embeds[0].description}]"
+            else:
+                text = "[无文本内容]"
+        if len(text) > limit:
+            text = text[:limit] + "..."
+        if message.attachments:
+            text += f"[包含{len(message.attachments)}个附件]"
+        return text
+
+    async def handle_message_change(
+        self, message: discord.Message, before: Optional[discord.Message] = None
+    ) -> Optional[Dict[str, Any]]:
+        """把消息编辑（传 ``before``）或撤回转成通知消息。
+
+        通知标成 ``is_notify``：planner 看得到内容变了，replyer 不会把它当成聊天记录。
+
+        Args:
+            message: 编辑后的消息，或被撤回的消息。
+            before: 编辑前的消息；为 None 时表示撤回。
+
+        Returns:
+            Host 侧 `message_dict`；出错时返回 None。
+        """
+        try:
+            group_info, additional_config, _ = self._build_chat_context(message)
+            name = message.author.display_name
+            if before is None:
+                notice = "message_delete"
+                text = f"[事件-消息撤回] {name} 撤回了消息：{self._summarize(message)}"
+            else:
+                notice = "message_edit"
+                text = f"[事件-消息编辑] {name} 把消息「{self._summarize(before)}」改成了：{self._summarize(message, 300)}"
+            additional_config["discord_notice_type"] = notice
+            message_info = BaseMessageInfo(
+                platform=self._platform_name,
+                message_id=f"{notice}_{message.id}_{int(time.time() * 1000)}",
+                time=time.time(),
+                user_info=self._build_user_info(message.author),
+                group_info=group_info,
+                format_info=FormatInfo(content_format=["text"], accept_format=["text"]),
+                additional_config=additional_config,
+            )
+            return self.build_host_message_dict(
+                MessageBase(message_info=message_info, message_segment=Seg(type="text", data=text), raw_message=text)
+            )
+        except Exception as exc:
+            self._logger.error(f"转换消息编辑/撤回事件时发生错误: {exc}")
+            self._logger.debug(traceback.format_exc())
             return None
 
     def _build_user_info(self, author: discord.User | discord.Member) -> UserInfo:
@@ -752,15 +901,9 @@ class DiscordMessageHandler:
             self._logger.warning(f"拉取被回复消息失败: {exc}")
             return reply_data
 
-        content = referenced_message.content or "[无文本内容]"
-        if len(content) > 100:
-            content = content[:100] + "..."
-        if referenced_message.attachments:
-            content += f"[包含{len(referenced_message.attachments)}个附件]"
-
         author = referenced_message.author
         reply_data.update(
-            target_message_content=content,
+            target_message_content=self._summarize(referenced_message),
             target_message_sender_id=str(author.id),
             target_message_sender_nickname=author.display_name,
             target_message_sender_cardname=getattr(author, "nick", None),

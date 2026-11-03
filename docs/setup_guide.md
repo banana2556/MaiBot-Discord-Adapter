@@ -32,7 +32,7 @@
 
 当前插件元数据声明的核心 Python 依赖包括：
 
-- `discord.py >= 2.3.0`
+- `discord.py >= 2.5.0`
 - `discord-ext-voice-recv >= 0.4.1a139`
 - `PyNaCl >= 1.5.0`
 
@@ -237,7 +237,27 @@ ignore_bot_message = true
 - `ignore_bot_message`
   - 忽略其他 Bot 的消息，减少噪音
 
-### 5.6 `voice`
+### 5.6 `presence`
+
+```toml
+[presence]
+status = "online"
+activity_type = "custom"
+activity_text = ""
+```
+
+字段说明：
+
+- `status`
+  - `online` 在线、`idle` 闲置、`dnd` 请勿打扰、`invisible` 隐身
+- `activity_type`
+  - `custom` 直接显示文字；`playing` / `listening` / `watching` / `competing` 显示成「正在玩 / 正在听 / 正在看 / 正在参加 + 文字」
+- `activity_text`
+  - 显示在 Bot 名字下方的文字，留空不显示，最多 128 字
+
+其他插件可以调用 API `adapter.discord.presence.set`（参数 `text`、`activity_type`、`status`）临时改状态，配置重载后回到这里的内容。
+
+### 5.7 `voice`
 
 ```toml
 [voice]

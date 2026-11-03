@@ -26,7 +26,7 @@
     {
       "type": "python_package",
       "name": "discord.py",
-      "version_spec": ">=2.3.0"
+      "version_spec": ">=2.5.0"
     },
     {
       "type": "python_package",

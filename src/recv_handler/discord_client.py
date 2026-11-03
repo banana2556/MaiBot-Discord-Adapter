@@ -15,6 +15,45 @@ from .message_handler import DiscordMessageHandler
 
 TYPING_INDICATOR_REFRESH_SECONDS = 5.0
 
+PRESENCE_TEXT_LIMIT = 128  # Discord 自定义状态与活动名称的长度上限
+_ACTIVITY_TYPES = {
+    "playing": discord.ActivityType.playing,
+    "listening": discord.ActivityType.listening,
+    "watching": discord.ActivityType.watching,
+    "competing": discord.ActivityType.competing,
+}
+
+
+def build_presence(
+    text: str = "", activity_type: str = "custom", status: str = "online"
+) -> tuple[Optional[discord.BaseActivity], discord.Status]:
+    """把状态文字、显示方式和在线状态转成 discord.py 的活动与状态对象。
+
+    Args:
+        text: 状态文字；为空时不显示活动，超过上限会截断。
+        activity_type: ``custom`` 或 ``playing`` / ``listening`` / ``watching`` / ``competing``。
+        status: ``online`` / ``idle`` / ``dnd`` / ``invisible``。
+
+    Returns:
+        `(活动或 None, 在线状态)`。
+
+    Raises:
+        ValueError: 显示方式或在线状态不认识。
+    """
+    if activity_type != "custom" and activity_type not in _ACTIVITY_TYPES:
+        raise ValueError(f"显示方式只能是 custom、{'、'.join(_ACTIVITY_TYPES)}")
+    if status not in {"online", "idle", "dnd", "invisible"}:
+        raise ValueError("在线状态只能是 online、idle、dnd、invisible")
+    text = str(text or "").strip()[:PRESENCE_TEXT_LIMIT]
+    activity: Optional[discord.BaseActivity] = None
+    if text:
+        activity = (
+            discord.CustomActivity(name=text)
+            if activity_type == "custom"
+            else discord.Activity(type=_ACTIVITY_TYPES[activity_type], name=text)
+        )
+    return activity, discord.Status(status)
+
 
 class DiscordClientManager:
     """Discord 客户端管理器。
@@ -40,6 +79,7 @@ class DiscordClientManager:
         typing_indicator_enabled: bool = False,
         typing_indicator_delay_ms: int = 1200,
         typing_indicator_timeout_sec: int = 5,
+        presence: Optional[tuple[Optional[discord.BaseActivity], discord.Status]] = None,
     ) -> None:
         """初始化管理器状态并创建 Discord 客户端与事件绑定。
 
@@ -56,6 +96,7 @@ class DiscordClientManager:
             filter_config: 过滤相关配置（如是否忽略自身或机器人消息）。
             connection_check_interval: 连接健康监控的检查间隔（秒）。
             retry_delay: 启动或重连失败后的重试等待时间（秒）。
+            presence: 登录时带上的 `(活动, 在线状态)`，由 `build_presence` 生成；None 为在线、无活动。
         """
         self._logger = logger
         self._token = token
@@ -71,6 +112,7 @@ class DiscordClientManager:
         self._typing_indicator_enabled = typing_indicator_enabled
         self._typing_indicator_delay_seconds = max(float(typing_indicator_delay_ms or 0) / 1000.0, 0.0)
         self._typing_indicator_timeout_seconds = max(float(typing_indicator_timeout_sec or 0), 0.0)
+        self._presence = presence or build_presence()
 
         self.client: Optional[discord.Client] = None
         self.is_connected: bool = False
@@ -124,7 +166,9 @@ class DiscordClientManager:
         intents.reactions = self._intents_config.get("reactions", True)
         intents.voice_states = self._intents_config.get("voice_states", False)
 
-        client = discord.Client(intents=intents)
+        # 状态随登录一起送出；重连时重建客户端，也会带上最近一次 set_presence 的内容
+        activity, status = self._presence
+        client = discord.Client(intents=intents, activity=activity, status=status)
         self.client = client
         self._thread_routing_manager.bind_client(client)
 
@@ -135,6 +179,17 @@ class DiscordClientManager:
         @client.event
         async def on_message(message: discord.Message) -> None:
             await self._on_message(message)
+
+        # ponytail: 只收缓存里的消息（默认最近 1000 条）；更早的消息被改或撤回不会通知，需要时改用 on_raw_* 事件
+        @client.event
+        async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
+            # 链接预览展开、置顶也会触发编辑事件，正文没变就不通知
+            if before.content != after.content:
+                await self._on_message_change(after, before)
+
+        @client.event
+        async def on_message_delete(message: discord.Message) -> None:
+            await self._on_message_change(message)
 
         @client.event
         async def on_error(event: str, *args: Any, **kwargs: Any) -> None:
@@ -190,6 +245,67 @@ class DiscordClientManager:
             except Exception as exc:
                 self._logger.warning(f"连接就绪回调执行失败: {exc}")
 
+    async def set_presence(self, text: str = "", activity_type: str = "custom", status: str = "online") -> None:
+        """改机器人的状态文字与在线状态；连线中立即生效，之后重连也沿用。
+
+        Args:
+            text: 状态文字；为空时清掉活动。
+            activity_type: ``custom`` 或 ``playing`` / ``listening`` / ``watching`` / ``competing``。
+            status: ``online`` / ``idle`` / ``dnd`` / ``invisible``。
+
+        Raises:
+            ValueError: 显示方式或在线状态不认识。
+        """
+        # ponytail: Discord 每个连接大约 20 秒内只收 5 次状态更新，超过会被限流；高频更新的调用方自己节流
+        self._presence = build_presence(text, activity_type, status)
+        if self.client is not None and self.is_connected:
+            activity, presence_status = self._presence
+            await self.client.change_presence(activity=activity, status=presence_status)
+
+    def _is_ignored_author(self, author: Any) -> bool:
+        """按过滤配置忽略 bot 自己和其他 bot 的消息。"""
+        bot_user = getattr(self.client, "user", None)
+        if bot_user and author.id == bot_user.id and getattr(self._filter_config, "ignore_self_message", True):
+            return True
+        return bool(author.bot) and getattr(self._filter_config, "ignore_bot_message", True)
+
+    def _is_chat_allowed(self, message: discord.Message) -> bool:
+        """按频道/用户规则判断消息是否放行；子区按配置继承父频道的规则。"""
+        is_thread = hasattr(message.channel, "parent") and message.channel.parent is not None
+        check_channel_id = str(message.channel.id)
+        if is_thread:
+            inherit_perms = getattr(
+                self._chat_filter._config, "inherit_channel_permissions", True
+            ) if self._chat_filter._config else True
+            if inherit_perms and message.channel.parent:
+                check_channel_id = str(message.channel.parent.id)
+
+        return self._chat_filter.is_allowed(
+            user_id=str(message.author.id),
+            guild_id=str(message.guild.id) if message.guild else None,
+            channel_id=check_channel_id,
+            thread_id=str(message.channel.id) if is_thread else None,
+            is_thread=is_thread,
+        )
+
+    async def _on_message_change(self, message: discord.Message, before: Optional[discord.Message] = None) -> None:
+        """消息被编辑（带 ``before``）或撤回时，按同样的过滤规则转成通知送给 Host。"""
+        try:
+            if self._is_ignored_author(message.author) or not self._is_chat_allowed(message):
+                return
+            message_dict = await self._message_handler.handle_message_change(message, before)
+            if message_dict is None:
+                return
+            await self._gateway_capability.route_message(
+                self._gateway_name,
+                message_dict,
+                external_message_id=message_dict["message_id"],
+                dedupe_key=message_dict["message_id"],
+            )
+        except Exception as exc:
+            self._logger.error(f"处理消息编辑/撤回事件时发生错误: {exc}")
+            self._logger.debug(traceback.format_exc())
+
     async def _on_message(self, message: discord.Message) -> None:
         """处理入站频道/DM 消息：过滤后转换为 Host 结构并路由，必要时更新子区上下文。
 
@@ -197,14 +313,8 @@ class DiscordClientManager:
             message: Discord 推送的 `Message` 对象。
         """
         try:
-            bot_user = getattr(self.client, "user", None)
-            if bot_user and message.author.id == bot_user.id:
-                if getattr(self._filter_config, "ignore_self_message", True):
-                    return
-
-            if message.author.bot:
-                if getattr(self._filter_config, "ignore_bot_message", True):
-                    return
+            if self._is_ignored_author(message.author):
+                return
 
             guild_id = str(message.guild.id) if message.guild else None
             channel_id = str(message.channel.id)
@@ -214,7 +324,6 @@ class DiscordClientManager:
             )
 
             is_thread = hasattr(message.channel, "parent") and message.channel.parent is not None
-            thread_id = str(message.channel.id) if is_thread else None
 
             if is_voice_chat_message:
                 self._logger.info(
@@ -231,25 +340,11 @@ class DiscordClientManager:
                     f"chars={len(message.content or '')}]"
                 )
 
-            check_channel_id = channel_id
-            if is_thread:
-                inherit_perms = getattr(
-                    self._chat_filter._config, "inherit_channel_permissions", True
-                ) if self._chat_filter._config else True
-                if inherit_perms and message.channel.parent:
-                    check_channel_id = str(message.channel.parent.id)
-
-            if not self._chat_filter.is_allowed(
-                user_id=str(message.author.id),
-                guild_id=guild_id,
-                channel_id=check_channel_id,
-                thread_id=thread_id,
-                is_thread=is_thread,
-            ):
+            if not self._is_chat_allowed(message):
                 if is_voice_chat_message:
                     self._logger.warning(
                         "Ignored Discord voice-channel chat message because it was blocked by chat filter "
-                        f"[message_id={message.id}, channel_id={channel_id}, check_channel_id={check_channel_id}]"
+                        f"[message_id={message.id}, channel_id={channel_id}]"
                     )
                 return
 
