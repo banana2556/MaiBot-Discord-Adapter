@@ -1,0 +1,252 @@
+{
+  "schema_version": 2,
+  "workspace_title": "定時提醒",
+  "pages": [
+    {
+      "id": "reminders",
+      "title": "定時提醒",
+      "description": "所有聊天待觸發的提醒，點一列可查看詳情或取消。",
+      "placement": "workspace",
+      "icon": "list",
+      "queries": {
+        "summary": {
+          "api": "webui_summary",
+          "version": "1"
+        }
+      },
+      "actions": {
+        "cancel": {
+          "api": "webui_cancel",
+          "version": "1",
+          "parameters": {
+            "reminder_id": {
+              "type": "string",
+              "required": true
+            }
+          },
+          "arguments": {
+            "reminder_id": {
+              "scope": "selection",
+              "source": "reminderRow",
+              "field": "id"
+            }
+          },
+          "confirmation": "確定取消這則提醒？"
+        }
+      },
+      "content": [
+        {
+          "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "待觸發",
+              "value": {
+                "source": "summary",
+                "field": "total"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "順手記下",
+              "value": {
+                "source": "summary",
+                "field": "followup_count"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "重複提醒",
+              "value": {
+                "source": "summary",
+                "field": "recurring_count"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "伺服器目前時間",
+              "value": {
+                "source": "summary",
+                "field": "now"
+              }
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "value": "目前沒有待觸發的提醒。",
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "reminders"
+            },
+            "operator": "empty"
+          }
+        },
+        {
+          "type": "table",
+          "label": "待觸發的提醒（依下次提醒時間排序）",
+          "value": {
+            "source": "summary",
+            "field": "reminders"
+          },
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "reminders"
+            },
+            "operator": "not_empty"
+          },
+          "selection": "reminderRow",
+          "detail": "reminderDetails",
+          "columns": [
+            {
+              "field": "next_run",
+              "label": "下次提醒"
+            },
+            {
+              "field": "chat",
+              "label": "聊天"
+            },
+            {
+              "field": "kind",
+              "label": "類型"
+            },
+            {
+              "field": "content",
+              "label": "內容"
+            }
+          ]
+        },
+        {
+          "type": "dialog",
+          "name": "reminderDetails",
+          "label": "提醒詳情",
+          "children": [
+            {
+              "type": "text",
+              "label": "ID",
+              "value": {
+                "scope": "selection",
+                "source": "reminderRow",
+                "field": "id"
+              }
+            },
+            {
+              "type": "text",
+              "label": "聊天",
+              "value": {
+                "scope": "selection",
+                "source": "reminderRow",
+                "field": "chat"
+              }
+            },
+            {
+              "type": "text",
+              "label": "類型",
+              "value": {
+                "scope": "selection",
+                "source": "reminderRow",
+                "field": "kind"
+              }
+            },
+            {
+              "type": "text",
+              "label": "@ 對象",
+              "value": {
+                "scope": "selection",
+                "source": "reminderRow",
+                "field": "target"
+              }
+            },
+            {
+              "type": "text",
+              "label": "排程",
+              "value": {
+                "scope": "selection",
+                "source": "reminderRow",
+                "field": "schedule"
+              }
+            },
+            {
+              "type": "text",
+              "label": "下次提醒",
+              "value": {
+                "scope": "selection",
+                "source": "reminderRow",
+                "field": "next_run"
+              }
+            },
+            {
+              "type": "text",
+              "label": "內容",
+              "value": {
+                "scope": "selection",
+                "source": "reminderRow",
+                "field": "content"
+              }
+            },
+            {
+              "type": "button",
+              "label": "取消這則提醒",
+              "action": "cancel",
+              "variant": "danger"
+            }
+          ]
+        },
+        {
+          "type": "tabs",
+          "children": [
+            {
+              "type": "stack",
+              "label": "聊天指令",
+              "children": [
+                {
+                  "type": "table",
+                  "value": {
+                    "source": "summary",
+                    "field": "commands"
+                  },
+                  "columns": [
+                    {
+                      "field": "usage",
+                      "label": "指令"
+                    },
+                    {
+                      "field": "description",
+                      "label": "說明"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "stack",
+              "label": "麥麥的工具",
+              "children": [
+                {
+                  "type": "table",
+                  "value": {
+                    "source": "summary",
+                    "field": "tools"
+                  },
+                  "columns": [
+                    {
+                      "field": "name",
+                      "label": "工具"
+                    },
+                    {
+                      "field": "description",
+                      "label": "用途"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

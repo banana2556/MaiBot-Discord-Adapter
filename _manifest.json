@@ -44,7 +44,18 @@
     "message.get_recent",
     "message.build_readable",
     "send.text",
-    "send.emoji"
+    "send.emoji",
+    "maisaka.proactive.trigger",
+    "maisaka.context.append",
+    "message.get_by_id",
+    "chat.get_all_streams",
+    "chat.get_group_streams",
+    "chat.get_stream_by_group_id",
+    "component.enable",
+    "component.disable",
+    "web.search",
+    "knowledge.search",
+    "personality.get_current"
   ],
   "i18n": {
     "default_locale": "zh-CN",

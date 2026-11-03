@@ -85,6 +85,16 @@ STT:
 
 ---
 
+## 日常功能
+
+设置页「日常」标签里有三项，共用同一个后台排程：
+
+- **定时提醒**：原 [maibot-reminder-plugin](https://github.com/banana2556/maibot-reminder-plugin) 并入，工具（`reminder_set` / `reminder_followup` / `reminder_list` / `reminder_cancel`）、`/reminders` 指令和 WebUI 页面都保持不变。第一次启动会把旧插件的 `reminders.json` 复制过来，**请停用旧的定时提醒插件**，否则提醒会重复触发。
+- **日常生活**：每天在设定时间生成麦麦当天每小时在做什么，每隔几小时（默认 3）按最近的 Discord 聊天调整之后的时段；当前状态会加进对话上下文，并同步成 Discord 状态文字（开启后会覆盖「在线状态」里的设定）。
+- **主动话题**：按 cron 排程，根据群的长期记忆和最近聊天挑话题，搜索相关新闻（需要在 MaiBot 启用联网搜索），或请麦麦去 B 站 / X 找热门影片，再唤醒麦麦用自己的口吻分享到群里。分享影片需要另外安装能操作浏览器的插件，并且这台电脑能启动 Playwright / Chromium。
+
+日常生活与主动话题会调用 LLM，默认关闭。
+
 ## Todo List
 
 - [ ] 增添commands统一api接口

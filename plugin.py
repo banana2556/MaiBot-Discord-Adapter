@@ -1,11 +1,13 @@
 import asyncio
 import base64
+from datetime import datetime
+from functools import partial
 import json
 from pathlib import Path
 import random
 import time
 import tomllib
-from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Union, cast
+from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Mapping, Optional, Sequence, Union, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -23,6 +25,10 @@ from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
 from .src.emoji_grid import build_numbered_grid, grid_shape
+from .src.life.common import list_group_streams, readable_chat
+from .src.life.daily_life import DailyLife
+from .src.life.reminders import ReminderMixin
+from .src.life.topics import TopicScout
 from .src.native_emoji import NativeEmojiRegistry
 from .src.recv_handler.discord_client import DiscordClientManager, build_presence
 from .src.recv_handler.message_handler import DiscordMessageHandler, quote_name
@@ -31,12 +37,17 @@ from .src.send_handler.thread_send_handler import ThreadRoutingManager
 from .src.voice.tts.gptsovits_tts import GPTSoVITSTTSProvider
 from .src.voice.voice_manager import VoiceManager
 
+DAILY_POLL_SECONDS = 10
+# 调整生活时程时最多带这么多字的聊天记录，取最后面的
+LIFE_CHAT_CHAR_LIMIT = 8000
 
-class DiscordAdapterPlugin(MaiBotPlugin):
+
+class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
     """Discord 消息网关插件。
 
     负责注册双工消息网关、管理 discord.py 客户端生命周期，并将 Host 出站消息路由到
     Discord 频道或语音 TTS；同时处理 Reaction 命令与超长消息拆分发送。
+    另含日常功能：定时提醒（``ReminderMixin``）、日常生活时程与主动话题，共用一个后台轮询。
     """
 
     config_model: ClassVar[type[PluginConfigBase] | None] = DiscordPluginSettings
@@ -63,14 +74,119 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             str,
             tuple[float, Optional[Dict[str, Dict[str, List[str]]]], str],
         ] = {}
+        self._reminders: List[Dict[str, Any]] = []
+        self._daily_life: Optional[DailyLife] = None
+        self._topic_scout: Optional[TopicScout] = None
+        self._daily_task: Optional[asyncio.Task[None]] = None
+        self._daily_jobs: Dict[str, asyncio.Task[None]] = {}
 
     async def on_load(self) -> None:
-        """插件加载时根据当前配置启动或保持 Discord 连接。"""
+        """插件加载时启动日常功能的后台轮询，并根据当前配置启动或保持 Discord 连接。"""
+        await self._start_daily_features()
         await self._restart_if_needed()
 
     async def on_unload(self) -> None:
-        """插件卸载时停止客户端任务并释放相关资源。"""
+        """插件卸载时停止日常轮询、客户端任务并释放相关资源。"""
+        for task in (self._daily_task, *self._daily_jobs.values()):
+            if task is not None:
+                task.cancel()
         await self._stop_connection()
+
+    # ===== 日常功能：定时提醒、日常生活、主动话题 =====
+
+    async def _start_daily_features(self) -> None:
+        """读回提醒和日常状态，按配置开关提醒工具，开始统一的后台轮询；与 Discord 是否连线无关。"""
+        data_dir = self.ctx.paths.data_dir
+        self._load_reminders()
+        await self._apply_reminder_switches()
+        self._daily_life = DailyLife(
+            self.ctx, data_dir / "life_schedule.json", self.set_presence, self._recent_discord_chats
+        )
+        self._topic_scout = TopicScout(self.ctx, data_dir / "topics.json", self._resolve_discord_stream)
+        self._daily_task = asyncio.create_task(self._run_daily_loop())
+
+    async def _run_daily_loop(self) -> None:
+        # ponytail: 轮询到期事项，最多晚 DAILY_POLL_SECONDS 秒；提醒在本轮里直接触发，
+        # 要调 LLM 的生活时程和主动话题放到独立任务，慢的时候也不会拖住提醒
+        while True:
+            await asyncio.sleep(DAILY_POLL_SECONDS)
+            settings = self._load_settings()
+            now = datetime.now()
+            if settings.reminder.enabled:
+                await self.fire_due_reminders(now)
+            if settings.life.enabled and self._daily_life is not None:
+                self._spawn_daily_job("life", partial(self._daily_life.tick, now, settings.life))
+            if settings.topics.enabled and self._topic_scout is not None:
+                self._spawn_daily_job("topics", partial(self._topic_scout.tick, now, settings.topics))
+
+    def _spawn_daily_job(self, name: str, factory: Callable[[], Awaitable[None]]) -> None:
+        """上一次同名任务还没跑完时跳过这一轮。"""
+        running = self._daily_jobs.get(name)
+        if running is not None and not running.done():
+            return
+
+        async def run() -> None:
+            try:
+                await factory()
+            except Exception:
+                self.ctx.logger.exception(f"日常功能 {name} 执行失败")
+
+        self._daily_jobs[name] = asyncio.create_task(run())
+
+    async def _recent_discord_chats(self, since: datetime, until: datetime) -> str:
+        """各 Discord 群聊在这段时间内的可读聊天记录，供日常生活时程调整参考。"""
+        platform = self._load_settings().platform.platform_name
+        parts: List[str] = []
+        for stream in await list_group_streams(self.ctx, platform):
+            text = await readable_chat(self.ctx, stream["stream_id"], since, until, 40)
+            if text:
+                parts.append(f"【{stream.get('group_name') or stream['stream_id']}】\n{text}")
+        return "\n\n".join(parts)[-LIFE_CHAT_CHAR_LIMIT:]
+
+    async def _resolve_discord_stream(self, channel_id: str) -> Optional[str]:
+        """Discord 频道 ID -> MaiBot 聊天流 ID；频道在 MaiBot 里还没有会话时返回 None。"""
+        platform = self._load_settings().platform.platform_name
+        stream = await self.ctx.chat.get_stream_by_group_id(channel_id, platform=platform)
+        if isinstance(stream, dict) and stream.get("stream_id"):
+            return str(stream["stream_id"])
+        return None
+
+    def _inject_life_state(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """把当前生活状态接在系统提示词后面；没启用、没时程或没有系统消息时原样放行。"""
+        life_config = self._load_settings().life
+        items = kwargs.get("items")
+        if not (life_config.enabled and life_config.inject_prompt) or self._daily_life is None or not isinstance(items, list):
+            return {"action": "continue"}
+        text = self._daily_life.prompt_text(datetime.now())
+        if not text:
+            return {"action": "continue"}
+        for item in items:
+            if isinstance(item, dict) and item.get("item_type") == "SystemMessageItem" and isinstance(item.get("parts"), list):
+                item["parts"].append({"type": "text", "text": text})
+                return {"action": "continue", "modified_kwargs": kwargs}
+        return {"action": "continue"}
+
+    @HookHandler(
+        "maisaka.planner.before_request",
+        name="daily_life_planner_state",
+        mode="blocking",
+        order="late",
+        timeout_ms=1000,
+    )
+    async def inject_life_state_into_planner(self, **kwargs: Any) -> Dict[str, Any]:
+        """规划时知道自己正在做什么，决定要不要回、怎么回。"""
+        return self._inject_life_state(kwargs)
+
+    @HookHandler(
+        "maisaka.replyer.before_model_request",
+        name="daily_life_replyer_state",
+        mode="blocking",
+        order="late",
+        timeout_ms=1000,
+    )
+    async def inject_life_state_into_replyer(self, **kwargs: Any) -> Dict[str, Any]:
+        """回复时语气和内容能带到当前在做的事。"""
+        return self._inject_life_state(kwargs)
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
         """响应 Host 下发的配置变更，在作用于本插件时应用配置并视需要重连。
@@ -85,6 +201,7 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         self.set_plugin_config(config_data)
         if version:
             self.ctx.logger.debug(f"Discord 适配器收到配置更新通知: {version}")
+        await self._apply_reminder_switches()
         await self._restart_if_needed()
 
 
@@ -1963,6 +2080,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
                 settings.presence.activity_text, settings.presence.activity_type, settings.presence.status
             ),
         )
+        if self._daily_life is not None:
+            # 新客户端用的是配置里的状态，日常生活下一轮要重新推送当前时段
+            self._daily_life.invalidate_presence()
 
         self._voice_manager = self._build_voice_manager(settings)
 

@@ -866,10 +866,159 @@ class TencentSTTConfig(PluginConfigBase):
     )
 
 
+class ReminderConfig(PluginConfigBase):
+    """定时提醒（原 luca.reminder 插件）。启用前请停用旧的定时提醒插件，提醒会自动搬过来。"""
+
+    __ui_label__: ClassVar[str] = "定时提醒"
+    __ui_order__: ClassVar[int] = 20
+
+    enabled: bool = Field(
+        default=True,
+        description="允许麦麦设定、查看、取消提醒；关闭后麦麦看不到提醒工具，已设的提醒也暂停触发。",
+        json_schema_extra={"label": "启用定时提醒", "order": 0},
+    )
+    drift_minutes: int = Field(
+        default=1,
+        ge=0,
+        description="提醒飘移（分钟）：麦麦思考和回复需要时间，提前这么多分钟开始对话。",
+        json_schema_extra={"label": "提前唤醒（分钟）", "order": 1, "step": 1},
+    )
+    max_per_chat: int = Field(
+        default=10,
+        ge=0,
+        description="每个聊天同时待触发、有人请麦麦设的提醒数上限。",
+        json_schema_extra={"label": "每个聊天提醒上限", "order": 2, "step": 1},
+    )
+    followup_enabled: bool = Field(
+        default=True,
+        description="允许麦麦顺手记下群友 24 小时内的安排，到时关心一下；关闭后麦麦看不到这个工具。",
+        json_schema_extra={"label": "顺手记下", "order": 3},
+    )
+    followup_max_per_chat: int = Field(
+        default=3,
+        ge=0,
+        description="每个聊天同时待触发的顺手记下数上限。",
+        json_schema_extra={"label": "每个聊天顺手记下上限", "order": 4, "step": 1},
+    )
+
+
+class LifeConfig(PluginConfigBase):
+    """日常生活：每天生成麦麦每小时的生活时程，定期按聊天调整，当前状态会注入对话并同步到 Discord 状态。"""
+
+    __ui_label__: ClassVar[str] = "日常生活"
+    __ui_order__: ClassVar[int] = 21
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用日常生活时程。",
+        json_schema_extra={"label": "启用日常生活", "order": 0, "hint": "会用到 LLM：每天生成一次，之后每隔一段时间调整一次。"},
+    )
+    life_setting: str = Field(
+        default="",
+        description="补充人设里没写的生活背景，例如身分、住哪、作息、爱好。",
+        json_schema_extra={
+            "label": "生活设定",
+            "order": 1,
+            "x-widget": "textarea",
+            "placeholder": "例如：住台北的大学生，晚睡晚起，喜欢打音游和逛超商",
+        },
+    )
+    generate_time: str = Field(
+        default="00:00",
+        description="每天生成当天时程的时间（HH:MM）；生成前沿用前一天同一时段。",
+        json_schema_extra={"label": "每日生成时间", "order": 2, "placeholder": "00:00"},
+    )
+    adjust_interval_hours: int = Field(
+        default=3,
+        ge=0,
+        description="每隔几小时根据最近的聊天调整之后的时段，0 表示不调整。",
+        json_schema_extra={"label": "调整间隔（小时）", "order": 3, "step": 1},
+    )
+    sync_presence: bool = Field(
+        default=True,
+        description="换时段时把当前活动同步成 Discord 状态文字与在线状态，会覆盖「在线状态」里的设定。",
+        json_schema_extra={"label": "同步 Discord 状态", "order": 4},
+    )
+    inject_prompt: bool = Field(
+        default=True,
+        description="把当前生活状态加进麦麦的对话上下文，让她聊天时知道自己正在做什么。",
+        json_schema_extra={"label": "注入对话上下文", "order": 5},
+    )
+    model: str = Field(
+        default="",
+        description="生成与调整时程用的模型任务名或模型名，留空用默认。",
+        json_schema_extra={"label": "使用模型", "order": 6, "placeholder": "留空用默认"},
+    )
+
+    @field_validator("generate_time", mode="before")
+    @classmethod
+    def _normalize_generate_time(cls, value: Any) -> str:
+        return _normalize_string(value) or "00:00"
+
+
+class TopicConfig(PluginConfigBase):
+    """主动话题：按排程根据群的记忆和最近聊天找相关新闻或影片，唤醒麦麦分享到群里。"""
+
+    __ui_label__: ClassVar[str] = "主动话题"
+    __ui_order__: ClassVar[int] = 22
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用主动话题。",
+        json_schema_extra={"label": "启用主动话题", "order": 0},
+    )
+    channel_list: List[str] = Field(
+        default_factory=list,
+        description="要主动开话题的 Discord 频道 ID；频道里要先有人说过话，MaiBot 才认得这个聊天。",
+        json_schema_extra={"label": "频道列表", "order": 1, "placeholder": "请输入频道 ID"},
+    )
+    cron: str = Field(
+        default="0 12,20 * * *",
+        description="什么时候开话题，5 段 cron（分 时 日 月 星期），服务器本地时间。",
+        json_schema_extra={"label": "排程（cron）", "order": 2, "hint": "例：0 12,20 * * * 为每天 12 点和 20 点。", "placeholder": "0 12,20 * * *"},
+    )
+    context_hours: int = Field(
+        default=24,
+        ge=1,
+        description="参考最近几小时的聊天来挑话题。",
+        json_schema_extra={"label": "参考聊天（小时）", "order": 3, "step": 1},
+    )
+    news_enabled: bool = Field(
+        default=True,
+        description="搜索相关新闻分享；需要在 MaiBot 设置里启用联网搜索。",
+        json_schema_extra={"label": "分享新闻", "order": 4},
+    )
+    video_enabled: bool = Field(
+        default=False,
+        description="请麦麦去 B 站或 X 找热门影片分享。",
+        json_schema_extra={
+            "label": "分享影片",
+            "order": 5,
+            "hint": "⚠ 需要另外安装能操作浏览器的插件，并且这台电脑能启动 Playwright / Chromium；没有浏览器工具时麦麦会放弃分享影片。",
+        },
+    )
+    model: str = Field(
+        default="",
+        description="挑话题与挑新闻用的模型任务名或模型名，留空用默认。",
+        json_schema_extra={"label": "使用模型", "order": 6, "placeholder": "留空用默认"},
+    )
+
+    @field_validator("channel_list", mode="before")
+    @classmethod
+    def _normalize_channel_list(cls, value: Any) -> List[str]:
+        return _normalize_string_list(value)
+
+    @field_validator("cron", mode="before")
+    @classmethod
+    def _normalize_cron(cls, value: Any) -> str:
+        return " ".join(_normalize_string(value).split()) or "0 12,20 * * *"
+
+
 # WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。
 WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("basic", "基础设置", ("plugin", "connection", "platform", "presence")),
     ("chat", "聊天与过滤", ("chat", "filters")),
+    ("daily", "日常", ("reminder", "life", "topics")),
     (
         "voice",
         "语音",
@@ -904,6 +1053,9 @@ class DiscordPluginSettings(PluginConfigBase):
     siliconflow_stt: SiliconFlowSTTConfig = Field(default_factory=SiliconFlowSTTConfig)
     aliyun_stt: AliyunSTTConfig = Field(default_factory=AliyunSTTConfig)
     tencent_stt: TencentSTTConfig = Field(default_factory=TencentSTTConfig)
+    reminder: ReminderConfig = Field(default_factory=ReminderConfig)
+    life: LifeConfig = Field(default_factory=LifeConfig)
+    topics: TopicConfig = Field(default_factory=TopicConfig)
 
     def should_connect(self) -> bool:
         """委托 ``plugin`` 子配置判断是否应连接 Discord。
