@@ -67,7 +67,7 @@ TTS:
 - `siliconflow`
 - `gptsovits`
 - `minimax`
-- 
+- `fishaudio`
 
 STT:
 

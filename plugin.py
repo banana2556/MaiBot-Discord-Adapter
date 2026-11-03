@@ -18,7 +18,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from maim_message import FormatInfo, GroupInfo, UserInfo
 
-from .config import DiscordPluginSettings
+from .config import WEBUI_CONFIG_TABS, DiscordPluginSettings, is_section_visible
 from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
@@ -138,12 +138,46 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             plugin_author=plugin_author,
         )
         try:
+            self._prune_inactive_config_sections(schema)
+        except Exception as exc:
+            self._get_logger().warning(f"Failed to prune inactive provider sections from config schema: {exc}")
+        try:
             self._inject_gptsovits_template_choices(schema)
         except Exception as exc:
             self._get_logger().warning(
                 f"Failed to enrich GPT-SoVITS config schema with local template choices: {exc}"
             )
+        self._apply_config_tabs(schema)
         return schema
+
+    def _prune_inactive_config_sections(self, schema: Dict[str, Any]) -> None:
+        """按已保存配置移除未选用的 TTS / STT 服务商配置节。
+
+        WebUI 不处理字段级 ``depends_on``，未选用的服务商会整节空占位显示；
+        这里只改 Schema，表单保存时仍会提交完整配置，被隐藏节的已有值不会丢失。
+        """
+        sections = schema.get("sections")
+        if not isinstance(sections, dict):
+            return
+
+        config_snapshot = self._load_schema_config_snapshot()
+        for section_name, field_info in DiscordPluginSettings.model_fields.items():
+            if section_name in sections and not is_section_visible(field_info.annotation, config_snapshot):
+                sections.pop(section_name)
+
+    @staticmethod
+    def _apply_config_tabs(schema: Dict[str, Any]) -> None:
+        """把配置节按 ``WEBUI_CONFIG_TABS`` 分到基础 / 聊天 / 语音三个标签页。"""
+        sections = schema.get("sections")
+        if not isinstance(sections, dict) or not sections:
+            return
+
+        tabs: List[Dict[str, Any]] = []
+        for order, (tab_id, title, tab_sections) in enumerate(WEBUI_CONFIG_TABS):
+            present = [name for name in tab_sections if name in sections]
+            if present:
+                tabs.append({"id": tab_id, "title": title, "sections": present, "order": order})
+        schema["layout"] = {"type": "tabs", "tabs": tabs}
 
     def _inject_gptsovits_template_choices(self, schema: Dict[str, Any]) -> None:
         sections = schema.get("sections")
@@ -1980,6 +2014,9 @@ class DiscordAdapterPlugin(MaiBotPlugin):
         elif voice_cfg.tts_provider == "minimax":
             from .src.voice.tts.minimax_tts import MiniMaxTTSProvider
             tts_provider = MiniMaxTTSProvider(settings.minimax_tts, logger)
+        elif voice_cfg.tts_provider == "fishaudio":
+            from .src.voice.tts.fishaudio_tts import FishAudioTTSProvider
+            tts_provider = FishAudioTTSProvider(settings.fishaudio_tts, logger)
 
         if voice_cfg.stt_provider == "siliconflow_sensevoice":
             from .src.voice.stt.siliconflow_stt import SiliconFlowSTTProvider

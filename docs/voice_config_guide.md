@@ -106,6 +106,35 @@ output_format = "mp3"
 - 这里的 `output_format` 表示生成音频本身的格式，会映射到 MiniMax 的 `audio_setting.format`
 - 插件内部固定请求 `hex` 响应，便于直接解码，不需要你再额外配置返回形式
 
+### Fish Audio
+
+把 `voice.tts_provider` 设为 `"fishaudio"`，然后填写：
+
+```toml
+[fishaudio_tts]
+api_key = ""
+api_base = "https://api.fish.audio"
+model = "s2.1-pro"
+reference_id = ""
+response_format = "wav"
+sample_rate = 44100
+speed = 1.0
+volume = 0.0
+temperature = 0.7
+top_p = 0.7
+latency = "normal"
+normalize = true
+```
+
+说明：
+
+- `api_key` 在 fish.audio 控制台的 API Keys 页面创建
+- `reference_id` 是音色模型 ID，打开 fish.audio 上的音色页面，网址最后那串就是；留空用服务端默认音色
+- `model` 通过请求头传给 Fish Audio，可选 `s2.1-pro` / `s2.1-pro-free`（免费开发者额度）/ `s2-pro` / `s1` / `drama-3`
+- `response_format` 只支持 `wav` / `mp3` / `pcm`；`mp3` 的采样率只能是 `32000` 或 `44100`
+- `volume` 单位是 dB，`0` 表示不调整
+- 返回 402 一般是账户余额或额度不足
+
 ## GPT-SoVITS
 
 当前适配器里的 `gptsovits` 兼容两种常见接法：

@@ -1,6 +1,6 @@
 """Discord 适配器配置模型。"""
 
-from typing import Any, ClassVar, Dict, List, Literal
+from typing import Any, ClassVar, Dict, List, Literal, Mapping
 
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import field_validator
@@ -395,7 +395,7 @@ class DiscordPresenceConfig(PluginConfigBase):
 
 
 class DiscordVoiceConfig(PluginConfigBase):
-    """语音功能配置。"""
+    """语音功能配置。开关语音或切换 TTS / STT 提供商后，保存并刷新页面即可只显示所选服务商的设置。"""
 
     __ui_label__: ClassVar[str] = "语音功能"
     __ui_order__: ClassVar[int] = 6
@@ -406,7 +406,7 @@ class DiscordVoiceConfig(PluginConfigBase):
         json_schema_extra={
             "label": "启用语音",
             "order": 0,
-            "hint": "关闭时不会创建语音管理器，也不会主动加入任何语音频道。",
+            "hint": "关闭时不会创建语音管理器，也不会主动加入任何语音频道；TTS / STT 服务商设置也会一并隐藏。",
         },
     )
     voice_mode: Literal["fixed", "auto"] = Field(
@@ -453,15 +453,23 @@ class DiscordVoiceConfig(PluginConfigBase):
             "step": 30,
         },
     )
-    tts_provider: Literal["siliconflow", "gptsovits", "minimax"] = Field(
+    tts_provider: Literal["siliconflow", "gptsovits", "minimax", "fishaudio"] = Field(
         default="siliconflow",
         description="TTS 语音合成服务提供商。",
-        json_schema_extra={"label": "TTS 提供商", "order": 5},
+        json_schema_extra={
+            "label": "TTS 提供商",
+            "hint": "切换后保存并刷新页面，下方会换成对应服务商的设置。",
+            "order": 5,
+        },
     )
     stt_provider: Literal["siliconflow_sensevoice", "aliyun", "tencent"] = Field(
         default="siliconflow_sensevoice",
         description="STT 语音识别服务提供商。",
-        json_schema_extra={"label": "STT 提供商", "order": 6},
+        json_schema_extra={
+            "label": "STT 提供商",
+            "hint": "切换后保存并刷新页面，下方会换成对应服务商的设置。",
+            "order": 6,
+        },
     )
     enable_vad: bool = Field(
         default=True,
@@ -504,43 +512,38 @@ class DiscordVoiceConfig(PluginConfigBase):
         return _normalize_string_list(value)
 
 
+# 服务商配置节的显示条件：WebUI 不处理字段级 depends_on，
+# 因此由插件在生成 Schema 时按已保存配置整节移除未选用的服务商。
+# 每项为 (配置路径, 期望值)，全部满足时才显示该节。
+UIVisibleWhen = tuple[tuple[str, Any], ...]
+
+
 class SiliconFlowTTSConfig(PluginConfigBase):
     """SiliconFlow TTS 配置。"""
 
     __ui_label__: ClassVar[str] = "SiliconFlow TTS"
     __ui_order__: ClassVar[int] = 7
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (("voice.enabled", True), ("voice.tts_provider", "siliconflow"))
 
     api_key: str = Field(
         default="",
         description="SiliconFlow API 密钥。",
-        json_schema_extra={
-            "label": "API Key", "input_type": "password", "order": 0,
-            "depends_on": "voice.tts_provider", "depends_value": "siliconflow",
-        },
+        json_schema_extra={"label": "API Key", "input_type": "password", "order": 0},
     )
     api_base: str = Field(
         default="https://api.siliconflow.cn/v1",
         description="SiliconFlow API 地址。",
-        json_schema_extra={
-            "label": "API 地址", "order": 1,
-            "depends_on": "voice.tts_provider", "depends_value": "siliconflow",
-        },
+        json_schema_extra={"label": "API 地址", "order": 1},
     )
     model: str = Field(
         default="fnlp/MOSS-TTSD-v0.5",
         description="TTS 模型标识。",
-        json_schema_extra={
-            "label": "模型", "order": 2,
-            "depends_on": "voice.tts_provider", "depends_value": "siliconflow",
-        },
+        json_schema_extra={"label": "模型", "order": 2},
     )
     voice: str = Field(
         default="fnlp/MOSS-TTSD-v0.5:alex",
         description="TTS 音色标识。",
-        json_schema_extra={
-            "label": "音色", "order": 3,
-            "depends_on": "voice.tts_provider", "depends_value": "siliconflow",
-        },
+        json_schema_extra={"label": "音色", "order": 3},
     )
     sample_rate: int = Field(
         default=32000,
@@ -548,16 +551,12 @@ class SiliconFlowTTSConfig(PluginConfigBase):
         json_schema_extra={
             "label": "采样率", "order": 4,
             "hint": "推荐搭配 wav 使用 32000 或 44100；不要再把 pcm/wav 配成 48000。",
-            "depends_on": "voice.tts_provider", "depends_value": "siliconflow",
         },
     )
     speed: float = Field(
         default=1.0,
         description="语速（0.1 ~ 2.0）。",
-        json_schema_extra={
-            "label": "语速", "order": 5,
-            "depends_on": "voice.tts_provider", "depends_value": "siliconflow",
-        },
+        json_schema_extra={"label": "语速", "order": 5},
     )
     response_format: str = Field(
         default="wav",
@@ -565,7 +564,6 @@ class SiliconFlowTTSConfig(PluginConfigBase):
         json_schema_extra={
             "label": "返回格式", "order": 6,
             "hint": "推荐默认用 wav；只有确实需要时再手动改成 pcm/mp3/opus。",
-            "depends_on": "voice.tts_provider", "depends_value": "siliconflow",
         },
     )
 
@@ -575,14 +573,12 @@ class GPTSoVITSConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "GPT-SoVITS TTS"
     __ui_order__: ClassVar[int] = 8
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (("voice.enabled", True), ("voice.tts_provider", "gptsovits"))
 
     api_base: str = Field(
         default="http://127.0.0.1:8000",
         description="GPT-SoVITS API 地址。",
-        json_schema_extra={
-            "label": "API 地址", "order": 0,
-            "depends_on": "voice.tts_provider", "depends_value": "gptsovits",
-        },
+        json_schema_extra={"label": "API 地址", "order": 0},
     )
     version: str = Field(
         default="v4",
@@ -591,8 +587,6 @@ class GPTSoVITSConfig(PluginConfigBase):
             "label": "服务版本",
             "hint": "填写当前 GSV 服务实际支持的版本，例如 v4。这里保留为可扩展文本，后续服务端新增版本时可直接改这里。",
             "order": 1,
-            "depends_on": "voice.tts_provider",
-            "depends_value": "gptsovits",
             "placeholder": "v4",
         },
     )
@@ -619,10 +613,7 @@ class GPTSoVITSConfig(PluginConfigBase):
     text_lang: str = Field(
         default="zh",
         description="合成语言代码。",
-        json_schema_extra={
-            "label": "文本语言", "order": 4,
-            "depends_on": "voice.tts_provider", "depends_value": "gptsovits",
-        },
+        json_schema_extra={"label": "文本语言", "order": 4},
     )
     response_format: str = Field(
         default="wav",
@@ -631,17 +622,12 @@ class GPTSoVITSConfig(PluginConfigBase):
             "label": "音频格式",
             "hint": "推荐 wav；请按 infer_single 接口和服务端实际支持情况填写。",
             "order": 5,
-            "depends_on": "voice.tts_provider",
-            "depends_value": "gptsovits",
         },
     )
     speed_factor: float = Field(
         default=1.0,
         description="语速因子。",
-        json_schema_extra={
-            "label": "语速", "order": 6,
-            "depends_on": "voice.tts_provider", "depends_value": "gptsovits",
-        },
+        json_schema_extra={"label": "语速", "order": 6},
     )
 
 
@@ -650,62 +636,42 @@ class MiniMaxTTSConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "MiniMax TTS"
     __ui_order__: ClassVar[int] = 9
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (("voice.enabled", True), ("voice.tts_provider", "minimax"))
 
     api_key: str = Field(
         default="",
         description="MiniMax API 密钥。",
-        json_schema_extra={
-            "label": "API Key", "input_type": "password", "order": 0,
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
-        },
+        json_schema_extra={"label": "API Key", "input_type": "password", "order": 0},
     )
     api_base: str = Field(
         default="https://api.minimax.io",
         description="MiniMax API 地址。",
-        json_schema_extra={
-            "label": "API 地址", "order": 1,
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
-        },
+        json_schema_extra={"label": "API 地址", "order": 1},
     )
     model: str = Field(
         default="speech-2.8-hd",
         description="TTS 模型。",
-        json_schema_extra={
-            "label": "模型", "order": 2,
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
-        },
+        json_schema_extra={"label": "模型", "order": 2},
     )
     voice_id: str = Field(
         default="male-qn-qingse",
         description="音色 ID。",
-        json_schema_extra={
-            "label": "音色 ID", "order": 3,
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
-        },
+        json_schema_extra={"label": "音色 ID", "order": 3},
     )
     speed: float = Field(
         default=1.0,
         description="语速（0.5 ~ 2.0）。",
-        json_schema_extra={
-            "label": "语速", "order": 4,
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
-        },
+        json_schema_extra={"label": "语速", "order": 4},
     )
     vol: float = Field(
         default=1.0,
         description="音量（0.1 ~ 2.0）。",
-        json_schema_extra={
-            "label": "音量", "order": 5,
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
-        },
+        json_schema_extra={"label": "音量", "order": 5},
     )
     pitch: float = Field(
         default=0.0,
         description="音调偏移（-12 ~ 12）。",
-        json_schema_extra={
-            "label": "音调", "order": 6,
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
-        },
+        json_schema_extra={"label": "音调", "order": 6},
     )
     audio_sample_rate: int = Field(
         default=32000,
@@ -713,7 +679,6 @@ class MiniMaxTTSConfig(PluginConfigBase):
         json_schema_extra={
             "label": "采样率", "order": 7,
             "hint": "官方可选值为 8000/16000/22050/24000/32000/44100，默认推荐 32000。",
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
         },
     )
     output_format: str = Field(
@@ -722,40 +687,124 @@ class MiniMaxTTSConfig(PluginConfigBase):
         json_schema_extra={
             "label": "音频格式", "order": 8,
             "hint": "插件内部会固定请求 hex 响应，便于直接解码；这里控制的是生成音频本身的格式。",
-            "depends_on": "voice.tts_provider", "depends_value": "minimax",
         },
     )
+
+
+class FishAudioTTSConfig(PluginConfigBase):
+    """Fish Audio TTS 配置。"""
+
+    __ui_label__: ClassVar[str] = "Fish Audio TTS"
+    __ui_order__: ClassVar[int] = 10
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (("voice.enabled", True), ("voice.tts_provider", "fishaudio"))
+
+    api_key: str = Field(
+        default="",
+        description="Fish Audio API 密钥。",
+        json_schema_extra={
+            "label": "API Key", "input_type": "password", "order": 0,
+            "hint": "在 fish.audio 控制台的 API Keys 页面创建。",
+        },
+    )
+    api_base: str = Field(
+        default="https://api.fish.audio",
+        description="Fish Audio API 地址。",
+        json_schema_extra={"label": "API 地址", "order": 1},
+    )
+    model: str = Field(
+        default="s2.1-pro",
+        description="TTS 模型，通过请求头 model 传给 Fish Audio。",
+        json_schema_extra={
+            "label": "模型", "order": 2,
+            "hint": "可选 s2.1-pro / s2.1-pro-free（免费开发者额度）/ s2-pro / s1 / drama-3；填错时服务端会回退到 s2.1-pro。",
+        },
+    )
+    reference_id: str = Field(
+        default="",
+        description="音色模型 ID（reference_id）。",
+        json_schema_extra={
+            "label": "音色模型 ID", "order": 3,
+            "hint": "打开 fish.audio 上的音色页面，网址最后那串 ID 就是；留空则使用服务端默认音色。",
+            "placeholder": "例如 802e3bc2b27e49c2995d23ef70e6ac89",
+        },
+    )
+    response_format: str = Field(
+        default="wav",
+        description="音频格式（wav/mp3/pcm）。",
+        json_schema_extra={
+            "label": "音频格式", "order": 4,
+            "hint": "推荐 wav；pcm 会在插件内包装成 wav 后播放。",
+        },
+    )
+    sample_rate: int = Field(
+        default=44100,
+        description="采样率。wav/pcm 支持 8000/16000/24000/32000/44100；mp3 支持 32000/44100。",
+        json_schema_extra={"label": "采样率", "order": 5},
+    )
+    speed: float = Field(
+        default=1.0,
+        description="语速（0.5 ~ 2.0）。",
+        json_schema_extra={"label": "语速", "order": 6, "step": 0.1},
+    )
+    volume: float = Field(
+        default=0.0,
+        description="音量增益（dB），正数更大声，负数更小声。",
+        json_schema_extra={"label": "音量（dB）", "order": 7, "step": 1},
+    )
+    temperature: float = Field(
+        default=0.7,
+        description="采样温度（0 ~ 1），越高越有变化。",
+        json_schema_extra={"label": "Temperature", "order": 8, "step": 0.05},
+    )
+    top_p: float = Field(
+        default=0.7,
+        description="Top-p 采样（0 ~ 1）。",
+        json_schema_extra={"label": "Top P", "order": 9, "step": 0.05},
+    )
+    latency: str = Field(
+        default="normal",
+        description="延迟模式（low/normal/balanced）。",
+        json_schema_extra={
+            "label": "延迟模式", "order": 10,
+            "hint": "normal 音质最稳；balanced / low 出声更快但可能略降音质。",
+        },
+    )
+    normalize: bool = Field(
+        default=True,
+        description="是否让服务端把数字、日期、单位等转成读法。",
+        json_schema_extra={"label": "文本规范化", "order": 11},
+    )
+
+    @field_validator("api_key", "reference_id", mode="before")
+    @classmethod
+    def _normalize_ids(cls, value: Any) -> str:
+        return _normalize_string(value)
 
 
 class SiliconFlowSTTConfig(PluginConfigBase):
     """SiliconFlow STT (SenseVoice) 配置。"""
 
     __ui_label__: ClassVar[str] = "SiliconFlow STT"
-    __ui_order__: ClassVar[int] = 10
+    __ui_order__: ClassVar[int] = 11
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (
+        ("voice.enabled", True),
+        ("voice.stt_provider", "siliconflow_sensevoice"),
+    )
 
     api_key: str = Field(
         default="",
         description="SiliconFlow API 密钥。",
-        json_schema_extra={
-            "label": "API Key", "input_type": "password", "order": 0,
-            "depends_on": "voice.stt_provider", "depends_value": "siliconflow_sensevoice",
-        },
+        json_schema_extra={"label": "API Key", "input_type": "password", "order": 0},
     )
     api_base: str = Field(
         default="https://api.siliconflow.cn/v1",
         description="SiliconFlow API 地址。",
-        json_schema_extra={
-            "label": "API 地址", "order": 1,
-            "depends_on": "voice.stt_provider", "depends_value": "siliconflow_sensevoice",
-        },
+        json_schema_extra={"label": "API 地址", "order": 1},
     )
     model: str = Field(
         default="FunAudioLLM/SenseVoiceSmall",
         description="STT 模型标识。",
-        json_schema_extra={
-            "label": "模型", "order": 2,
-            "depends_on": "voice.stt_provider", "depends_value": "siliconflow_sensevoice",
-        },
+        json_schema_extra={"label": "模型", "order": 2},
     )
 
 
@@ -764,38 +813,27 @@ class AliyunSTTConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "阿里云语音识别"
     __ui_order__: ClassVar[int] = 12
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (("voice.enabled", True), ("voice.stt_provider", "aliyun"))
 
     access_key_id: str = Field(
         default="",
         description="阿里云 AccessKey ID。",
-        json_schema_extra={
-            "label": "AccessKey ID", "order": 0,
-            "depends_on": "voice.stt_provider", "depends_value": "aliyun",
-        },
+        json_schema_extra={"label": "AccessKey ID", "order": 0},
     )
     access_key_secret: str = Field(
         default="",
         description="阿里云 AccessKey Secret。",
-        json_schema_extra={
-            "label": "AccessKey Secret", "input_type": "password", "order": 1,
-            "depends_on": "voice.stt_provider", "depends_value": "aliyun",
-        },
+        json_schema_extra={"label": "AccessKey Secret", "input_type": "password", "order": 1},
     )
     app_key: str = Field(
         default="",
         description="智能语音交互项目 App Key。",
-        json_schema_extra={
-            "label": "App Key", "order": 2,
-            "depends_on": "voice.stt_provider", "depends_value": "aliyun",
-        },
+        json_schema_extra={"label": "App Key", "order": 2},
     )
     region: str = Field(
         default="cn-shanghai",
         description="服务区域。",
-        json_schema_extra={
-            "label": "区域", "order": 3,
-            "depends_on": "voice.stt_provider", "depends_value": "aliyun",
-        },
+        json_schema_extra={"label": "区域", "order": 3},
     )
 
 
@@ -804,39 +842,49 @@ class TencentSTTConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "腾讯云语音识别"
     __ui_order__: ClassVar[int] = 13
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (("voice.enabled", True), ("voice.stt_provider", "tencent"))
 
     secret_id: str = Field(
         default="",
         description="腾讯云 SecretId。",
-        json_schema_extra={
-            "label": "SecretId", "order": 0,
-            "depends_on": "voice.stt_provider", "depends_value": "tencent",
-        },
+        json_schema_extra={"label": "SecretId", "order": 0},
     )
     secret_key: str = Field(
         default="",
         description="腾讯云 SecretKey。",
-        json_schema_extra={
-            "label": "SecretKey", "input_type": "password", "order": 1,
-            "depends_on": "voice.stt_provider", "depends_value": "tencent",
-        },
+        json_schema_extra={"label": "SecretKey", "input_type": "password", "order": 1},
     )
     engine: str = Field(
         default="16k_zh",
         description="识别引擎类型。",
-        json_schema_extra={
-            "label": "引擎", "order": 2,
-            "depends_on": "voice.stt_provider", "depends_value": "tencent",
-        },
+        json_schema_extra={"label": "引擎", "order": 2},
     )
     region: str = Field(
         default="ap-shanghai",
         description="服务区域。",
-        json_schema_extra={
-            "label": "区域", "order": 3,
-            "depends_on": "voice.stt_provider", "depends_value": "tencent",
-        },
+        json_schema_extra={"label": "区域", "order": 3},
     )
+
+
+# WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。
+WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("basic", "基础设置", ("plugin", "connection", "platform", "presence")),
+    ("chat", "聊天与过滤", ("chat", "filters")),
+    (
+        "voice",
+        "语音",
+        (
+            "voice",
+            "siliconflow_tts",
+            "gptsovits_tts",
+            "minimax_tts",
+            "fishaudio_tts",
+            "siliconflow_stt",
+            "aliyun_stt",
+            "tencent_stt",
+        ),
+    ),
+)
 
 
 class DiscordPluginSettings(PluginConfigBase):
@@ -852,6 +900,7 @@ class DiscordPluginSettings(PluginConfigBase):
     siliconflow_tts: SiliconFlowTTSConfig = Field(default_factory=SiliconFlowTTSConfig)
     gptsovits_tts: GPTSoVITSConfig = Field(default_factory=GPTSoVITSConfig)
     minimax_tts: MiniMaxTTSConfig = Field(default_factory=MiniMaxTTSConfig)
+    fishaudio_tts: FishAudioTTSConfig = Field(default_factory=FishAudioTTSConfig)
     siliconflow_stt: SiliconFlowSTTConfig = Field(default_factory=SiliconFlowSTTConfig)
     aliyun_stt: AliyunSTTConfig = Field(default_factory=AliyunSTTConfig)
     tencent_stt: TencentSTTConfig = Field(default_factory=TencentSTTConfig)
@@ -936,3 +985,22 @@ def _normalize_string_list(value: Any) -> List[str]:
             seen.add(text)
             result.append(text)
     return result
+
+
+def is_section_visible(config_class: Any, config_data: Mapping[str, Any]) -> bool:
+    """按配置节的 ``__ui_visible_when__`` 条件判断该节是否应在 WebUI 中显示。
+
+    Args:
+        config_class: 配置节模型类。
+        config_data: 已规范化的完整插件配置字典。
+
+    Returns:
+        bool: 未声明条件或全部条件满足时返回 True。
+    """
+    for path, expected in getattr(config_class, "__ui_visible_when__", ()):
+        current: Any = config_data
+        for key in path.split("."):
+            current = current.get(key) if isinstance(current, Mapping) else None
+        if current != expected:
+            return False
+    return True
