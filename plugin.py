@@ -1216,12 +1216,14 @@ class DiscordAdapterPlugin(MaiBotPlugin):
     _CUSTOM_EMOJI_NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r":?([A-Za-z0-9_]{2,32}):?")
 
     # ponytail: platforms 写死默认平台名，platform_name 改成别的名字时工具不会出现
+    # 首轮就可能用来代替回复，保持 visible；描述兼作检索索引，写进用户会说的动词和同义词
     @Tool(
         "discord_react",
         description=(
-            "用伺服器的 Discord 自訂表情回應訊息，可偶爾代替一句簡短文字。只傳目標訊息與想表達的情緒，"
-            "工具會看聊天上下文與候選圖片自行挑選。挑不到就不要送；不使用普通 Unicode emoji。"
-            "需要回答問題或安慰時仍用文字，不要每則都加表情。"
+            "Discord 表情回應（reaction／react）：對一則訊息按表情、貼表情、加反應、表態，"
+            "可偶爾代替一句簡短文字，例如附和、按讚、笑一下、表示收到、驚訝、無語、心疼。"
+            "只傳目標訊息與想表達的情緒，工具會看聊天上下文與伺服器自訂表情圖自行挑選；"
+            "挑不到就不要送，不使用普通 Unicode emoji。需要回答問題或安慰時仍用文字，不要每則都加表情。"
         ),
         parameters=[
             ToolParameterInfo(
