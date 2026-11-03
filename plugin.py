@@ -1367,6 +1367,111 @@ class DiscordAdapterPlugin(MaiBotPlugin):
             return None
         return loaded[index - 1][0]
 
+    # 以下工具首轮用不到，设为 deferred：名称统一 discord_ 前缀，tool_search 搜 discord 时会一起命中；
+    # MaiBot 的检索按子串匹配，描述里简繁两种写法的常用说法都放进去
+    @Tool(
+        "discord_unreact",
+        description=(
+            "收回、取消、移除自己在一則 Discord 訊息上加的表情回應（reaction），例如按錯或不想再表態時。"
+            "（收回表情、取消表情、撤回表情、取消回应、移除 reaction）"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="msg_id", param_type=ToolParamType.STRING, description="要收回表情的訊息 msg_id。", required=True
+            ),
+        ],
+        platforms=DEFAULT_PLATFORM_NAME,
+        visibility="deferred",
+    )
+    async def handle_discord_unreact(
+        self, msg_id: str = "", group_id: str = "", user_id: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
+        """收回 bot 自己在目标消息上的全部 reaction。"""
+        del kwargs
+        if self._thread_routing is None or self._client_manager is None or self._client_manager.client is None:
+            return {"success": False, "error": "Discord 客户端未就绪"}
+        target = await self._thread_routing.find_message(str(msg_id or "").strip(), group_id, user_id)
+        if target is None:
+            return {"success": False, "error": f"找不到消息 {msg_id}"}
+        mine = [reaction.emoji for reaction in target.reactions if reaction.me]
+        if not mine:
+            return {"success": False, "error": f"消息 {msg_id} 上没有自己加的表情回应"}
+        try:
+            for emoji in mine:
+                await target.remove_reaction(emoji, self._client_manager.client.user)
+        except discord.HTTPException as exc:
+            return {"success": False, "error": f"收回表情回应失败：{exc}"}
+        return {"success": True, "content": f"已收回消息 {msg_id} 上的 {' '.join(str(emoji) for emoji in mine)}"}
+
+    @Tool(
+        "discord_voice_join",
+        description=(
+            "加入、進入 Discord 語音頻道，到發話者目前所在的語音頻道用語音聊天；只能進設定允許的頻道。"
+            "（加入语音、进语音、来语音、上麦、进通话、语音聊天、voice）"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="msg_id",
+                param_type=ToolParamType.STRING,
+                description="提出要求的那則訊息 msg_id，用來找出對方所在的語音頻道。",
+                required=True,
+            ),
+        ],
+        platforms=DEFAULT_PLATFORM_NAME,
+        visibility="deferred",
+    )
+    async def handle_discord_voice_join(
+        self, msg_id: str = "", group_id: str = "", user_id: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
+        """连接发话者所在的语音频道；频道必须在固定频道或自动候选列表里。"""
+        del kwargs
+        if self._voice_manager is None:
+            return {"success": False, "error": "语音功能未启用"}
+        if self._thread_routing is None:
+            return {"success": False, "error": "Discord 客户端未就绪"}
+        target = await self._thread_routing.find_message(str(msg_id or "").strip(), group_id, user_id)
+        if target is None:
+            return {"success": False, "error": f"找不到消息 {msg_id}"}
+        # 私聊里的作者是 User，没有语音状态
+        voice_state = getattr(target.author, "voice", None)
+        channel = voice_state.channel if voice_state is not None else None
+        if channel is None:
+            return {"success": False, "error": "对方目前不在语音频道"}
+        if not self._voice_manager.can_join(channel.id):
+            return {"success": False, "error": f"语音频道 {channel.name} 不在设置允许加入的频道里"}
+        if not await self._voice_manager.connect(channel.id):
+            return {"success": False, "error": f"加入语音频道 {channel.name} 失败（权限或连接问题，详见日志）"}
+        return {"success": True, "content": f"已加入语音频道 {channel.name}"}
+
+    @Tool(
+        "discord_voice_leave",
+        description=(
+            "離開、退出目前所在的 Discord 語音頻道，停止用語音說話；設定為固定頻道常駐時不會離開。"
+            "（离开语音、退出语音、下麦、挂断、退出通话、voice）"
+        ),
+        parameters=[],
+        platforms=DEFAULT_PLATFORM_NAME,
+        visibility="deferred",
+    )
+    async def handle_discord_voice_leave(self, group_id: str = "", **kwargs: Any) -> Dict[str, Any]:
+        """断开语音连接；只接受同一服务器频道里的要求，固定模式不离开。"""
+        del kwargs
+        if self._voice_manager is None or self._client_manager is None or self._client_manager.client is None:
+            return {"success": False, "error": "语音功能未启用"}
+        voice_channel_id = self._voice_manager.get_connected_channel_id()
+        if voice_channel_id is None:
+            return {"success": False, "error": "目前不在语音频道"}
+        if self._voice_manager.voice_mode == "fixed":
+            return {"success": False, "error": "语音设置为固定频道常驻，不能离开"}
+        client = self._client_manager.client
+        session_channel = client.get_channel(int(group_id)) if str(group_id or "").isdigit() else None
+        voice_channel = client.get_channel(voice_channel_id)
+        # 只有一个语音连接，别的服务器或私聊里的人不能把它叫走
+        if session_channel is None or voice_channel is None or session_channel.guild.id != voice_channel.guild.id:
+            return {"success": False, "error": "只能在同一个服务器的频道里要求离开语音"}
+        await self._voice_manager.disconnect()
+        return {"success": True, "content": f"已离开语音频道 {voice_channel.name}"}
+
     @API("adapter.discord.channel.send_message", description="发送 Discord 频道消息", version="1", public=True)
     async def send_channel_message(self, channel_id: str, text: str) -> Dict[str, Any]:
         """给 room 这类跨会话转发提供稳定的频道直发入口。"""

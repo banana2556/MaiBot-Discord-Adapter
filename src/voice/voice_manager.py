@@ -537,6 +537,17 @@ class VoiceManager:
         """
         return self.voice_client is not None and self.voice_client.is_connected()
 
+    @property
+    def voice_mode(self) -> str:
+        """配置的频道模式：``"fixed"`` 或 ``"auto"``。"""
+        return self._voice_mode
+
+    def can_join(self, channel_id: int) -> bool:
+        """频道是否在配置允许范围内：固定模式只认固定频道，自动模式只认候选列表。"""
+        if self._voice_mode == "fixed":
+            return str(channel_id) == str(self._fixed_channel_id).strip()
+        return channel_id in self._auto_channel_list
+
     def get_connected_channel_id(self) -> Optional[int]:
         """返回当前已连接语音频道的 ID（未连接时为 None）。
 
