@@ -906,7 +906,7 @@ class ReminderConfig(PluginConfigBase):
 
 
 class LifeConfig(PluginConfigBase):
-    """日常生活：每天生成麦麦每小时的生活时程，定期按聊天调整，当前状态会注入对话并同步到 Discord 状态。"""
+    """日常生活：每天生成麦麦每小时的生活时程，定期按聊天调整，当前状态会注入对话并同步到 Discord 状态。生活设定在「日常 → 日常生活」页面填写。"""
 
     __ui_label__: ClassVar[str] = "日常生活"
     __ui_order__: ClassVar[int] = 21
@@ -947,10 +947,15 @@ class LifeConfig(PluginConfigBase):
         description="把当前生活状态加进麦麦的对话上下文，让她聊天时知道自己正在做什么。",
         json_schema_extra={"label": "注入对话上下文", "order": 5},
     )
+    sleep_silence: bool = Field(
+        default=True,
+        description="时程上在睡觉的时段，Discord 群聊与私聊只静默接收消息、不回复，也不主动开话题；有提醒到点会叫醒她 30 分钟。",
+        json_schema_extra={"label": "睡觉时不回复", "order": 6},
+    )
     model_task: Literal["replyer", "planner"] = Field(
         default="replyer",
         description="生成与调整时程沿用 MaiBot 哪个模型任务：replyer=回复模型, planner=规划模型。",
-        json_schema_extra={"label": "使用模型", "order": 6},
+        json_schema_extra={"label": "使用模型", "order": 7},
     )
 
     @field_validator("generate_time", mode="before")
@@ -960,7 +965,7 @@ class LifeConfig(PluginConfigBase):
 
 
 class TopicConfig(PluginConfigBase):
-    """主动话题：按排程根据群的记忆和最近聊天找相关新闻或影片，唤醒麦麦分享到群里。"""
+    """主动话题：按排程根据群的记忆和最近聊天找相关新闻或影片，唤醒麦麦分享到群里。频道和排程在「日常 → 主動話題」页面设置。"""
 
     __ui_label__: ClassVar[str] = "主动话题"
     __ui_order__: ClassVar[int] = 22
@@ -1016,6 +1021,10 @@ class TopicConfig(PluginConfigBase):
     def _normalize_cron(cls, value: Any) -> str:
         return " ".join(_normalize_string(value).split()) or "0 12,20 * * *"
 
+
+# 改到「日常」工作区页面设置、不在插件配置页显示的字段：(配置节, 字段)。值存在插件数据目录的 daily_settings.json，
+# 运行时覆盖配置里的同名字段；第一次启动时从原配置搬过去
+PAGE_MANAGED_FIELDS: tuple[tuple[str, str], ...] = (("life", "life_setting"), ("topics", "channel_list"), ("topics", "cron"))
 
 # WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。
 WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (

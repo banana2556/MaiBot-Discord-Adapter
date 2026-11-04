@@ -55,7 +55,8 @@
     "component.disable",
     "web.search",
     "knowledge.search",
-    "personality.get_current"
+    "personality.get_current",
+    "frequency.set_adjust"
   ],
   "i18n": {
     "default_locale": "zh-CN",

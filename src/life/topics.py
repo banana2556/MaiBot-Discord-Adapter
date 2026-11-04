@@ -36,6 +36,10 @@ class TopicScout:
         self._bad_cron = ""
 
     @property
+    def state(self) -> Dict[str, Any]:
+        return self._state
+
+    @property
     def next_due(self) -> Optional[datetime]:
         raw = self._state.get("next_due")
         return datetime.fromisoformat(raw) if raw else None
@@ -60,13 +64,17 @@ class TopicScout:
             return
         if now < datetime.fromisoformat(self._state["next_due"]):
             return
+        await self.run_all(now, config)
+        self._state["next_due"] = next_run(fields, minute + timedelta(minutes=1)).isoformat()
+        self._save()
+
+    async def run_all(self, now: datetime, config: Any) -> None:
+        """为每个频道各开一次话题；单个频道失败不影响其他频道。"""
         for channel_id in config.channel_list:
             try:
                 await self.run_channel(channel_id, now, config)
             except Exception:
                 self._ctx.logger.exception(f"频道 {channel_id} 主动话题失败")
-        self._state["next_due"] = next_run(fields, minute + timedelta(minutes=1)).isoformat()
-        self._save()
 
     async def run_channel(self, channel_id: str, now: datetime, config: Any) -> Optional[str]:
         """为一个频道挑话题并唤醒麦麦分享；返回分享的内容说明，没分享时返回 None。"""

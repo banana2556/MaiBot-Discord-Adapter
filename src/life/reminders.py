@@ -157,6 +157,8 @@ class ReminderMixin:
                 late_minutes = int((now - scheduled).total_seconds() // 60)
                 if late_minutes >= 1:
                     intent += f"\n原定 {describe(scheduled)}，已經晚了 {late_minutes} 分鐘。"
+                # 睡觉时段也要叫醒她来提醒，否则静默中的聊天会把这次触发吞掉
+                await self._wake_up()
                 result = await self.ctx.maisaka.proactive.trigger(
                     reminder["stream_id"], intent, reason=FOLLOWUP if reminder["auto"] else "定時提醒"
                 )
@@ -364,9 +366,8 @@ class ReminderMixin:
 
     # ===== WebUI 页面 API =====
 
-    @API("webui_summary", description="讀取所有聊天待觸發的提醒、指令和工具說明", version="1")
-    async def webui_summary(self) -> Dict[str, Any]:
-        """WebUI 显示真实聊天名称：群名，私聊显示「某某的私聊」。"""
+    async def _webui_chat_names(self) -> Dict[str, str]:
+        """聊天流 ID -> 真实聊天名称：群名，私聊显示「某某的私聊」；读不到时返回空字典，页面改显示 ID。"""
         streams = await self.ctx.chat.get_all_streams(platform="all_platforms")
         names: Dict[str, str] = {}
         if isinstance(streams, list):
@@ -374,7 +375,13 @@ class ReminderMixin:
                 person = stream["user_cardname"] or stream["user_nickname"]
                 names[stream["stream_id"]] = stream["group_name"] or f"{person}的私聊"
         else:
-            self.ctx.logger.warning(f"读取聊天列表失败，提醒列表改为显示聊天 ID：{streams.get('error')}")
+            self.ctx.logger.warning(f"读取聊天列表失败，WebUI 改为显示聊天 ID：{streams.get('error')}")
+        return names
+
+    @API("webui_summary", description="讀取所有聊天待觸發的提醒、指令和工具說明", version="1")
+    async def webui_summary(self) -> Dict[str, Any]:
+        """WebUI 显示真实聊天名称：群名，私聊显示「某某的私聊」。"""
+        names = await self._webui_chat_names()
         rows = [{**row, "chat": names.get(row["stream_id"], row["stream_id"])} for row in self._reminder_rows()]
         return {
             "now": describe(datetime.now()),

@@ -3,6 +3,517 @@
   "workspace_title": "日常",
   "pages": [
     {
+      "id": "life",
+      "title": "日常生活",
+      "description": "麥麥今天每小時在做什麼；目前時段會注入對話，並同步成 Discord 狀態。",
+      "placement": "workspace",
+      "icon": "chart",
+      "queries": {
+        "life": {
+          "api": "webui_life",
+          "version": "1"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "value": {
+            "source": "life",
+            "field": "notice"
+          },
+          "when": {
+            "reference": {
+              "source": "life",
+              "field": "notice"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "目前在做",
+              "value": {
+                "source": "life",
+                "field": "current"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "Discord 狀態",
+              "value": {
+                "source": "life",
+                "field": "presence"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "睡眠狀態",
+              "value": {
+                "source": "life",
+                "field": "sleep_state"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "上次調整",
+              "value": {
+                "source": "life",
+                "field": "adjusted_at"
+              }
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "children": [
+            {
+              "type": "text",
+              "label": "時程日期",
+              "value": {
+                "source": "life",
+                "field": "date"
+              }
+            },
+            {
+              "type": "text",
+              "label": "最近一次調整原因",
+              "value": {
+                "source": "life",
+                "field": "note"
+              }
+            },
+            {
+              "type": "button",
+              "label": "立即重新生成今天的時程",
+              "action": "regenerate",
+              "variant": "muted"
+            },
+            {
+              "type": "button",
+              "label": "叫醒她 30 分鐘",
+              "action": "wake",
+              "disabled_when": {
+                "reference": {
+                  "source": "life",
+                  "field": "sleeping"
+                },
+                "operator": "equals",
+                "expected": false
+              },
+              "disabled_reason": "她現在醒著，或沒開「睡覺時不回覆」"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "label": "今天的時程（▶ 是目前時段）",
+          "value": {
+            "source": "life",
+            "field": "hours"
+          },
+          "when": {
+            "reference": {
+              "source": "life",
+              "field": "hours"
+            },
+            "operator": "not_empty"
+          },
+          "columns": [
+            {
+              "field": "time",
+              "label": "時段"
+            },
+            {
+              "field": "asleep",
+              "label": "睡覺"
+            },
+            {
+              "field": "activity",
+              "label": "在做什麼"
+            },
+            {
+              "field": "mood",
+              "label": "心情"
+            },
+            {
+              "field": "status_text",
+              "label": "狀態文字"
+            },
+            {
+              "field": "online_status",
+              "label": "在線狀態"
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "生活設定",
+          "default_open": true,
+          "children": [
+            {
+              "type": "text",
+              "label": "目前的生活設定",
+              "value": {
+                "source": "life",
+                "field": "life_setting"
+              }
+            },
+            {
+              "type": "input",
+              "name": "life_setting",
+              "label": "新的生活設定（整段取代，下次生成時程時生效；例：住台北的大學生，晚睡晚起，喜歡打音遊）"
+            },
+            {
+              "type": "button",
+              "label": "儲存生活設定",
+              "action": "save_setting"
+            }
+          ]
+        }
+      ],
+      "actions": {
+        "save_setting": {
+          "api": "webui_life_save_setting",
+          "version": "1",
+          "parameters": {
+            "life_setting": {
+              "type": "string",
+              "required": true,
+              "max_length": 2000
+            }
+          }
+        },
+        "regenerate": {
+          "api": "webui_life_regenerate",
+          "version": "1",
+          "confirmation": "會用模型重新排今天的時程，取代目前的安排（含睡覺時段）。確定？"
+        },
+        "wake": {
+          "api": "webui_life_wake",
+          "version": "1"
+        }
+      }
+    },
+    {
+      "id": "topics",
+      "title": "主動話題",
+      "description": "按排程挑群裡會感興趣的新聞或影片，喚醒麥麥分享；點一列可看連結。",
+      "placement": "workspace",
+      "icon": "puzzle",
+      "queries": {
+        "topics": {
+          "api": "webui_topics",
+          "version": "1"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "value": {
+            "source": "topics",
+            "field": "notice"
+          },
+          "when": {
+            "reference": {
+              "source": "topics",
+              "field": "notice"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "下次開話題",
+              "value": {
+                "source": "topics",
+                "field": "next_due"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "排程（cron）",
+              "value": {
+                "source": "topics",
+                "field": "cron"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "分享來源",
+              "value": {
+                "source": "topics",
+                "field": "sources"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "已分享",
+              "value": {
+                "source": "topics",
+                "field": "shared_count"
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "label": "頻道（點一列可移除）",
+          "value": {
+            "source": "topics",
+            "field": "channels"
+          },
+          "when": {
+            "reference": {
+              "source": "topics",
+              "field": "channels"
+            },
+            "operator": "not_empty"
+          },
+          "columns": [
+            {
+              "field": "channel_id",
+              "label": "頻道 ID"
+            },
+            {
+              "field": "chat",
+              "label": "聊天"
+            }
+          ],
+          "selection": "channelRow",
+          "detail": "channelDetails"
+        },
+        {
+          "type": "card",
+          "children": [
+            {
+              "type": "input",
+              "name": "new_channel_id",
+              "label": "加入頻道（Discord 頻道 ID）"
+            },
+            {
+              "type": "button",
+              "label": "加入頻道",
+              "action": "add_channel"
+            },
+            {
+              "type": "input",
+              "name": "cron",
+              "label": "新的排程（5 段 cron：分 時 日 月 星期，例：0 12,20 * * *）"
+            },
+            {
+              "type": "button",
+              "label": "儲存排程",
+              "action": "save_cron"
+            },
+            {
+              "type": "button",
+              "label": "立刻開一次話題",
+              "action": "run_now",
+              "variant": "muted"
+            }
+          ]
+        },
+        {
+          "type": "dialog",
+          "name": "channelDetails",
+          "label": "頻道",
+          "children": [
+            {
+              "type": "text",
+              "label": "頻道 ID",
+              "value": {
+                "scope": "selection",
+                "source": "channelRow",
+                "field": "channel_id"
+              }
+            },
+            {
+              "type": "text",
+              "label": "聊天",
+              "value": {
+                "scope": "selection",
+                "source": "channelRow",
+                "field": "chat"
+              }
+            },
+            {
+              "type": "button",
+              "label": "移除這個頻道",
+              "action": "remove_channel",
+              "variant": "danger"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "value": "還沒有分享紀錄。",
+          "when": {
+            "reference": {
+              "source": "topics",
+              "field": "history"
+            },
+            "operator": "empty"
+          }
+        },
+        {
+          "type": "table",
+          "label": "分享紀錄（新的在前）",
+          "value": {
+            "source": "topics",
+            "field": "history"
+          },
+          "when": {
+            "reference": {
+              "source": "topics",
+              "field": "history"
+            },
+            "operator": "not_empty"
+          },
+          "selection": "topicRow",
+          "detail": "topicDetails",
+          "columns": [
+            {
+              "field": "time",
+              "label": "時間"
+            },
+            {
+              "field": "chat",
+              "label": "聊天"
+            },
+            {
+              "field": "kind",
+              "label": "類型"
+            },
+            {
+              "field": "topic",
+              "label": "話題"
+            },
+            {
+              "field": "title",
+              "label": "標題"
+            }
+          ]
+        },
+        {
+          "type": "dialog",
+          "name": "topicDetails",
+          "label": "分享詳情",
+          "children": [
+            {
+              "type": "text",
+              "label": "時間",
+              "value": {
+                "scope": "selection",
+                "source": "topicRow",
+                "field": "time"
+              }
+            },
+            {
+              "type": "text",
+              "label": "聊天",
+              "value": {
+                "scope": "selection",
+                "source": "topicRow",
+                "field": "chat"
+              }
+            },
+            {
+              "type": "text",
+              "label": "類型",
+              "value": {
+                "scope": "selection",
+                "source": "topicRow",
+                "field": "kind"
+              }
+            },
+            {
+              "type": "text",
+              "label": "話題",
+              "value": {
+                "scope": "selection",
+                "source": "topicRow",
+                "field": "topic"
+              }
+            },
+            {
+              "type": "text",
+              "label": "標題",
+              "value": {
+                "scope": "selection",
+                "source": "topicRow",
+                "field": "title"
+              }
+            },
+            {
+              "type": "text",
+              "label": "連結",
+              "value": {
+                "scope": "selection",
+                "source": "topicRow",
+                "field": "url"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": {
+        "add_channel": {
+          "api": "webui_topics_add_channel",
+          "version": "1",
+          "parameters": {
+            "new_channel_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 40
+            }
+          }
+        },
+        "remove_channel": {
+          "api": "webui_topics_remove_channel",
+          "version": "1",
+          "parameters": {
+            "channel_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 40
+            }
+          },
+          "arguments": {
+            "channel_id": {
+              "scope": "selection",
+              "source": "channelRow",
+              "field": "channel_id"
+            }
+          },
+          "confirmation": "確定不再在這個頻道主動開話題？"
+        },
+        "save_cron": {
+          "api": "webui_topics_save_cron",
+          "version": "1",
+          "parameters": {
+            "cron": {
+              "type": "string",
+              "required": true,
+              "max_length": 100
+            }
+          }
+        },
+        "run_now": {
+          "api": "webui_topics_run_now",
+          "version": "1",
+          "confirmation": "現在就為每個頻道各開一次話題（會用模型和聯網搜尋）。確定？"
+        }
+      }
+    },
+    {
       "id": "reminders",
       "title": "定時提醒",
       "description": "所有聊天待觸發的提醒，點一列可查看詳情或取消。",

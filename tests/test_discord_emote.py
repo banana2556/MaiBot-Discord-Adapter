@@ -190,7 +190,7 @@ def test_manifest_declares_every_host_capability_the_plugin_calls() -> None:
     used = {
         match.group(1)
         for path in [root / "plugin.py", *(root / "src").rglob("*.py")]
-        for match in re.finditer(r"ctx\.((?:llm|message|send|config|emoji|chat)\.\w+)\(", path.read_text(encoding="utf-8"))
+        for match in re.finditer(r"ctx\.((?:llm|message|send|config|emoji|chat|frequency)\.\w+)\(", path.read_text(encoding="utf-8"))
     }
     declared = set(json.loads((root / "_manifest.json").read_text(encoding="utf-8"))["capabilities"])
     assert used and used <= declared, used - declared

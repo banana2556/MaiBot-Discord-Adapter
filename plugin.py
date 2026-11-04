@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 import json
 from pathlib import Path
@@ -20,12 +20,13 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from maim_message import FormatInfo, GroupInfo, UserInfo
 
-from .config import WEBUI_CONFIG_TABS, DiscordPluginSettings, is_section_visible
+from .config import PAGE_MANAGED_FIELDS, WEBUI_CONFIG_TABS, DiscordPluginSettings, is_section_visible
 from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
 from .src.emoji_grid import build_numbered_grid, grid_shape
-from .src.life.common import list_group_streams, readable_chat
+from .src.life.common import list_group_streams, load_state, readable_chat, save_state
+from .src.life.cron import describe, parse_cron
 from .src.life.daily_life import DailyLife
 from .src.life.reminders import ReminderMixin
 from .src.life.topics import TopicScout
@@ -45,6 +46,31 @@ EMOTE_NUDGE = (
     "【表情】這一輪如果有值得表態的訊息（好笑、好消息、附和、驚訝、無語），"
     "可以用 discord_emote 在那則訊息按個 reaction；可以和 reply 同一輪一起呼叫，也可以只按表情不說話。沒有合適的就略過。"
 )
+# 睡觉时段这一轮规划只留这些工具，并接上这段提醒
+SLEEP_ALLOWED_TOOLS = {"stop"}
+SLEEP_NOTE = "【睡眠中】你現在正在睡覺，看不到也不會回這些訊息。這一輪不要回覆、不要發任何東西，直接呼叫 stop()。"
+# 提醒到点或从页面叫醒后，这么多分钟内当作醒着
+WAKE_MINUTES = 30
+ONLINE_STATUS_LABELS = {"online": "🟢 在線", "idle": "🌙 閒置", "dnd": "⛔ 請勿打擾"}
+TOPIC_SOURCE_LABELS = {"news": "新聞", "video": "影片"}
+
+
+def _tool_names(kwargs: Dict[str, Any]) -> set[str]:
+    """planner Hook 载荷里本轮候选工具的名称（OpenAI function 结构）。"""
+    tools = kwargs.get("tool_definitions")
+    return {
+        str((tool.get("function") or {}).get("name") or "")
+        for tool in (tools if isinstance(tools, list) else [])
+        if isinstance(tool, dict)
+    }
+
+
+def _short_time(iso: Any) -> str:
+    """状态文件里的 ISO 时间 -> WebUI 显示的「MM-DD HH:MM」；没有或格式不对时显示「—」。"""
+    try:
+        return datetime.fromisoformat(str(iso)).strftime("%m-%d %H:%M")
+    except ValueError:
+        return "—"
 
 
 class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
@@ -84,6 +110,12 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         self._topic_scout: Optional[TopicScout] = None
         self._daily_task: Optional[asyncio.Task[None]] = None
         self._daily_jobs: Dict[str, asyncio.Task[None]] = {}
+        # 「日常」页面设置的字段 {配置节: {字段: 值}}，见 PAGE_MANAGED_FIELDS
+        self._page_settings: Dict[str, Dict[str, Any]] = {}
+        self._page_settings_path: Optional[Path] = None
+        # 睡觉时被调成 0 回复频率的会话，醒来时还原
+        self._silenced_sessions: set[str] = set()
+        self._awake_until: Optional[datetime] = None
 
     async def on_load(self) -> None:
         """插件加载时启动日常功能的后台轮询，并根据当前配置启动或保持 Discord 连接。"""
@@ -95,6 +127,8 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         for task in (self._daily_task, *self._daily_jobs.values()):
             if task is not None:
                 task.cancel()
+        # 不还原的话，被静默的聊天会一直不回复到 MaiBot 重启
+        await self._restore_silenced()
         await self._stop_connection()
 
     # ===== 日常功能：定时提醒、日常生活、主动话题 =====
@@ -102,6 +136,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
     async def _start_daily_features(self) -> None:
         """读回提醒和日常状态，按配置开关提醒工具，开始统一的后台轮询；与 Discord 是否连线无关。"""
         data_dir = self.ctx.paths.data_dir
+        self._load_page_settings(data_dir / "daily_settings.json")
         self._load_reminders()
         await self._apply_reminder_switches()
         self._daily_life = DailyLife(
@@ -121,7 +156,11 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
                 await self.fire_due_reminders(now)
             if settings.life.enabled and self._daily_life is not None:
                 self._spawn_daily_job("life", partial(self._daily_life.tick, now, settings.life))
-            if settings.topics.enabled and self._topic_scout is not None:
+            sleeping = self._sleeping(now)
+            if not sleeping and self._silenced_sessions:
+                await self._restore_silenced()
+            # ponytail: 睡觉时跳过整轮，错过的话题醒来后马上补发；要严格按时就改成睡觉时只推进 next_due
+            if settings.topics.enabled and self._topic_scout is not None and not sleeping:
                 self._spawn_daily_job("topics", partial(self._topic_scout.tick, now, settings.topics))
 
     def _spawn_daily_job(self, name: str, factory: Callable[[], Awaitable[None]]) -> None:
@@ -156,6 +195,170 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             return str(stream["stream_id"])
         return None
 
+    @API("webui_life", description="讀取日常生活的目前狀態與今天的時程", version="1")
+    async def webui_life(self) -> Dict[str, Any]:
+        """WebUI 日常生活页：当前状态、最近一次调整和 24 个时段；没启用或还没生成时用 notice 说明。"""
+        config = self._load_settings().life
+        now = datetime.now()
+        state = self._daily_life.state if self._daily_life is not None else {}
+        hours = state.get("hours") if isinstance(state.get("hours"), list) and len(state["hours"]) == 24 else []
+        entry = hours[now.hour] if hours else None
+        if not config.enabled:
+            notice = "日常生活未啟用，到插件設定的「日常」分頁開啟。"
+        elif entry is None:
+            notice = f"還沒有時程，啟用後過了每日生成時間（{config.generate_time}）就會自動生成。"
+        elif state.get("date") != now.date().isoformat():
+            notice = f"今天的時程還沒生成，暫時沿用 {state.get('date')} 的安排。"
+        else:
+            notice = ""
+        sleeping = self._sleeping(now)
+        if not (entry and entry.get("asleep")):
+            sleep_state = "醒著"
+        elif sleeping:
+            sleep_state = "💤 睡覺中，不回覆"
+        elif not config.sleep_silence:
+            sleep_state = "💤 睡覺中（設定為照常回覆）"
+        else:
+            sleep_state = f"被叫醒了，{self._awake_until:%H:%M} 前照常回覆" if self._awake_until else "醒著"
+        return {
+            "now": describe(now),
+            "notice": notice,
+            "sleeping": sleeping,
+            "sleep_state": sleep_state,
+            "life_setting": config.life_setting or "（未填寫，按人設推想）",
+            "current": (f"{entry['activity']}（{entry['mood']}）" if entry["mood"] else entry["activity"]) if entry else "—",
+            "presence": f"{entry['status_text']}｜{ONLINE_STATUS_LABELS.get(entry['online_status'], entry['online_status'])}"
+            if entry
+            else "—",
+            "date": state.get("date") or "—",
+            "adjusted_at": _short_time(state.get("adjusted_at")),
+            "note": state.get("note") or "—",
+            "hours": [
+                {
+                    "time": f"{'▶ ' if hour == now.hour else ''}{hour:02d}:00",
+                    "activity": item["activity"],
+                    "mood": item["mood"] or "—",
+                    "status_text": item["status_text"],
+                    "online_status": ONLINE_STATUS_LABELS.get(item["online_status"], item["online_status"]),
+                    "asleep": "💤" if item.get("asleep") else "",
+                }
+                for hour, item in enumerate(hours)
+            ],
+        }
+
+    def _ensure_daily_job_idle(self, name: str) -> None:
+        """页面按钮要跑后台任务前确认同名任务没在跑，否则直接告诉使用者。"""
+        running = self._daily_jobs.get(name)
+        if running is not None and not running.done():
+            raise ValueError("上一次還在跑，稍後再試")
+
+    @API("webui_life_save_setting", description="儲存日常生活的生活設定", version="1")
+    async def webui_life_save_setting(self, life_setting: str = "") -> Dict[str, Any]:
+        """整段取代生活设定；下次生成时程时生效。"""
+        self._save_page_setting("life", "life_setting", life_setting.strip())
+        return {"saved": True}
+
+    @API("webui_life_regenerate", description="立即重新生成今天的日常生活時程", version="1")
+    async def webui_life_regenerate(self) -> Dict[str, Any]:
+        """在后台重新生成，页面稍后重新整理就能看到新时程。"""
+        config = self._load_settings().life
+        if not config.enabled or self._daily_life is None:
+            raise ValueError("日常生活未啟用")
+        self._ensure_daily_job_idle("life")
+        self._spawn_daily_job("life", partial(self._daily_life.generate, datetime.now(), config))
+        return {"started": True}
+
+    @API("webui_life_wake", description="把睡覺中的麥麥叫醒一陣子", version="1")
+    async def webui_life_wake(self) -> Dict[str, Any]:
+        if not self._sleeping(datetime.now()):
+            raise ValueError("她現在沒在睡覺")
+        await self._wake_up()
+        return {"awake_until": f"{self._awake_until:%H:%M}"}
+
+    @API("webui_topics_add_channel", description="加入主動話題的頻道", version="1")
+    async def webui_topics_add_channel(self, new_channel_id: str = "") -> Dict[str, Any]:
+        channel_id = new_channel_id.strip()
+        if not channel_id.isdigit():
+            raise ValueError("頻道 ID 要是一串數字（在 Discord 對頻道按右鍵 → 複製頻道 ID）")
+        channels = self._load_settings().topics.channel_list
+        if channel_id in channels:
+            raise ValueError("這個頻道已經在列表裡")
+        self._save_page_setting("topics", "channel_list", [*channels, channel_id])
+        return {"saved": True}
+
+    @API("webui_topics_remove_channel", description="移除主動話題的頻道", version="1")
+    async def webui_topics_remove_channel(self, channel_id: str = "") -> Dict[str, Any]:
+        channels = self._load_settings().topics.channel_list
+        self._save_page_setting("topics", "channel_list", [item for item in channels if item != channel_id])
+        return {"saved": True}
+
+    @API("webui_topics_save_cron", description="儲存主動話題的排程", version="1")
+    async def webui_topics_save_cron(self, cron: str = "") -> Dict[str, Any]:
+        cron = " ".join(cron.split())
+        parse_cron(cron)  # 不合法时抛 ValueError，页面直接显示原因
+        self._save_page_setting("topics", "cron", cron)
+        return {"saved": True}
+
+    @API("webui_topics_run_now", description="立刻為每個頻道開一次主動話題", version="1")
+    async def webui_topics_run_now(self) -> Dict[str, Any]:
+        """不看排程马上跑一次，不影响下次排程时间。"""
+        config = self._load_settings().topics
+        if self._topic_scout is None or not config.channel_list:
+            raise ValueError("還沒設定頻道")
+        if not (config.news_enabled or config.video_enabled):
+            raise ValueError("新聞和影片都關了，到插件設定的「日常」分頁開啟")
+        self._ensure_daily_job_idle("topics")
+        self._spawn_daily_job("topics", partial(self._topic_scout.run_all, datetime.now(), config))
+        return {"started": True}
+
+    @API("webui_topics", description="讀取主動話題的排程、頻道與分享紀錄", version="1")
+    async def webui_topics(self) -> Dict[str, Any]:
+        """WebUI 主动话题页：下次时间、各频道是否认得、分享过的内容（新的在前）。"""
+        config = self._load_settings().topics
+        state = self._topic_scout.state if self._topic_scout is not None else {}
+        names = await self._webui_chat_names()
+        channels = []
+        for channel_id in config.channel_list:
+            stream_id = await self._resolve_discord_stream(channel_id)
+            chat = names.get(stream_id, stream_id) if stream_id else "（還沒有人說話，MaiBot 不認得，會跳過）"
+            channels.append({"channel_id": channel_id, "chat": chat})
+        history = [
+            (str(item.get("time") or ""), stream_id, item)
+            for stream_id, items in (state.get("history") or {}).items()
+            for item in items
+        ]
+        history.sort(key=lambda row: row[0], reverse=True)
+        sources = [label for enabled, label in ((config.news_enabled, "新聞"), (config.video_enabled, "影片")) if enabled]
+        if not config.enabled:
+            notice = "主動話題未啟用，到插件設定的「日常」分頁開啟。"
+        elif not config.channel_list:
+            notice = "還沒設定頻道，主動話題不會發。"
+        elif not sources:
+            notice = "新聞和影片都關了，主動話題不會發。"
+        else:
+            notice = ""
+        next_due = state.get("next_due") if config.enabled and state.get("cron") == config.cron else None
+        return {
+            "now": describe(datetime.now()),
+            "notice": notice,
+            "next_due": describe(datetime.fromisoformat(next_due)) if next_due else "—",
+            "cron": config.cron,
+            "sources": "、".join(sources) or "—",
+            "shared_count": len(history),
+            "channels": channels,
+            "history": [
+                {
+                    "time": _short_time(when),
+                    "chat": names.get(stream_id, stream_id),
+                    "kind": TOPIC_SOURCE_LABELS.get(item.get("source"), item.get("source") or "—"),
+                    "topic": item.get("topic") or "—",
+                    "title": item.get("title") or "—",
+                    "url": item.get("url") or "—",
+                }
+                for when, stream_id, item in history
+            ],
+        }
+
     @staticmethod
     def _append_system_text(kwargs: Dict[str, Any], text: str) -> Dict[str, Any]:
         """把一段文字接在 Hook 载荷的系统提示词后面；没有系统消息时原样放行。"""
@@ -186,13 +389,61 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
 
         只在本轮工具列表里有 discord_emote（也就是 Discord 聊天）时才提醒。
         """
-        tools = kwargs.get("tool_definitions")
-        offered = isinstance(tools, list) and any(
-            isinstance(tool, dict) and (tool.get("function") or {}).get("name") == "discord_emote" for tool in tools
-        )
-        if not offered or random.random() >= self._load_settings().chat.emote_chance:
+        if "discord_emote" not in _tool_names(kwargs) or random.random() >= self._load_settings().chat.emote_chance:
             return {"action": "continue"}
         return self._append_system_text(kwargs, EMOTE_NUDGE)
+
+    # ===== 日常生活：睡觉时不回复 =====
+
+    def _sleeping(self, now: datetime) -> bool:
+        """时程上在睡觉、开了「睡觉时不回复」，且没有被提醒或页面叫醒。"""
+        life = self._load_settings().life
+        if not (life.enabled and life.sleep_silence) or self._daily_life is None:
+            return False
+        if self._awake_until is not None and now < self._awake_until:
+            return False
+        return self._daily_life.asleep(now)
+
+    async def _restore_silenced(self) -> None:
+        """醒来、关掉睡觉静默或插件卸载时，把调成 0 的回复频率还原。"""
+        for session_id in list(self._silenced_sessions):
+            result = await self.ctx.frequency.set_adjust(session_id, 1.0)
+            if isinstance(result, dict) and not result.get("success", True):
+                self.ctx.logger.warning(f"还原聊天 {session_id} 的回复频率失败：{result.get('error')}")
+            self._silenced_sessions.discard(session_id)
+
+    async def _wake_up(self) -> None:
+        """提醒到点或页面叫醒：接下来 WAKE_MINUTES 分钟当作醒着，被静默的聊天恢复回复。"""
+        now = datetime.now()
+        if not self._sleeping(now):
+            return
+        self._awake_until = now + timedelta(minutes=WAKE_MINUTES)
+        await self._restore_silenced()
+        self.ctx.logger.info(f"麦麦被叫醒，{self._awake_until:%H:%M} 前照常回复")
+
+    @HookHandler(
+        "maisaka.planner.before_request",
+        name="daily_life_sleep_silence",
+        mode="blocking",
+        order="early",
+        timeout_ms=1000,
+    )
+    async def silence_planner_while_asleep(self, **kwargs: Any) -> Dict[str, Any]:
+        """睡觉时段的 Discord 聊天：回复频率调成 0，之后 MaiBot 只静默接收、不再进规划；这一轮只留 stop。
+
+        私聊不吃回复频率，每轮都会走到这里被拿掉工具。
+        """
+        if not any(name.startswith("discord_") for name in _tool_names(kwargs)) or not self._sleeping(datetime.now()):
+            return {"action": "continue"}
+        session_id = str(kwargs.get("session_id") or "")
+        if session_id:
+            await self.ctx.frequency.set_adjust(session_id, 0)
+            self._silenced_sessions.add(session_id)
+        kwargs["tool_definitions"] = [
+            tool for tool in kwargs["tool_definitions"] if _tool_names({"tool_definitions": [tool]}) & SLEEP_ALLOWED_TOOLS
+        ]
+        self._append_system_text(kwargs, SLEEP_NOTE)
+        return {"action": "continue", "modified_kwargs": kwargs}
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -282,6 +533,10 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             plugin_description=plugin_description,
             plugin_author=plugin_author,
         )
+        for section, field in PAGE_MANAGED_FIELDS:
+            fields = (schema.get("sections") or {}).get(section, {}).get("fields")
+            if isinstance(fields, dict):
+                fields.pop(field, None)
         try:
             self._prune_inactive_config_sections(schema)
         except Exception as exc:
@@ -2008,12 +2263,43 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
 
 
     def _load_settings(self) -> DiscordPluginSettings:
-        """返回当前插件配置，类型断言为 ``DiscordPluginSettings``。
+        """返回当前插件配置，并用「日常」页面设置的值覆盖对应字段。
 
         Returns:
             DiscordPluginSettings: 当前 ``self.config`` 的配置模型实例。
         """
-        return cast(DiscordPluginSettings, self.config)
+        settings = cast(DiscordPluginSettings, self.config)
+        for section, fields in getattr(self, "_page_settings", {}).items():
+            target = getattr(settings, section)
+            for field, value in fields.items():
+                if getattr(target, field) != value:
+                    setattr(target, field, value)
+        return settings
+
+    def _load_page_settings(self, path: Path) -> None:
+        """读回页面设置；缺的字段第一次从原配置搬过来，之后以页面为准。"""
+        self._page_settings_path = path
+        self._page_settings = {
+            section: fields for section, fields in load_state(path).items() if isinstance(fields, dict)
+        }
+        settings = self._load_settings()
+        missing = [
+            (section, field)
+            for section, field in PAGE_MANAGED_FIELDS
+            if field not in self._page_settings.get(section, {})
+        ]
+        for section, field in missing:
+            self._page_settings.setdefault(section, {})[field] = getattr(getattr(settings, section), field)
+        if missing:
+            save_state(path, self._page_settings)
+
+    def _save_page_setting(self, section: str, field: str, value: Any) -> None:
+        """页面改设置：先赋给配置模型做校验和规范化，再存进 daily_settings.json。"""
+        target = getattr(self._load_settings(), section)
+        setattr(target, field, value)
+        self._page_settings.setdefault(section, {})[field] = getattr(target, field)
+        if self._page_settings_path is not None:
+            save_state(self._page_settings_path, self._page_settings)
 
     async def _restart_if_needed(self) -> None:
         """先停止现有连接，再在配置与运行环境允许时重建组件并启动 Discord 客户端任务。"""

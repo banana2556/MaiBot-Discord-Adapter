@@ -2,7 +2,7 @@
 
 状态保存在插件数据目录的 life_schedule.json：
 ``{"date": "YYYY-MM-DD", "generated_at": iso, "adjusted_at": iso, "hours": [24 个时段], "note": 最近一次调整原因}``
-每个时段 ``{"hour", "activity", "mood", "status_text", "online_status"}``。
+每个时段 ``{"hour", "activity", "mood", "status_text", "online_status", "asleep"}``；旧时程没有 asleep 时视为醒着。
 模型看到的文字用繁体中文。
 """
 
@@ -21,7 +21,7 @@ RETRY_DELAY = timedelta(minutes=10)
 HOUR_FORMAT = (
     '每個時段是 {"hour": 0-23, "activity": "在做什麼（具體、生活化，15 字內）", "mood": "心情（5 字內）", '
     '"status_text": "Discord 狀態文字，開頭一個 emoji，20 字內", "online_status": "online / idle / dnd 其一，'
-    '睡覺或不方便回訊息用 idle，專心做事不想被打擾用 dnd"}'
+    '睡覺或不方便回訊息用 idle，專心做事不想被打擾用 dnd", "asleep": true / false（在睡覺時 true，含午睡和補眠；睡前滑手機這類還醒著的是 false）}'
 )
 
 
@@ -49,6 +49,7 @@ def normalize_hours(raw: Any, fallback: Optional[List[Dict[str, Any]]] = None) -
             "mood": str(item.get("mood") or "").strip(),
             "status_text": str(item.get("status_text") or activity).strip()[:STATUS_TEXT_LIMIT],
             "online_status": status if status in ONLINE_STATUSES else "online",
+            "asleep": str(item.get("asleep")).strip().lower() in ("true", "1", "yes"),
         }
     if not by_hour:
         return None
@@ -65,6 +66,7 @@ def normalize_hours(raw: Any, fallback: Optional[List[Dict[str, Any]]] = None) -
 def format_hours(hours: List[Dict[str, Any]], start: int = 0) -> str:
     return "\n".join(
         f"{entry['hour']:02d}:00 {entry['activity']}（{entry['mood'] or '—'}）[{entry['online_status']}] {entry['status_text']}"
+        f"{' 💤睡覺中' if entry.get('asleep') else ''}"
         for entry in hours[start:]
     )
 
@@ -106,6 +108,11 @@ class DailyLife:
         if not isinstance(hours, list) or len(hours) != 24:
             return None
         return hours[now.hour]
+
+    def asleep(self, now: datetime) -> bool:
+        """时程上现在是不是在睡觉；没有时程时当作醒着。"""
+        entry = self.current(now)
+        return bool(entry and entry.get("asleep"))
 
     def prompt_text(self, now: datetime) -> str:
         """注入对话的当前生活状态，没有时程时返回空字符串。"""

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 import asyncio
 import json
@@ -52,6 +53,12 @@ class FakeCtx:
         self.personality = SimpleNamespace(get_current=self._persona)
         self.component = SimpleNamespace(enable_component=self._toggle(True), disable_component=self._toggle(False))
         self.chat = SimpleNamespace(get_stream_by_group_id=self._stream_by_group)
+        self.adjusts: list = []
+        self.frequency = SimpleNamespace(set_adjust=self._set_adjust)
+
+    async def _set_adjust(self, chat_id, value):
+        self.adjusts.append((chat_id, value))
+        return {"success": True}
 
     async def _trigger(self, stream_id, intent, **kwargs):
         self.triggered.append((stream_id, intent, kwargs.get("reason")))
@@ -332,3 +339,138 @@ def test_daily_loop_fires_reminders_and_runs_life(tmp_path, monkeypatch) -> None
     _run(scenario())
     assert ctx.triggered and "交報告" in ctx.triggered[0][1]
     assert plugin._daily_life.state["hours"][0]["activity"] == "日常0"
+
+
+# ===== WebUI =====
+
+
+def test_webui_pages_show_life_schedule_and_topic_history(tmp_path) -> None:
+    plugin, ctx = _plugin(
+        tmp_path, {"life": {"enabled": True}, "topics": {"enabled": True, "channel_list": ["111", "222"]}}
+    )
+
+    async def all_streams(platform="all_platforms"):
+        return [{"stream_id": "s-111", "group_name": "聊天大廳", "user_cardname": None, "user_nickname": "x"}]
+
+    ctx.chat.get_all_streams = all_streams
+    now = datetime.now()
+    plugin._daily_life = _load_adapter_module("src.life.daily_life").DailyLife(ctx, tmp_path / "life.json", None, None)
+    plugin._daily_life._state = {
+        "date": now.date().isoformat(),
+        "adjusted_at": "2026-11-02T09:00:00",
+        "hours": _hours("正在"),
+        "note": "答應晚上打遊戲",
+    }
+    plugin._topic_scout = _load_adapter_module("src.life.topics").TopicScout(ctx, tmp_path / "topics.json", None)
+    old = {"time": "2026-11-01T12:00:00", "source": "news", "topic": "音遊", "title": "舊的", "url": "https://a"}
+    new = {"time": "2026-11-02T12:00:00", "source": "video", "topic": "貓", "title": "影片：貓", "url": ""}
+    plugin._topic_scout._state = {"history": {"s-111": [old, new]}}
+
+    life = _run(plugin.webui_life())
+    assert life["notice"] == "" and life["current"] == f"正在{now.hour}（普通）"
+    assert len(life["hours"]) == 24 and life["hours"][now.hour]["time"].startswith("▶")
+    assert life["adjusted_at"] == "11-02 09:00" and life["note"] == "答應晚上打遊戲"
+
+    topics = _run(plugin.webui_topics())
+    assert [row["title"] for row in topics["history"]] == ["影片：貓", "舊的"], "新的在前"
+    assert topics["history"][0]["chat"] == "聊天大廳" and topics["history"][0]["kind"] == "影片"
+    assert topics["channels"][0]["chat"] == "聊天大廳" and "不認得" in topics["channels"][1]["chat"]
+    assert topics["next_due"] == "—" and topics["shared_count"] == 2
+
+    plugin.set_plugin_config(_cfg({}))
+    assert "未啟用" in _run(plugin.webui_life())["notice"]
+    assert "未啟用" in _run(plugin.webui_topics())["notice"]
+
+
+# ===== 睡觉时不回复 =====
+
+
+def _sleeping_plugin(tmp_path, asleep=True):
+    plugin, ctx = _plugin(tmp_path, {"life": {"enabled": True}})
+    hours = _hours("醒著")
+    hours[datetime.now().hour] = {**hours[datetime.now().hour], "activity": "睡覺", "asleep": asleep}
+    plugin._daily_life = _load_adapter_module("src.life.daily_life").DailyLife(ctx, tmp_path / "life.json", None, None)
+    plugin._daily_life._state = {"date": datetime.now().date().isoformat(), "hours": hours}
+    return plugin, ctx
+
+
+def _planner_kwargs(*tool_names):
+    return {
+        "items": [{"item_type": "SystemMessageItem", "parts": [{"type": "text", "text": "人設"}]}],
+        "tool_definitions": [{"type": "function", "function": {"name": name}} for name in tool_names],
+        "session_id": "s1",
+    }
+
+
+def test_asleep_flag_is_parsed_and_old_schedules_count_as_awake() -> None:
+    daily_module = _load_adapter_module("src.life.daily_life")
+    hours = daily_module.normalize_hours(
+        [{"hour": 0, "activity": "睡覺", "asleep": True}, {"hour": 1, "activity": "熟睡", "asleep": "true"}, {"hour": 8, "activity": "起床"}]
+    )
+    assert [hours[h]["asleep"] for h in (0, 1, 8)] == [True, True, False]
+    assert "💤" in daily_module.format_hours(hours).splitlines()[0], "调整时程时模型看得到哪些时段在睡觉"
+    life = daily_module.DailyLife(None, Path("unused.json"), None, None)
+    life._state = {"hours": [{**entry, "asleep": False} for entry in hours]}
+    life._state["hours"][3].pop("asleep")  # 旧时程没有 asleep
+    assert life.asleep(NOW.replace(hour=3)) is False
+
+
+def test_sleep_silences_discord_planner_until_woken(tmp_path) -> None:
+    plugin, ctx = _sleeping_plugin(tmp_path)
+
+    kwargs = _planner_kwargs("reply", "stop", "discord_emote")
+    result = _run(plugin.silence_planner_while_asleep(**kwargs))
+    assert [t["function"]["name"] for t in result["modified_kwargs"]["tool_definitions"]] == ["stop"]
+    assert "睡眠中" in kwargs["items"][0]["parts"][-1]["text"]
+    assert ctx.adjusts == [("s1", 0)] and plugin._silenced_sessions == {"s1"}
+
+    assert _run(plugin.silence_planner_while_asleep(**_planner_kwargs("reply", "stop"))) == {"action": "continue"}, (
+        "不是 Discord 聊天不管"
+    )
+
+    _run(plugin._wake_up())
+    assert ctx.adjusts[-1] == ("s1", 1.0) and not plugin._silenced_sessions
+    assert _run(plugin.silence_planner_while_asleep(**_planner_kwargs("reply", "discord_emote"))) == {
+        "action": "continue"
+    }, "叫醒后照常回复"
+
+
+def test_sleep_silence_respects_setting_and_awake_hours(tmp_path) -> None:
+    plugin, _ = _sleeping_plugin(tmp_path, asleep=False)
+    assert not plugin._sleeping(datetime.now())
+    plugin, _ = _sleeping_plugin(tmp_path)
+    plugin.set_plugin_config(_cfg({"life": {"enabled": True, "sleep_silence": False}}))
+    assert not plugin._sleeping(datetime.now())
+    assert "照常回覆" in _run(plugin.webui_life())["sleep_state"]
+
+
+# ===== 页面设置 =====
+
+
+def test_page_settings_migrate_from_config_then_override_it(tmp_path) -> None:
+    plugin, _ = _plugin(
+        tmp_path, {"life": {"life_setting": "住台北"}, "topics": {"channel_list": ["111"], "cron": "0 9 * * *"}}
+    )
+    path = tmp_path / "daily_settings.json"
+    plugin._load_page_settings(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved == {"life": {"life_setting": "住台北"}, "topics": {"channel_list": ["111"], "cron": "0 9 * * *"}}
+
+    _run(plugin.webui_life_save_setting("  住高雄  "))
+    _run(plugin.webui_topics_add_channel("222"))
+    _run(plugin.webui_topics_save_cron("0  20 * * *"))
+    _run(plugin.webui_topics_remove_channel("111"))
+    settings = plugin._load_settings()
+    assert settings.life.life_setting == "住高雄"
+    assert settings.topics.channel_list == ["222"] and settings.topics.cron == "0 20 * * *"
+
+    # 重新加载配置（例如在插件设置页存档）后，页面设置仍然生效
+    plugin.set_plugin_config(_cfg({"life": {"life_setting": "舊的"}}))
+    assert plugin._load_settings().life.life_setting == "住高雄"
+    for bad in (lambda: plugin.webui_topics_add_channel("abc"), lambda: plugin.webui_topics_save_cron("每天")):
+        with pytest.raises(ValueError):
+            _run(bad())
+
+    schema = plugin.get_webui_config_schema()
+    assert "life_setting" not in schema["sections"]["life"]["fields"]
+    assert not {"channel_list", "cron"} & set(schema["sections"]["topics"]["fields"])
