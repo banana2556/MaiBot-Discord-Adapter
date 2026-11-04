@@ -993,16 +993,16 @@ class TopicConfig(PluginConfigBase):
     )
     news_enabled: bool = Field(
         default=True,
-        description="搜索相关新闻分享；需要在 MaiBot 设置里启用联网搜索。",
+        description="请麦麦找相关新闻分享；用哪个搜索工具由她自己决定，需要 MaiBot 里有可用的联网搜索。",
         json_schema_extra={"label": "分享新闻", "order": 4},
     )
     video_enabled: bool = Field(
         default=False,
-        description="请麦麦去 B 站或 X 找热门影片分享。",
+        description="请麦麦找相关影片分享；用哪个搜索或浏览工具由她自己决定。",
         json_schema_extra={
             "label": "分享影片",
             "order": 5,
-            "hint": "⚠ 需要另外安装能操作浏览器的插件，并且这台电脑能启动 Playwright / Chromium；没有浏览器工具时麦麦会放弃分享影片。",
+            "hint": "她手上没有能找影片的工具时会放弃，不会硬发。",
         },
     )
     model_task: Literal["replyer", "planner"] = Field(

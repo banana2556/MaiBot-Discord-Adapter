@@ -201,7 +201,7 @@
     {
       "id": "topics",
       "title": "主動話題",
-      "description": "按排程挑群裡會感興趣的新聞或影片，喚醒麥麥分享；點一列可看連結。",
+      "description": "按排程挑群裡可能有興趣的話題，喚醒麥麥自己去找新聞或影片、自己決定發不發；點一列可看詳情。",
       "placement": "workspace",
       "icon": "puzzle",
       "queries": {
@@ -255,7 +255,7 @@
             },
             {
               "type": "stat",
-              "label": "已分享",
+              "label": "已觸發",
               "value": {
                 "source": "topics",
                 "field": "shared_count"
@@ -354,7 +354,7 @@
         },
         {
           "type": "text",
-          "value": "還沒有分享紀錄。",
+          "value": "還沒有觸發紀錄。",
           "when": {
             "reference": {
               "source": "topics",
@@ -365,7 +365,7 @@
         },
         {
           "type": "table",
-          "label": "分享紀錄（新的在前）",
+          "label": "觸發紀錄（新的在前；發不發由麥麥決定）",
           "value": {
             "source": "topics",
             "field": "history"
@@ -394,11 +394,7 @@
             },
             {
               "field": "topic",
-              "label": "話題"
-            },
-            {
-              "field": "title",
-              "label": "標題"
+              "label": "候選話題"
             }
           ]
         },

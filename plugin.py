@@ -53,7 +53,7 @@ SLEEP_NOTE = "【睡眠中】你現在正在睡覺，看不到也不會回這些
 # 提醒到点或从页面叫醒后，这么多分钟内当作醒着
 WAKE_MINUTES = 30
 ONLINE_STATUS_LABELS = {"online": "🟢 在線", "idle": "🌙 閒置", "dnd": "⛔ 請勿打擾"}
-TOPIC_SOURCE_LABELS = {"news": "新聞", "video": "影片"}
+TOPIC_SOURCE_LABELS = {"news": "新聞", "video": "影片", "mixed": "新聞或影片"}
 VOICE_MODE_LABELS = {"fixed": "固定頻道常駐", "auto": "有人進來才加入"}
 # 「DC生活 → 語音」页面能改的语音字段与显示名称
 VOICE_FIELD_LABELS = {
@@ -532,7 +532,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
     async def _restore_silenced(self) -> None:
         """醒来、关掉睡觉静默或插件卸载时，把调成 0 的回复频率还原。"""
         for session_id in list(self._silenced_sessions):
-            result = await self.ctx.frequency.set_adjust(session_id, 1.0)
+            result = await self.ctx.call_capability("frequency.set_adjust", chat_id=session_id, value=1.0)
             if isinstance(result, dict) and not result.get("success", True):
                 self.ctx.logger.warning(f"还原聊天 {session_id} 的回复频率失败：{result.get('error')}")
             self._silenced_sessions.discard(session_id)
@@ -562,7 +562,8 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             return {"action": "continue"}
         session_id = str(kwargs.get("session_id") or "")
         if session_id:
-            await self.ctx.frequency.set_adjust(session_id, 0)
+            # 旧版 SDK 没有 ctx.frequency，直接调能力
+            await self.ctx.call_capability("frequency.set_adjust", chat_id=session_id, value=0)
             self._silenced_sessions.add(session_id)
         kwargs["tool_definitions"] = [
             tool for tool in kwargs["tool_definitions"] if _tool_names({"tool_definitions": [tool]}) & SLEEP_ALLOWED_TOOLS

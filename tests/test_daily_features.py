@@ -26,7 +26,7 @@ def _hours(prefix: str, start: int = 0, end: int = 24) -> list:
 class FakeCtx:
     """记录调用的假插件上下文；llm_replies 依次作为每次 LLM 回复。"""
 
-    def __init__(self, data_dir, llm_replies=None, search_results=None):
+    def __init__(self, data_dir, llm_replies=None):
         self.plugin_id = "maibot-discord-adapter"
         self.paths = SimpleNamespace(data_dir=data_dir)
         self.logger = logging.getLogger("test_daily_features")
@@ -35,8 +35,6 @@ class FakeCtx:
         self.tasks: list = []
         self.triggered: list = []
         self.toggles: list = []
-        self.searches: list = []
-        self.search_results = search_results or []
         self.messages = {
             "m1": {
                 "message_id": "m1",
@@ -49,16 +47,10 @@ class FakeCtx:
         )
         self.message = SimpleNamespace(get_by_id=self._get_by_id, build_readable=self._build_readable)
         self.llm = SimpleNamespace(generate=self._generate)
-        self.web = SimpleNamespace(search=self._search)
         self.personality = SimpleNamespace(get_current=self._persona)
         self.component = SimpleNamespace(enable_component=self._toggle(True), disable_component=self._toggle(False))
         self.chat = SimpleNamespace(get_stream_by_group_id=self._stream_by_group)
         self.adjusts: list = []
-        self.frequency = SimpleNamespace(set_adjust=self._set_adjust)
-
-    async def _set_adjust(self, chat_id, value):
-        self.adjusts.append((chat_id, value))
-        return {"success": True}
 
     async def _trigger(self, stream_id, intent, **kwargs):
         self.triggered.append((stream_id, intent, kwargs.get("reason")))
@@ -79,10 +71,6 @@ class FakeCtx:
         reply = self.llm_replies.pop(0) if self.llm_replies else ""
         return {"success": True, "response": reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)}
 
-    async def _search(self, query, max_results=5):
-        self.searches.append(query)
-        return {"results": self.search_results}
-
     async def _persona(self):
         return {"name": "麥麥", "personality": "活潑的女大學生"}
 
@@ -90,6 +78,10 @@ class FakeCtx:
         return {"stream_id": f"s-{group_id}"} if group_id == "111" else None
 
     async def call_capability(self, capability, **kwargs):
+        # 部署环境的旧版 SDK 没有 ctx.web / ctx.frequency，这个假上下文也不提供，只能经 call_capability 调
+        if capability == "frequency.set_adjust":
+            self.adjusts.append((kwargs["chat_id"], kwargs["value"]))
+            return {"success": True}
         assert capability == "knowledge.search" and kwargs["chat_id"] == "s-111"
         return {"success": True, "content": "你知道這些知識: 大家喜歡音遊和貓"}
 
@@ -276,9 +268,9 @@ def test_life_state_is_injected_into_system_prompt(tmp_path) -> None:
 # ===== 主动话题 =====
 
 
-def _scout(tmp_path, replies, search_results):
+def _scout(tmp_path, replies):
     topics_module = _load_adapter_module("src.life.topics")
-    ctx = FakeCtx(tmp_path, llm_replies=replies, search_results=search_results)
+    ctx = FakeCtx(tmp_path, llm_replies=replies)
 
     async def resolve(channel_id):
         return await ctx._stream_by_group(channel_id) and f"s-{channel_id}"
@@ -291,40 +283,38 @@ def _topic_config(**overrides):
     return config_module.TopicConfig(enabled=True, channel_list=["111", "222"], cron="0 12 * * *", **overrides)
 
 
-def test_topics_wait_for_cron_then_share_news(tmp_path) -> None:
-    results = [
-        {"title": "音遊新曲上線", "url": "https://example.com/a", "snippet": "新曲"},
-        {"title": "貓咪咖啡廳開幕", "url": "https://example.com/b", "snippet": "貓"},
-    ]
-    replies = [{"topics": [{"keyword": "音遊", "why": "大家常聊"}]}, {"index": 1, "summary": "新的貓咪咖啡廳"}]
-    scout, ctx = _scout(tmp_path, replies, results)
+def test_topics_wait_for_cron_then_ask_bot_to_find_and_share(tmp_path) -> None:
+    replies = [{"topics": [{"keyword": "音遊", "why": "大家常聊"}, {"keyword": "貓咪咖啡廳"}]}]
+    scout, ctx = _scout(tmp_path, replies)
     config = _topic_config()
 
     _run(scout.tick(NOW - timedelta(minutes=30), config))
     assert scout.next_due == datetime(2026, 11, 2, 12, 0) and not ctx.triggered, "第一次只排程，不立刻发"
 
     _run(scout.tick(NOW, config))
-    assert ctx.searches == ["音遊 新聞"]
     assert len(ctx.triggered) == 1, "频道 222 没有会话，跳过"
     stream_id, intent, reason = ctx.triggered[0]
-    assert stream_id == "s-111" and "https://example.com/b" in intent and reason == "主動話題・新聞"
-    assert "大家喜歡音遊和貓" in ctx.prompts[0]
-    assert set(ctx.tasks) == {"planner"}, "主动话题默认沿用 planner 模型任务"
+    assert stream_id == "s-111" and reason == "主動話題"
+    assert "音遊：大家常聊" in intent and "貓咪咖啡廳" in intent and "最近的新聞" in intent, "影片默认关闭"
+    assert "自己決定用什麼搜尋或瀏覽工具" in intent, "不替她指定搜索工具"
+    assert "大家喜歡音遊和貓" in ctx.prompts[0] and set(ctx.tasks) == {"planner"}
     assert scout.next_due == datetime(2026, 11, 3, 12, 0)
     saved = json.loads((tmp_path / "topics.json").read_text(encoding="utf-8"))
-    assert saved["history"]["s-111"][0]["url"] == "https://example.com/b"
+    assert saved["history"]["s-111"][0]["topic"] == "音遊、貓咪咖啡廳"
 
 
-def test_topics_video_asks_bot_to_use_browser_tool(tmp_path) -> None:
-    scout, ctx = _scout(tmp_path, [{"topics": [{"keyword": "貓咪影片"}]}], [])
-    shared = _run(scout.run_channel("111", NOW, _topic_config(news_enabled=False, video_enabled=True)))
-    assert shared == "影片：貓咪影片"
-    assert "瀏覽器" in ctx.triggered[0][1] and "B 站或 X" in ctx.triggered[0][1]
-    assert not ctx.searches
+def test_topics_kind_follows_settings_and_avoids_recent(tmp_path) -> None:
+    scout, ctx = _scout(tmp_path, [{"topics": [{"keyword": "貓咪影片"}]}, {"topics": [{"keyword": "新番"}]}])
+    video_only = _topic_config(news_enabled=False, video_enabled=True)
+    assert _run(scout.run_channel("111", NOW, video_only)) == "貓咪影片"
+    assert "影片" in ctx.triggered[0][1] and "新聞" not in ctx.triggered[0][1]
+
+    _run(scout.run_channel("111", NOW, _topic_config()))
+    assert "貓咪影片" in ctx.prompts[1], "挑话题时避开最近开过的"
 
 
-def test_topics_skip_when_model_rejects_all_news(tmp_path) -> None:
-    scout, ctx = _scout(tmp_path, [{"topics": [{"keyword": "音遊"}]}, {"index": -1}], [{"title": "廣告", "url": "https://x"}])
+def test_topics_skip_when_no_topic_picked(tmp_path) -> None:
+    scout, ctx = _scout(tmp_path, [{"topics": []}])
     assert _run(scout.run_channel("111", NOW, _topic_config())) is None
     assert not ctx.triggered
 
