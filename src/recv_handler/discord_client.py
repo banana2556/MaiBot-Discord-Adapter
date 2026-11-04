@@ -4,7 +4,9 @@
 """
 
 import asyncio
+import re
 import traceback
+from collections import defaultdict
 from time import time as get_time
 from typing import Any, Dict, Optional
 
@@ -14,6 +16,10 @@ from ..send_handler.thread_send_handler import ThreadRoutingManager
 from .message_handler import DiscordMessageHandler
 
 TYPING_INDICATOR_REFRESH_SECONDS = 5.0
+LINK_PREVIEW_WAIT_SECONDS = 3.0  # 带链接的消息最多等这么久，让 Discord 补上链接预览
+LINK_PREVIEW_POLL_SECONDS = 0.5
+# 用 <> 包住的链接 Discord 不会展开预览，不用等
+_PREVIEWABLE_LINK = re.compile(r"(?<!<)https?://")
 
 PRESENCE_TEXT_LIMIT = 128  # Discord 自定义状态与活动名称的长度上限
 _ACTIVITY_TYPES = {
@@ -129,6 +135,8 @@ class DiscordClientManager:
         self._typing_indicator_tasks: Dict[int, asyncio.Task[None]] = {}
         self._typing_indicator_stop_events: Dict[int, asyncio.Event] = {}
         self._typing_targets_by_session_id: Dict[str, int] = {}
+        # 等链接预览、截影片画面会让消息晚几秒；同频道排队送出，后面的 @ 不会抢在前面先触发思考
+        self._channel_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
         self._on_connected_callback: Optional[Any] = None
         self._on_disconnected_callback: Optional[Any] = None
@@ -348,16 +356,25 @@ class DiscordClientManager:
                     )
                 return
 
-            message_dict = await self._message_handler.handle_discord_message(message)
-            if message_dict is None:
-                return
+            # 进锁前不能有 await：discord.py 按到达顺序建任务，asyncio.Lock 按排队顺序放行
+            async with self._channel_locks[message.channel.id]:
+                if (
+                    not message.embeds
+                    and not message.flags.suppress_embeds
+                    and _PREVIEWABLE_LINK.search(message.content or "")
+                ):
+                    await self._wait_for_link_preview(message)
 
-            await self._gateway_capability.route_message(
-                self._gateway_name,
-                message_dict,
-                external_message_id=str(message.id),
-                dedupe_key=str(message.id),
-            )
+                message_dict = await self._message_handler.handle_discord_message(message)
+                if message_dict is None:
+                    return
+
+                await self._gateway_capability.route_message(
+                    self._gateway_name,
+                    message_dict,
+                    external_message_id=str(message.id),
+                    dedupe_key=str(message.id),
+                )
 
             routing_info = self._message_handler.get_thread_routing_info(message)
             if routing_info:
@@ -378,6 +395,19 @@ class DiscordClientManager:
         except Exception as exc:
             self._logger.error(f"处理 Discord 消息时发生错误: {exc}")
             self._logger.debug(traceback.format_exc())
+
+    @staticmethod
+    async def _wait_for_link_preview(message: discord.Message) -> None:
+        """Discord 送出消息后才抓网页、补上链接预览，这时只发一次编辑事件。
+
+        discord.py 收到编辑会就地更新缓存里同一个 ``Message``，所以这里等它的 ``embeds`` 出现再转换，
+        图片链接才会当成图片交给麦麦，而不是只剩一串网址。
+        """
+        # ponytail: 不展开预览的网站会白等满 3 秒，同频道后面的消息也跟着排队
+        for _ in range(int(LINK_PREVIEW_WAIT_SECONDS / LINK_PREVIEW_POLL_SECONDS)):
+            await asyncio.sleep(LINK_PREVIEW_POLL_SECONDS)
+            if message.embeds:
+                return
 
     def remember_typing_target(self, session_id: str, channel_id: int) -> None:
         """记录 MaiBot session 对应的 Discord typing 目标。"""

@@ -299,6 +299,18 @@ class DiscordChatConfig(PluginConfigBase):
             "step": 0.05,
         },
     )
+    video_frame_interval_sec: float = Field(
+        default=2.0,
+        ge=0,
+        le=60,
+        description="收到影片时每隔几秒截一格画面，拼成一张图交给识图；0 表示不截图，只告诉麦麦有影片。",
+        json_schema_extra={
+            "hint": "用 FFmpeg 直接从 Discord 读取需要的片段，不整个下载；最多 9 格，影片太长时平均分布。需要电脑装有 FFmpeg。",
+            "label": "影片截图间隔(秒)",
+            "order": 15,
+            "step": 0.5,
+        },
+    )
 
     @field_validator("guild_list_type", "channel_list_type", "thread_list_type", "user_list_type", mode="before")
     @classmethod

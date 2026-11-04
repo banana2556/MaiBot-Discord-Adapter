@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import asyncio
@@ -23,8 +24,12 @@ def _handler():
     async def to_wav(data):
         return b"WAV" + data
 
+    async def no_ffmpeg(*args):
+        return b""
+
     handler._fetch_emoji_bytes = fetch
     handler._voice_message_to_wav = to_wav
+    handler._run_ffmpeg = no_ffmpeg
     return handler
 
 
@@ -32,7 +37,13 @@ def _attachment(filename: str, content_type: str, voice: bool = False):
     async def read():
         return b"ogg"
 
-    return SimpleNamespace(filename=filename, content_type=content_type, is_voice_message=lambda: voice, read=read)
+    return SimpleNamespace(
+        filename=filename,
+        content_type=content_type,
+        url=f"https://cdn.discordapp.com/attachments/1/2/{filename}",
+        is_voice_message=lambda: voice,
+        read=read,
+    )
 
 
 def _message(**overrides):
@@ -51,6 +62,7 @@ def _message(**overrides):
         mentions=[],
         role_mentions=[],
         channel_mentions=[],
+        flags=SimpleNamespace(suppress_embeds=False),
         created_at=datetime.now(timezone.utc),
     )
     fields.update(overrides)
@@ -154,6 +166,139 @@ def test_message_change_is_filtered_like_messages() -> None:
     allowed["ok"] = False
     asyncio.run(manager._on_message_change(_message(content="y")))
     assert [item["processed_plain_text"] for item in routed] == ["[事件-消息撤回] 「Daemi」撤回了消息：x"]
+
+
+def _manager(client_module, routed: list):
+    manager = client_module.DiscordClientManager.__new__(client_module.DiscordClientManager)
+
+    async def route_message(gateway, message_dict, **kwargs):
+        routed.append(message_dict)
+
+    manager.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    manager._filter_config = SimpleNamespace(ignore_self_message=True, ignore_bot_message=True)
+    manager._chat_filter = SimpleNamespace(_config=None, is_allowed=lambda **kwargs: True)
+    manager._message_handler = _handler()
+    manager._thread_routing_manager = SimpleNamespace(clear_thread_context=lambda channel_id: None)
+    manager._gateway_capability = SimpleNamespace(route_message=route_message)
+    manager._gateway_name = "discord"
+    manager._logger = SimpleNamespace(error=print, debug=lambda *args: None)
+    manager._channel_locks = client_module.defaultdict(asyncio.Lock)
+    return manager
+
+
+def test_link_preview_images_reach_maibot(monkeypatch) -> None:
+    client_module = _load_adapter_module("src.recv_handler.discord_client")
+    monkeypatch.setattr(client_module, "LINK_PREVIEW_POLL_SECONDS", 0.01)
+    routed: list[dict] = []
+    manager = _manager(client_module, routed)
+
+    message = _message(content="https://i.example/cat.png")
+    preview = discord.Embed.from_dict({"type": "image", "thumbnail": {"url": "https://i.example/cat.png", "proxy_url": "https://p/cat.png"}})
+
+    async def run() -> None:
+        async def discord_unfurls_later() -> None:
+            # discord.py 收到编辑事件时就地更新缓存里同一个 Message
+            await asyncio.sleep(0.05)
+            message.embeds.append(preview)
+
+        unfurl = asyncio.create_task(discord_unfurls_later())
+        await manager._on_message(message)
+        await unfurl
+
+    asyncio.run(run())
+    assert routed[0]["is_picture"] is True
+    assert {"type": "image", "data": "", "binary_data_base64": "img:https://p/cat.png:None"} in routed[0]["raw_message"]
+
+    # 网页卡片（X、Pixiv、新闻）的大图也当图片，文字照旧
+    card = discord.Embed.from_dict(
+        {"type": "article", "title": "新番", "image": {"url": "https://x/a.jpg", "proxy_url": "https://p/a.jpg"}}
+    )
+    raw = _convert(_handler(), _message(content="https://x/post", embeds=[card]))["raw_message"]
+    assert {"type": "text", "data": "[链接预览: 新番]"} in raw
+    assert {"type": "image", "data": "", "binary_data_base64": "img:https://p/a.jpg:None"} in raw
+
+
+def test_link_wait_keeps_channel_order_and_skips_suppressed_links(monkeypatch) -> None:
+    client_module = _load_adapter_module("src.recv_handler.discord_client")
+    monkeypatch.setattr(client_module, "LINK_PREVIEW_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(client_module, "LINK_PREVIEW_WAIT_SECONDS", 0.05)
+    routed: list[dict] = []
+    manager = _manager(client_module, routed)
+
+    async def run(*messages) -> None:
+        # 和 discord.py 一样，每则消息一个任务、按到达顺序建立
+        await asyncio.gather(*(manager._on_message(message) for message in messages))
+
+    # 网站没有预览时白等，但后面紧跟的 @ 不能抢先送到
+    asyncio.run(run(_message(id=1, content="https://example.com/x"), _message(id=2, content="看這個")))
+    assert [item["processed_plain_text"] for item in routed] == ["https://example.com/x", "看這個"]
+
+    waited: list[int] = []
+
+    async def record_wait(message) -> None:
+        waited.append(message.id)
+
+    manager._wait_for_link_preview = record_wait
+    asyncio.run(run(
+        _message(id=3, content="<https://example.com/x>"),
+        _message(id=4, content="https://example.com/x", flags=SimpleNamespace(suppress_embeds=True)),
+        _message(id=5, content="說 http 不是網址"),
+    ))
+    assert waited == [], "不会展开预览的消息不用等"
+
+
+def _jpeg(color: str) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    output = BytesIO()
+    Image.new("RGB", (640, 360), color).save(output, format="JPEG")
+    return output.getvalue()
+
+
+def _video_handler(duration: str, interval: float = 2.0, broken_at: str = ""):
+    handler = _handler()
+    handler._chat_config = SimpleNamespace(video_frame_interval_sec=interval)
+    calls: list[tuple] = []
+
+    async def fake_ffmpeg(*args):
+        calls.append(args)
+        assert args[args.index("-protocol_whitelist") + 1] == "https,tls,tcp", "只准读 HTTPS，不准读本机文件"
+        if args[0] == "ffprobe":
+            return duration.encode()
+        return b"" if args[args.index("-ss") + 1] == broken_at else _jpeg("red")
+
+    handler._run_ffmpeg = fake_ffmpeg
+    return handler, calls
+
+
+def test_video_frames_become_one_contact_sheet() -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    handler, calls = _video_handler("7.0" + chr(10), broken_at="4.00")
+    raw = _convert(handler, _message(attachments=[_attachment("cat.mp4", "video/mp4")]))
+    seeks = [args[args.index("-ss") + 1] for args in calls if args[0] == "ffmpeg"]
+    assert seeks == ["0.00", "2.00", "4.00", "6.00"], "每 2 秒一格，不截贴着结尾的那格"
+    assert all(args[-1] == "pipe:1" or args[-1].startswith("https://cdn.discordapp.com/") for args in calls)
+    assert raw["is_picture"] is True
+    assert raw["raw_message"][0]["data"] == "[视频: cat.mp4，约 7 秒；下图是每 2 秒一格的画面，左上角是时间点]"
+    sheet = Image.open(BytesIO(base64.b64decode(raw["raw_message"][1]["binary_data_base64"])))
+    assert sheet.size == (648, 648), "读不到的那格跳过，剩 3 格拼成 2x2"
+
+    # 太长就平均分布成 9 格
+    handler, calls = _video_handler("60")
+    raw = _convert(handler, _message(attachments=[_attachment("long.mp4", "video/mp4")]))
+    seeks = [args[args.index("-ss") + 1] for args in calls if args[0] == "ffmpeg"]
+    assert len(seeks) == 9 and seeks[1] == "6.67" and "每 6.7 秒" in raw["raw_message"][0]["data"]
+
+    # 读不到长度（没装 FFmpeg、格式不支持）或关掉截图，只留文件名
+    for handler, calls in (_video_handler(""), _video_handler("7", interval=0)):
+        raw = _convert(handler, _message(attachments=[_attachment("x.mp4", "video/mp4")]))
+        assert raw["processed_plain_text"] == "[视频: x.mp4]"
+    assert calls == [], "关掉时不跑 FFmpeg"
 
 
 def _tool_plugin(target: object):

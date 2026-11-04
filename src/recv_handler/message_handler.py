@@ -5,6 +5,7 @@
 
 import asyncio
 import base64
+import math
 import re
 import time
 import aiohttp
@@ -14,8 +15,15 @@ from typing import Any, Dict, List, Optional
 import discord
 from maim_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Seg, UserInfo
 
+from ..emoji_grid import build_numbered_grid
 from ..native_emoji import NativeEmojiRegistry
 from .emoji_mapping import format_reaction_for_ai, get_emoji_meaning
+
+VIDEO_MAX_FRAMES = 9  # 3x3，再多每格就太小，识图看不清
+VIDEO_FRAME_TILE = 320
+VIDEO_FFMPEG_TIMEOUT_SECONDS = 8.0
+# 只准 FFmpeg 走 HTTPS：伪装成影片的 HLS 播放列表可以叫它读本机文件、画进截图里
+_FFMPEG_REMOTE_INPUT = ("-protocol_whitelist", "https,tls,tcp")
 
 # MaiBot 用 [名字] 切说话人、用「名字说：」拼回复上下文，ASCII 方括号会把名字切进正文
 _NAME_ESCAPES = str.maketrans({"[": "［", "]": "］", "「": "『", "」": "』"})
@@ -563,9 +571,7 @@ class DiscordMessageHandler:
             segments.extend(await self._process_text_with_emojis(source.content, message))
 
         for attachment in source.attachments:
-            segment = await self._attachment_segment(attachment)
-            if segment is not None:
-                segments.append(segment)
+            segments.extend(await self._attachment_segments(attachment))
 
         for sticker in source.stickers:
             # 图片在 MaiBot 里只显示为「[表情包: 描述]」，附上名称让模型分得清是贴纸
@@ -578,9 +584,7 @@ class DiscordMessageHandler:
                 segments.append(Seg(type="emoji", data=sticker_b64))
 
         for embed in source.embeds:
-            segment = await self._embed_segment(embed)
-            if segment is not None:
-                segments.append(segment)
+            segments.extend(await self._embed_segments(embed))
 
         poll = getattr(source, "poll", None)
         if poll is not None:
@@ -589,25 +593,95 @@ class DiscordMessageHandler:
             segments.append(Seg(type="text", data=f"[投票: {poll.question}｜选项: {answers}{mode}]"))
         return segments
 
-    async def _attachment_segment(self, attachment: discord.Attachment) -> Optional[Seg]:
-        """图片和语音消息读成二进制分段（语音由 MaiBot 转写），其余附件只留类型和文件名。"""
+    async def _attachment_segments(self, attachment: discord.Attachment) -> List[Seg]:
+        """图片和语音消息读成二进制分段（语音由 MaiBot 转写），影片截几格画面拼成一张图，其余附件只留类型和文件名。"""
         content_type = attachment.content_type or ""
+        if content_type.startswith("video/"):
+            return await self._video_segments(attachment)
         if content_type.startswith("image/"):
             kind = "image"
         elif attachment.is_voice_message():
             kind = "voice"
         else:
-            label = "视频" if content_type.startswith("video/") else "音频" if content_type.startswith("audio/") else "文件"
-            return Seg(type="text", data=f"[{label}: {attachment.filename}]")
+            label = "音频" if content_type.startswith("audio/") else "文件"
+            return [Seg(type="text", data=f"[{label}: {attachment.filename}]")]
 
         try:
             data = await attachment.read()
         except (discord.HTTPException, discord.NotFound, OSError) as exc:
             self._logger.error(f"读取附件 {attachment.filename} 失败: {exc}")
-            return None
+            return []
         if kind == "voice":
             data = await self._voice_message_to_wav(data)
-        return Seg(type=kind, data=base64.b64encode(data).decode("utf-8"))
+        return [Seg(type=kind, data=base64.b64encode(data).decode("utf-8"))]
+
+    async def _video_segments(self, attachment: discord.Attachment) -> List[Seg]:
+        """每隔固定秒数截一格画面，拼成一张带时间标签的图交给识图；做不到时只留文件名。
+
+        FFmpeg 直接读 Discord CDN 的网址，靠 HTTP Range 只取开头的索引和每个时间点附近的片段，不整个下载。
+        """
+        label = Seg(type="text", data=f"[视频: {attachment.filename}]")
+        interval = float(getattr(self._chat_config, "video_frame_interval_sec", 2.0) or 0)
+        if interval <= 0:
+            return [label]
+        probe = await self._run_ffmpeg(
+            "ffprobe", "-v", "error", *_FFMPEG_REMOTE_INPUT, "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", attachment.url,
+        )
+        try:
+            duration = float(probe.decode().strip())
+        except ValueError:
+            return [label]
+        count = max(1, math.ceil(duration / interval))  # 不截贴着结尾的那格，那里常常读不到画面
+        if count > VIDEO_MAX_FRAMES:
+            count, interval = VIDEO_MAX_FRAMES, duration / VIDEO_MAX_FRAMES  # 太长就平均分布
+        times = [index * interval for index in range(count)]
+        frames = await asyncio.gather(*(self._video_frame(attachment.url, at) for at in times))
+        shots = [(at, frame) for at, frame in zip(times, frames) if frame]
+        if not shots:
+            return [label]
+        sheet = await asyncio.to_thread(
+            build_numbered_grid,
+            [frame for _, frame in shots],
+            [f"{int(at) // 60}:{int(at) % 60:02d}" for at, _ in shots],
+            VIDEO_FRAME_TILE,
+        )
+        return [
+            Seg(
+                type="text",
+                data=f"[视频: {attachment.filename}，约 {duration:.0f} 秒；下图是每 {round(interval, 1):g} 秒一格的画面，左上角是时间点]",
+            ),
+            Seg(type="image", data=base64.b64encode(sheet).decode("utf-8")),
+        ]
+
+    async def _video_frame(self, url: str, at: float) -> bytes:
+        """取影片某个时间点的一格画面（JPEG）；-ss 放在 -i 前面，FFmpeg 会直接跳过去读，不从头读起。"""
+        return await self._run_ffmpeg(
+            "ffmpeg", "-v", "error", *_FFMPEG_REMOTE_INPUT, "-ss", f"{at:.2f}", "-i", url,
+            "-frames:v", "1", "-vf", f"scale={VIDEO_FRAME_TILE}:{VIDEO_FRAME_TILE}:force_original_aspect_ratio=decrease",
+            "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1",
+        )
+
+    async def _run_ffmpeg(self, *args: str) -> bytes:
+        """跑 FFmpeg/FFprobe 取标准输出；没装、失败或超时都返回空字节。"""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+        except (FileNotFoundError, NotImplementedError) as exc:
+            self._logger.warning(f"无法启动 {args[0]}，影片只留文件名: {exc}")
+            return b""
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), VIDEO_FFMPEG_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            self._logger.warning(f"{args[0]} 处理影片超时")
+            return b""
+        if process.returncode != 0:
+            self._logger.debug(f"{args[0]} 处理影片失败: {stderr.decode(errors='ignore')[-200:]}")
+            return b""
+        return stdout
 
     async def _voice_message_to_wav(self, data: bytes) -> bytes:
         """Discord 语音消息是 ogg/opus，MaiBot 转写时一律当 audio.wav 上传，先转成 16kHz 单声道 wav。
@@ -632,15 +706,26 @@ class DiscordMessageHandler:
 
     _EMBED_TEXT_LIMIT = 300
 
-    async def _embed_segment(self, embed: discord.Embed) -> Optional[Seg]:
-        """动图（Tenor/Giphy）和图片链接只有预览图，当成表情/图片给模型看；其余取标题、描述和字段转成文字。"""
+    async def _embed_segments(self, embed: discord.Embed) -> List[Seg]:
+        """动图（Tenor/Giphy）和图片链接只有预览图，当成表情/图片给模型看；
+        其余取标题、描述和字段转成文字，卡片带图（X、Pixiv、新闻缩图等）时也附上图片。"""
         if embed.type in ("gifv", "image"):
             preview = embed.thumbnail.proxy_url or embed.thumbnail.url or embed.image.proxy_url or embed.image.url
             image_b64 = await self._fetch_emoji_bytes(str(preview), size=None) if preview else None
-            if image_b64:
-                return Seg(type="emoji" if embed.type == "gifv" else "image", data=image_b64)
-            return None
+            return [Seg(type="emoji" if embed.type == "gifv" else "image", data=image_b64)] if image_b64 else []
 
+        segments: List[Seg] = []
+        text_segment = self._embed_text_segment(embed)
+        if text_segment is not None:
+            segments.append(text_segment)
+        picture = embed.image.proxy_url or embed.image.url or embed.thumbnail.proxy_url or embed.thumbnail.url
+        picture_b64 = await self._fetch_emoji_bytes(str(picture), size=None) if picture else None
+        if picture_b64:
+            segments.append(Seg(type="image", data=picture_b64))
+        return segments
+
+    def _embed_text_segment(self, embed: discord.Embed) -> Optional[Seg]:
+        """把卡片的标题、描述和字段压成一段文字；没有文字时返回 None。"""
         lines = [
             embed.provider.name,
             embed.author.name,
