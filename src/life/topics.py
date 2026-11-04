@@ -85,7 +85,7 @@ class TopicScout:
             "挑 1 到 3 個這個群可能有興趣、適合拿去搜新聞或影片的話題，避開之前分享過的。"
             '輸出 JSON：{"topics": [{"keyword": "搜尋關鍵字（簡短）", "why": "為什麼這個群會感興趣"}]}，只輸出 JSON。'
         )
-        result = await generate_json(self._ctx, prompt, config.model)
+        result = await generate_json(self._ctx, prompt, config.model_task)
         raw_topics = result.get("topics") if isinstance(result, dict) else None
         topics = [t for t in raw_topics or [] if isinstance(t, dict) and t.get("keyword")]
         if not topics:
@@ -141,7 +141,7 @@ class TopicScout:
             f"之前分享過的：\n{shared}\n\n搜尋結果：\n{listing}\n\n"
             '輸出 JSON：{"index": 編號, "summary": "兩三句重點"}；都不適合就輸出 {"index": -1}。只輸出 JSON。'
         )
-        choice = await generate_json(self._ctx, prompt, config.model)
+        choice = await generate_json(self._ctx, prompt, config.model_task)
         index = choice.get("index") if isinstance(choice, dict) else None
         if not isinstance(index, int) or not 0 <= index < len(candidates):
             return None

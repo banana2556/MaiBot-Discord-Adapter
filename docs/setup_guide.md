@@ -237,25 +237,11 @@ ignore_bot_message = true
 - `ignore_bot_message`
   - 忽略其他 Bot 的消息，减少噪音
 
-### 5.6 `presence`
+### 5.6 Discord 状态
 
-```toml
-[presence]
-status = "online"
-activity_type = "custom"
-activity_text = ""
-```
+不再有单独的 `[presence]` 配置，旧配置里的这一节会被忽略。Bot 登录时显示在线、没有状态文字；开启 `life.sync_presence` 后由日常生活按时段更新状态文字与在线状态。
 
-字段说明：
-
-- `status`
-  - `online` 在线、`idle` 闲置、`dnd` 请勿打扰、`invisible` 隐身
-- `activity_type`
-  - `custom` 直接显示文字；`playing` / `listening` / `watching` / `competing` 显示成「正在玩 / 正在听 / 正在看 / 正在参加 + 文字」
-- `activity_text`
-  - 显示在 Bot 名字下方的文字，留空不显示，最多 128 字
-
-其他插件可以调用 API `adapter.discord.presence.set`（参数 `text`、`activity_type`、`status`）临时改状态，配置重载后回到这里的内容。
+其他插件可以调用 API `adapter.discord.presence.set`（参数 `text`、`activity_type`、`status`）临时改状态，配置重载或重连后会清空，之后由日常生活重新推送。
 
 ### 5.7 `voice`
 

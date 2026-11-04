@@ -150,7 +150,7 @@ class DailyLife:
             f"生活設定：{config.life_setting or '（未提供，按人設合理推想）'}\n\n"
             f"請輸出 JSON 陣列，剛好 24 個時段（hour 0 到 23）。{HOUR_FORMAT}\n只輸出 JSON。"
         )
-        hours = normalize_hours(await generate_json(self._ctx, prompt, config.model))
+        hours = normalize_hours(await generate_json(self._ctx, prompt, config.model_task))
         if hours is None:
             self._ctx.logger.warning("日常生活时程生成失败，稍后重试")
             return False
@@ -178,7 +178,7 @@ class DailyLife:
             f'輸出 JSON：{{"changed": true/false, "reason": "一句話說明", "hours": [從 {now.hour} 點到 23 點的時段]}}。'
             f"{HOUR_FORMAT}\n只輸出 JSON。"
         )
-        result = await generate_json(self._ctx, prompt, config.model)
+        result = await generate_json(self._ctx, prompt, config.model_task)
         if not isinstance(result, dict) or not result.get("changed"):
             self._save()
             return False

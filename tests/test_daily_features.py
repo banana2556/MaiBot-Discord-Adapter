@@ -31,6 +31,7 @@ class FakeCtx:
         self.logger = logging.getLogger("test_daily_features")
         self.llm_replies = list(llm_replies or [])
         self.prompts: list = []
+        self.tasks: list = []
         self.triggered: list = []
         self.toggles: list = []
         self.searches: list = []
@@ -65,8 +66,9 @@ class FakeCtx:
     async def _build_readable(self, messages, **kwargs):
         return {"success": True, "text": "小明：晚上九點一起打遊戲？\n麥麥：好啊"}
 
-    async def _generate(self, prompt, model=""):
+    async def _generate(self, prompt, task_name=None):
         self.prompts.append(prompt)
+        self.tasks.append(task_name)
         reply = self.llm_replies.pop(0) if self.llm_replies else ""
         return {"success": True, "response": reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)}
 
@@ -208,6 +210,7 @@ def test_life_generates_injects_and_pushes_presence(tmp_path) -> None:
     assert life.state["date"] == "2026-11-02" and life.state["hours"][5]["activity"] == "日常4"
     assert presence == [("✨ 日常12", "idle")]
     assert "在學餐吃午飯" in life.prompt_text(NOW) and "13 點 日常13" in life.prompt_text(NOW)
+    assert ctx.tasks == ["replyer"], "日常生活默认沿用 replyer 模型任务"
 
     _run(life.tick(NOW + timedelta(minutes=5), _life_config()))
     assert len(presence) == 1 and len(ctx.prompts) == 1, "同一时段不重复推送、不重复生成"
@@ -284,6 +287,7 @@ def test_topics_wait_for_cron_then_share_news(tmp_path) -> None:
     stream_id, intent, reason = ctx.triggered[0]
     assert stream_id == "s-111" and "https://example.com/b" in intent and reason == "主動話題・新聞"
     assert "大家喜歡音遊和貓" in ctx.prompts[0]
+    assert set(ctx.tasks) == {"planner"}, "主动话题默认沿用 planner 模型任务"
     assert scout.next_due == datetime(2026, 11, 3, 12, 0)
     saved = json.loads((tmp_path / "topics.json").read_text(encoding="utf-8"))
     assert saved["history"]["s-111"][0]["url"] == "https://example.com/b"

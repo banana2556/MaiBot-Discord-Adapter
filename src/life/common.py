@@ -50,9 +50,9 @@ async def persona_text(ctx: Any) -> str:
     return "\n".join(lines)
 
 
-async def generate_json(ctx: Any, prompt: str, model: str) -> Optional[Any]:
-    """调 LLM 并把回复解析成 JSON；失败或解析不了时记日志返回 None。"""
-    result = await ctx.llm.generate(prompt, model=model)
+async def generate_json(ctx: Any, prompt: str, task_name: str) -> Optional[Any]:
+    """用 Host 的模型任务（planner / replyer）调 LLM 并把回复解析成 JSON；失败或解析不了时记日志返回 None。"""
+    result = await ctx.llm.generate(prompt, task_name=task_name)
     if not isinstance(result, dict) or not result.get("success"):
         ctx.logger.warning(f"日常功能 LLM 调用失败：{(result or {}).get('error') if isinstance(result, dict) else result}")
         return None

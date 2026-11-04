@@ -287,6 +287,18 @@ class DiscordChatConfig(PluginConfigBase):
             "depends_value": True,
         },
     )
+    emote_chance: float = Field(
+        default=0.15,
+        ge=0,
+        le=1,
+        description="每次思考时，有这个机率提醒麦麦可以顺手用服务器表情按 reaction 或发表情；0 表示不提醒。",
+        json_schema_extra={
+            "hint": "只是提醒，最后发不发仍由麦麦判断。不提醒时她几乎只会在被要求时才用表情。",
+            "label": "主动表情机率",
+            "order": 14,
+            "step": 0.05,
+        },
+    )
 
     @field_validator("guild_list_type", "channel_list_type", "thread_list_type", "user_list_type", mode="before")
     @classmethod
@@ -359,39 +371,6 @@ class DiscordFilterConfig(PluginConfigBase):
             "order": 1,
         },
     )
-
-
-class DiscordPresenceConfig(PluginConfigBase):
-    """机器人在线状态配置。"""
-
-    __ui_label__: ClassVar[str] = "在线状态"
-    __ui_order__: ClassVar[int] = 5
-
-    status: Literal["online", "idle", "dnd", "invisible"] = Field(
-        default="online",
-        description="在线状态：online=在线, idle=闲置, dnd=请勿打扰, invisible=隐身。",
-        json_schema_extra={"label": "在线状态", "order": 0},
-    )
-    activity_type: Literal["custom", "playing", "listening", "watching", "competing"] = Field(
-        default="custom",
-        description="状态文字的显示方式：custom=自定义状态, playing=正在玩, listening=正在听, watching=正在看, competing=正在参加。",
-        json_schema_extra={"label": "显示方式", "order": 1},
-    )
-    activity_text: str = Field(
-        default="",
-        description="显示在机器人名字下方的状态文字。",
-        json_schema_extra={
-            "label": "状态文字",
-            "hint": "留空不显示；最多 128 字。custom 直接显示文字，其他方式显示成「正在玩 / 正在听… + 文字」。",
-            "order": 2,
-            "placeholder": "例如：在想晚餐吃什么",
-        },
-    )
-
-    @field_validator("activity_text", mode="before")
-    @classmethod
-    def _normalize_activity_text(cls, value: Any) -> str:
-        return _normalize_string(value)[:128]
 
 
 class DiscordVoiceConfig(PluginConfigBase):
@@ -936,7 +915,7 @@ class LifeConfig(PluginConfigBase):
     )
     sync_presence: bool = Field(
         default=True,
-        description="换时段时把当前活动同步成 Discord 状态文字与在线状态，会覆盖「在线状态」里的设定。",
+        description="换时段时把当前活动同步成 Discord 状态文字与在线状态。",
         json_schema_extra={"label": "同步 Discord 状态", "order": 4},
     )
     inject_prompt: bool = Field(
@@ -944,10 +923,10 @@ class LifeConfig(PluginConfigBase):
         description="把当前生活状态加进麦麦的对话上下文，让她聊天时知道自己正在做什么。",
         json_schema_extra={"label": "注入对话上下文", "order": 5},
     )
-    model: str = Field(
-        default="",
-        description="生成与调整时程用的模型任务名或模型名，留空用默认。",
-        json_schema_extra={"label": "使用模型", "order": 6, "placeholder": "留空用默认"},
+    model_task: Literal["replyer", "planner"] = Field(
+        default="replyer",
+        description="生成与调整时程沿用 MaiBot 哪个模型任务：replyer=回复模型, planner=规划模型。",
+        json_schema_extra={"label": "使用模型", "order": 6},
     )
 
     @field_validator("generate_time", mode="before")
@@ -997,10 +976,10 @@ class TopicConfig(PluginConfigBase):
             "hint": "⚠ 需要另外安装能操作浏览器的插件，并且这台电脑能启动 Playwright / Chromium；没有浏览器工具时麦麦会放弃分享影片。",
         },
     )
-    model: str = Field(
-        default="",
-        description="挑话题与挑新闻用的模型任务名或模型名，留空用默认。",
-        json_schema_extra={"label": "使用模型", "order": 6, "placeholder": "留空用默认"},
+    model_task: Literal["replyer", "planner"] = Field(
+        default="planner",
+        description="挑话题与挑新闻沿用 MaiBot 哪个模型任务：replyer=回复模型, planner=规划模型。",
+        json_schema_extra={"label": "使用模型", "order": 6},
     )
 
     @field_validator("channel_list", mode="before")
@@ -1016,7 +995,7 @@ class TopicConfig(PluginConfigBase):
 
 # WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。
 WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("basic", "基础设置", ("plugin", "connection", "platform", "presence")),
+    ("basic", "基础设置", ("plugin", "connection", "platform")),
     ("chat", "聊天与过滤", ("chat", "filters")),
     ("daily", "日常", ("reminder", "life", "topics")),
     (
@@ -1044,7 +1023,6 @@ class DiscordPluginSettings(PluginConfigBase):
     chat: DiscordChatConfig = Field(default_factory=DiscordChatConfig)
     platform: DiscordPlatformConfig = Field(default_factory=DiscordPlatformConfig)
     filters: DiscordFilterConfig = Field(default_factory=DiscordFilterConfig)
-    presence: DiscordPresenceConfig = Field(default_factory=DiscordPresenceConfig)
     voice: DiscordVoiceConfig = Field(default_factory=DiscordVoiceConfig)
     siliconflow_tts: SiliconFlowTTSConfig = Field(default_factory=SiliconFlowTTSConfig)
     gptsovits_tts: GPTSoVITSConfig = Field(default_factory=GPTSoVITSConfig)

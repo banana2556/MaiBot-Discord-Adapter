@@ -492,6 +492,12 @@ class VoiceManager:
                 f"channel_id={channel_id}, type={type(channel).__name__}, "
                 f"permissions=({permissions_snapshot})"
             )
+            # 回复晚到、语音频道文字区来消息或被工具叫进来时，频道可能早就没人，不会再有离开事件启动计时
+            if self._voice_mode == "auto":
+                if any(not member.bot for member in channel.members):
+                    self._cancel_idle_timer()
+                else:
+                    self._start_idle_timer()
             return True
 
         except (discord.DiscordException, RuntimeError, OSError) as exc:

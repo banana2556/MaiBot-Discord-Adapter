@@ -43,3 +43,19 @@ def test_outbound_text_turns_emoji_names_into_native() -> None:
     assert render("<:pepe:111> <a:pepe:111>", channel) == "<:pepe:111> <a:pepe:111>"
     assert render(":gone: :nope: 10:30:00", channel) == ":gone: :nope: 10:30:00"
     assert render(":pepe:", SimpleNamespace()) == ":pepe:"
+
+
+def test_planner_emote_nudge_follows_chance_and_only_when_tool_offered() -> None:
+    plugin_cls = _load_plugin_class()
+    plugin = plugin_cls()
+
+    def run(chance, tool_names):
+        plugin.set_plugin_config({"plugin": {"config_version": "1.0.0"}, "chat": {"emote_chance": chance}})
+        items = [{"item_type": "SystemMessageItem", "parts": [{"type": "text", "text": "人設"}]}]
+        tools = [{"type": "function", "function": {"name": name}} for name in tool_names]
+        asyncio.run(plugin.nudge_emote_in_planner(items=items, tool_definitions=tools, session_id="s1"))
+        return "discord_emote" in items[0]["parts"][-1]["text"]
+
+    assert run(1, ["reply", "discord_emote"])
+    assert not run(0, ["reply", "discord_emote"]), "机率 0 不提醒"
+    assert not run(1, ["reply"]), "非 Discord 聊天没有这个工具，不提醒"

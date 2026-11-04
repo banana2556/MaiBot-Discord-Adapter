@@ -30,7 +30,7 @@ from .src.life.daily_life import DailyLife
 from .src.life.reminders import ReminderMixin
 from .src.life.topics import TopicScout
 from .src.native_emoji import NativeEmojiRegistry
-from .src.recv_handler.discord_client import DiscordClientManager, build_presence
+from .src.recv_handler.discord_client import DiscordClientManager
 from .src.recv_handler.message_handler import DiscordMessageHandler, quote_name
 from .src.send_handler.message_send_handler import DiscordContentBuilder
 from .src.send_handler.thread_send_handler import ThreadRoutingManager
@@ -40,6 +40,11 @@ from .src.voice.voice_manager import VoiceManager
 DAILY_POLL_SECONDS = 10
 # 调整生活时程时最多带这么多字的聊天记录，取最后面的
 LIFE_CHAT_CHAR_LIMIT = 8000
+# chat.emote_chance 命中时加进 planner 系统提示词的提醒
+EMOTE_NUDGE = (
+    "【表情】這一輪如果有值得表態的訊息（好笑、好消息、附和、驚訝、無語），"
+    "可以用 discord_emote 在那則訊息按個 reaction；可以和 reply 同一輪一起呼叫，也可以只按表情不說話。沒有合適的就略過。"
+)
 
 
 class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
@@ -151,20 +156,43 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             return str(stream["stream_id"])
         return None
 
-    def _inject_life_state(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """把当前生活状态接在系统提示词后面；没启用、没时程或没有系统消息时原样放行。"""
-        life_config = self._load_settings().life
+    @staticmethod
+    def _append_system_text(kwargs: Dict[str, Any], text: str) -> Dict[str, Any]:
+        """把一段文字接在 Hook 载荷的系统提示词后面；没有系统消息时原样放行。"""
         items = kwargs.get("items")
-        if not (life_config.enabled and life_config.inject_prompt) or self._daily_life is None or not isinstance(items, list):
-            return {"action": "continue"}
-        text = self._daily_life.prompt_text(datetime.now())
-        if not text:
-            return {"action": "continue"}
-        for item in items:
+        for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and item.get("item_type") == "SystemMessageItem" and isinstance(item.get("parts"), list):
                 item["parts"].append({"type": "text", "text": text})
                 return {"action": "continue", "modified_kwargs": kwargs}
         return {"action": "continue"}
+
+    def _inject_life_state(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """把当前生活状态接在系统提示词后面；没启用或没时程时原样放行。"""
+        life_config = self._load_settings().life
+        if not (life_config.enabled and life_config.inject_prompt) or self._daily_life is None:
+            return {"action": "continue"}
+        text = self._daily_life.prompt_text(datetime.now())
+        return self._append_system_text(kwargs, text) if text else {"action": "continue"}
+
+    @HookHandler(
+        "maisaka.planner.before_request",
+        name="discord_emote_nudge",
+        mode="blocking",
+        order="late",
+        timeout_ms=1000,
+    )
+    async def nudge_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
+        """按 chat.emote_chance 偶尔提醒可以按表情；不提醒时 planner 几乎只会选 reply。
+
+        只在本轮工具列表里有 discord_emote（也就是 Discord 聊天）时才提醒。
+        """
+        tools = kwargs.get("tool_definitions")
+        offered = isinstance(tools, list) and any(
+            isinstance(tool, dict) and (tool.get("function") or {}).get("name") == "discord_emote" for tool in tools
+        )
+        if not offered or random.random() >= self._load_settings().chat.emote_chance:
+            return {"action": "continue"}
+        return self._append_system_text(kwargs, EMOTE_NUDGE)
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -1370,10 +1398,10 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
     @Tool(
         "discord_emote",
         description=(
-            "用 Discord 伺服器的原生表情代替文字回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張伺服器貼圖（sticker）。"
-            "適合附和、按讚、笑一下、表示收到、驚訝、無語、心疼這類不必說話的時候。"
-            "只傳目標訊息、想表達的情緒與形式，工具會看聊天上下文與候選圖自行挑選；挑不到就不要送，不使用普通 Unicode emoji。"
-            "需要回答問題或安慰時仍用文字，不要每則都加。"
+            "用 Discord 伺服器的原生表情回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張伺服器貼圖（sticker）。"
+            "可以和 reply 在同一輪一起呼叫（邊回話邊按表情），也可以只按表情不說話。"
+            "適合好笑、好消息、附和、按讚、表示收到、驚訝、無語、心疼的時候，像真人聊天一樣偶爾用。"
+            "只傳目標訊息、想表達的情緒與形式，工具會看聊天上下文與候選圖自行挑選，不使用普通 Unicode emoji。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -2076,12 +2104,9 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             typing_indicator_enabled=settings.chat.show_typing_indicator,
             typing_indicator_delay_ms=settings.chat.typing_indicator_delay_ms,
             typing_indicator_timeout_sec=settings.chat.typing_indicator_timeout_sec,
-            presence=build_presence(
-                settings.presence.activity_text, settings.presence.activity_type, settings.presence.status
-            ),
         )
         if self._daily_life is not None:
-            # 新客户端用的是配置里的状态，日常生活下一轮要重新推送当前时段
+            # 新客户端登录时没有状态文字，日常生活下一轮要重新推送当前时段
             self._daily_life.invalidate_presence()
 
         self._voice_manager = self._build_voice_manager(settings)

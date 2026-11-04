@@ -44,17 +44,6 @@ def test_set_presence_applies_now_and_survives_reconnect() -> None:
     assert calls == [{"activity": None, "status": discord.Status.dnd}]
 
 
-def test_presence_config_defaults_and_trims_text() -> None:
-    config_module = _load_adapter_module("config")
-    settings = config_module.DiscordPluginSettings()
-    assert (settings.presence.status, settings.presence.activity_type, settings.presence.activity_text) == (
-        "online",
-        "custom",
-        "",
-    )
-    assert len(config_module.DiscordPresenceConfig(activity_text="字" * 200).activity_text) == 128
-
-
 def test_presence_api_reports_bad_values() -> None:
     plugin_cls = _load_plugin_class()
     plugin = plugin_cls.__new__(plugin_cls)
