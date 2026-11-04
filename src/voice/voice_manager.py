@@ -288,6 +288,7 @@ class VoiceManager:
         self.voice_client: Optional[VoiceClient] = None
         self._current_channel_id: Optional[int] = None
         self._running = False
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._idle_timer_task: Optional[asyncio.Task[None]] = None
 
         self._voice_sink: Optional[VoiceDataSink] = None
@@ -314,6 +315,7 @@ class VoiceManager:
         Returns:
             None
         """
+        self._event_loop = asyncio.get_running_loop()
         self._running = True
 
         if self._voice_mode == "fixed":
@@ -869,11 +871,21 @@ class VoiceManager:
             user_id: 用户 ID。
             pcm_bytes: 本帧 PCM 数据。
         """
-        if not self._enable_vad or not self.stt_provider:
+        if not self._enable_vad or not self.stt_provider or not self._event_loop:
             return
+        # voice_recv invokes AudioSink.write on its packet-router thread. Keep all
+        # VAD state and asyncio task operations on the bot's event loop.
+        try:
+            self._event_loop.call_soon_threadsafe(self._handle_vad_frame, user, user_id, _frame_db(pcm_bytes))
+        except RuntimeError:
+            # The event loop may have closed while the voice reader was stopping.
+            self._logger.debug("语音事件循环已关闭，忽略最后一帧")
 
+    def _handle_vad_frame(self, user: Any, user_id: int, db: float) -> None:
+        """Process a decoded frame on the bot event loop."""
+        if not self._running:
+            return
         self._vad_user_objects[user_id] = user
-        db = _frame_db(pcm_bytes)
         now = _time.monotonic()
 
         if db > self._vad_threshold_db:
