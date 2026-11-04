@@ -86,6 +86,16 @@ class ReminderMixin:
                     f"已从旧的定时提醒插件搬入提醒：{legacy}；请停用 {LEGACY_PLUGIN_ID}，否则提醒会重复触发"
                 )
         self._reminders = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        # 旧版本（含搬过来的旧插件数据）没有 24 小时限制；合法的顺手记下不可能晚于现在 + 24 小时
+        latest = datetime.now() + FOLLOWUP_WINDOW
+        stale = [r for r in self._reminders if r.get("auto") and datetime.fromisoformat(r["due"]) > latest]
+        if stale:
+            self._reminders = [r for r in self._reminders if r not in stale]
+            self._save_reminders()
+            self.ctx.logger.warning(
+                f"順手記下只收 24 小時內，已移除 {len(stale)} 則超出範圍的舊紀錄："
+                + "；".join(f"{r['due']} {r['content']}" for r in stale)
+            )
 
     async def _apply_reminder_switches(self) -> None:
         # 关闭时直接禁用工具，麦麦在 Planner 里就看不到它，不会白白调用一次再被拒绝

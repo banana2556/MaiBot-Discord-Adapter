@@ -184,6 +184,21 @@ def test_reminders_migrate_from_legacy_plugin(tmp_path) -> None:
     assert (data_dir / "reminders.json").exists() and (legacy_dir / "reminders.json").exists()
 
 
+def test_out_of_window_followups_are_dropped_on_load(tmp_path) -> None:
+    soon = (datetime.now() + timedelta(hours=3)).isoformat(timespec="seconds")
+    later = (datetime.now() + timedelta(days=180)).isoformat(timespec="seconds")
+    reminders = [
+        {"id": "ok1", "auto": True, "due": soon, "content": "今晚打遊戲"},
+        {"id": "bad", "auto": True, "due": later, "content": "半年後的演唱會"},
+        {"id": "ask", "auto": False, "due": later, "content": "有人請麥麥半年後提醒"},
+    ]
+    (tmp_path / "reminders.json").write_text(json.dumps(reminders, ensure_ascii=False), encoding="utf-8")
+    plugin, _ = _plugin(tmp_path)
+    plugin._load_reminders()
+    assert [r["id"] for r in plugin._reminders] == ["ok1", "ask"], "只清掉超过 24 小时的顺手记下"
+    assert [r["id"] for r in json.loads((tmp_path / "reminders.json").read_text(encoding="utf-8"))] == ["ok1", "ask"]
+
+
 # ===== 日常生活 =====
 
 
@@ -454,7 +469,9 @@ def test_page_settings_migrate_from_config_then_override_it(tmp_path) -> None:
     path = tmp_path / "daily_settings.json"
     plugin._load_page_settings(path)
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved == {"life": {"life_setting": "住台北"}, "topics": {"channel_list": ["111"], "cron": "0 9 * * *"}}
+    assert saved["life"] == {"life_setting": "住台北"}
+    assert saved["topics"] == {"channel_list": ["111"], "cron": "0 9 * * *"}
+    assert saved["voice"]["idle_timeout_sec"] == 300, "语音页面管的字段也一起搬过去"
 
     _run(plugin.webui_life_save_setting("  住高雄  "))
     _run(plugin.webui_topics_add_channel("222"))
@@ -474,3 +491,42 @@ def test_page_settings_migrate_from_config_then_override_it(tmp_path) -> None:
     schema = plugin.get_webui_config_schema()
     assert "life_setting" not in schema["sections"]["life"]["fields"]
     assert not {"channel_list", "cron"} & set(schema["sections"]["topics"]["fields"])
+
+
+# ===== 语音页面 =====
+
+
+def test_voice_page_saves_only_filled_fields_and_reconnects(tmp_path) -> None:
+    plugin, _ = _plugin(tmp_path, {"voice": {"enabled": True, "idle_timeout_sec": 120}})
+    plugin._load_page_settings(tmp_path / "daily_settings.json")
+    restarts: list = []
+
+    async def restart():
+        restarts.append(True)
+
+    plugin._restart_if_needed = restart
+
+    status = _run(plugin.webui_voice())
+    assert status["current_channel"] == "未連線" and status["connected"] is False
+    assert {"item": "空閒退出（秒）", "value": "120"} in status["settings"]
+
+    _run(plugin.webui_voice_save(voice_mode="fixed", fixed_channel_id="123", enable_vad="false", idle_timeout_sec=" 60 "))
+    voice = plugin._load_settings().voice
+    assert (voice.voice_mode, voice.fixed_channel_id, voice.enable_vad, voice.idle_timeout_sec) == ("fixed", "123", False, 60)
+    assert voice.vad_threshold_db == -50.0, "没填的不动"
+    _run(plugin.webui_voice_add_channel("456"))
+    assert plugin._load_settings().voice.auto_channel_list == ["456"]
+    _run(plugin.webui_voice_remove_channel("456"))
+    assert plugin._load_settings().voice.auto_channel_list == [] and len(restarts) == 3
+
+    for bad in (
+        lambda: plugin.webui_voice_save(idle_timeout_sec="很久"),
+        lambda: plugin.webui_voice_save(),
+        lambda: plugin.webui_voice_save(fixed_channel_id="abc"),
+    ):
+        with pytest.raises(ValueError):
+            _run(bad())
+    assert len(restarts) == 3 and plugin._load_settings().voice.idle_timeout_sec == 60, "格式不对时不存也不重连"
+
+    schema = plugin.get_webui_config_schema()
+    assert set(schema["sections"]["voice"]["fields"]) == {"enabled", "tts_provider", "stt_provider"}

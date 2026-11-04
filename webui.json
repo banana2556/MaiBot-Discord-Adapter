@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "workspace_title": "日常",
+  "workspace_title": "DC生活",
   "pages": [
     {
       "id": "life",
@@ -512,6 +512,335 @@
           "confirmation": "現在就為每個頻道各開一次話題（會用模型和聯網搜尋）。確定？"
         }
       }
+    },
+    {
+      "id": "voice",
+      "title": "語音",
+      "description": "語音頻道的連線狀態與頻道、空閒退出、VAD 設定；服務商和金鑰仍在插件設定的「語音」分頁。",
+      "placement": "workspace",
+      "icon": "settings",
+      "queries": {
+        "voice": {
+          "api": "webui_voice",
+          "version": "1"
+        }
+      },
+      "actions": {
+        "save": {
+          "api": "webui_voice_save",
+          "version": "1",
+          "parameters": {
+            "voice_mode": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "fixed_channel_id": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "idle_timeout_sec": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "enable_vad": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "vad_threshold_db": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "vad_deactivation_delay_ms": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "send_text_in_voice": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            }
+          },
+          "confirmation": "只會改有填的項目，儲存後 Discord 會重新連線幾秒鐘。確定？"
+        },
+        "add_channel": {
+          "api": "webui_voice_add_channel",
+          "version": "1",
+          "parameters": {
+            "new_channel_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 40
+            }
+          },
+          "confirmation": "加入後 Discord 會重新連線幾秒鐘。確定？"
+        },
+        "remove_channel": {
+          "api": "webui_voice_remove_channel",
+          "version": "1",
+          "parameters": {
+            "channel_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 40
+            }
+          },
+          "arguments": {
+            "channel_id": {
+              "scope": "selection",
+              "source": "voiceChannelRow",
+              "field": "channel_id"
+            }
+          },
+          "confirmation": "移除後 Discord 會重新連線幾秒鐘。確定？"
+        },
+        "leave": {
+          "api": "webui_voice_leave",
+          "version": "1"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "value": {
+            "source": "voice",
+            "field": "notice"
+          },
+          "when": {
+            "reference": {
+              "source": "voice",
+              "field": "notice"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "目前頻道",
+              "value": {
+                "source": "voice",
+                "field": "current_channel"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "頻道模式",
+              "value": {
+                "source": "voice",
+                "field": "mode"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "TTS",
+              "value": {
+                "source": "voice",
+                "field": "tts"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "STT",
+              "value": {
+                "source": "voice",
+                "field": "stt"
+              }
+            }
+          ]
+        },
+        {
+          "type": "button",
+          "label": "離開語音頻道",
+          "action": "leave",
+          "variant": "muted",
+          "disabled_when": {
+            "reference": {
+              "source": "voice",
+              "field": "connected"
+            },
+            "operator": "equals",
+            "expected": false
+          },
+          "disabled_reason": "目前不在語音頻道"
+        },
+        {
+          "type": "table",
+          "label": "目前設定",
+          "value": {
+            "source": "voice",
+            "field": "settings"
+          },
+          "columns": [
+            {
+              "field": "item",
+              "label": "項目"
+            },
+            {
+              "field": "value",
+              "label": "目前的值"
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "修改設定（只填要改的項目）",
+          "default_open": true,
+          "children": [
+            {
+              "type": "select",
+              "name": "voice_mode",
+              "label": "頻道模式",
+              "options": [
+                {
+                  "label": "固定頻道常駐",
+                  "value": "fixed"
+                },
+                {
+                  "label": "有人進來才加入（自動）",
+                  "value": "auto"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "fixed_channel_id",
+              "label": "固定頻道 ID（固定模式用；語音頻道按右鍵 → 複製頻道 ID）"
+            },
+            {
+              "type": "input",
+              "name": "idle_timeout_sec",
+              "label": "空閒退出（秒，自動模式下沒人後等多久離開）"
+            },
+            {
+              "type": "select",
+              "name": "enable_vad",
+              "label": "音量偵測說話（VAD）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "vad_threshold_db",
+              "label": "VAD 門檻（dB，約 -60 靈敏 ~ -30 嚴格）"
+            },
+            {
+              "type": "input",
+              "name": "vad_deactivation_delay_ms",
+              "label": "VAD 停止延遲（毫秒，安靜多久算講完）"
+            },
+            {
+              "type": "select",
+              "name": "send_text_in_voice",
+              "label": "語音頻道同步發文字（除錯用）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "button",
+              "label": "儲存並重新連線",
+              "action": "save"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "label": "自動加入的頻道（自動模式；點一列可移除）",
+          "value": {
+            "source": "voice",
+            "field": "auto_channels"
+          },
+          "when": {
+            "reference": {
+              "source": "voice",
+              "field": "auto_channels"
+            },
+            "operator": "not_empty"
+          },
+          "selection": "voiceChannelRow",
+          "detail": "voiceChannelDetails",
+          "columns": [
+            {
+              "field": "channel_id",
+              "label": "頻道 ID"
+            },
+            {
+              "field": "channel",
+              "label": "頻道"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "children": [
+            {
+              "type": "input",
+              "name": "new_channel_id",
+              "label": "加入自動模式的語音頻道（頻道 ID）"
+            },
+            {
+              "type": "button",
+              "label": "加入頻道",
+              "action": "add_channel"
+            }
+          ]
+        },
+        {
+          "type": "dialog",
+          "name": "voiceChannelDetails",
+          "label": "語音頻道",
+          "children": [
+            {
+              "type": "text",
+              "label": "頻道 ID",
+              "value": {
+                "scope": "selection",
+                "source": "voiceChannelRow",
+                "field": "channel_id"
+              }
+            },
+            {
+              "type": "text",
+              "label": "頻道",
+              "value": {
+                "scope": "selection",
+                "source": "voiceChannelRow",
+                "field": "channel"
+              }
+            },
+            {
+              "type": "button",
+              "label": "移除這個頻道",
+              "action": "remove_channel",
+              "variant": "danger"
+            }
+          ]
+        }
+      ]
     },
     {
       "id": "reminders",

@@ -26,19 +26,12 @@
 ```toml
 [voice]
 enabled = true
-voice_mode = "fixed"
-fixed_channel_id = "123456789012345678"
-auto_channel_list = []
-idle_timeout_sec = 300
 tts_provider = "gptsovits"
 stt_provider = "siliconflow_sensevoice"
-enable_vad = true
-vad_threshold_db = -50.0
-vad_deactivation_delay_ms = 500
-send_text_in_voice = false
 ```
 
-字段说明：
+配置文件只留总开关和服务商。下面这些在顶部「DC生活 → 語音」页面设置（存在 `daily_settings.json`，第一次启动会从配置文件搬过去），
+页面上也看得到现在在哪个语音频道，并能让她离开：
 
 - `voice_mode = "fixed"`
   常驻一个语音频道，使用 `fixed_channel_id`
@@ -55,7 +48,7 @@ send_text_in_voice = false
 
 - `voice.enabled = true`
 - `connection.intent_voice_states = true`
-- `voice.voice_mode = "fixed"` 时，`voice.fixed_channel_id` 是否真的是语音频道 ID
+- 「DC生活 → 語音」页面的频道模式是固定频道时，固定频道是否真的是语音频道 ID
 - Bot 在目标语音频道是否有 `View Channel`、`Connect`、`Speak` 权限
 
 当前适配器会先尝试从缓存取频道，取不到时再回退到 Discord API `fetch_channel()`，并同时支持普通语音频道和 Stage Channel。

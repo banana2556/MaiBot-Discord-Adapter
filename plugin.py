@@ -16,6 +16,7 @@ import discord
 from maim_message import BaseMessageInfo, MessageBase, Seg
 
 from maibot_sdk import API, HookHandler, MaiBotPlugin, MessageGateway, PluginConfigBase, Tool
+from pydantic import ValidationError
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from maim_message import FormatInfo, GroupInfo, UserInfo
@@ -53,6 +54,19 @@ SLEEP_NOTE = "【睡眠中】你現在正在睡覺，看不到也不會回這些
 WAKE_MINUTES = 30
 ONLINE_STATUS_LABELS = {"online": "🟢 在線", "idle": "🌙 閒置", "dnd": "⛔ 請勿打擾"}
 TOPIC_SOURCE_LABELS = {"news": "新聞", "video": "影片"}
+VOICE_MODE_LABELS = {"fixed": "固定頻道常駐", "auto": "有人進來才加入"}
+# 「DC生活 → 語音」页面能改的语音字段与显示名称
+VOICE_FIELD_LABELS = {
+    "voice_mode": "頻道模式",
+    "fixed_channel_id": "固定頻道",
+    "auto_channel_list": "自動加入的頻道",
+    "idle_timeout_sec": "空閒退出（秒）",
+    "enable_vad": "音量偵測說話（VAD）",
+    "vad_threshold_db": "VAD 門檻（dB）",
+    "vad_deactivation_delay_ms": "VAD 停止延遲（毫秒）",
+    "send_text_in_voice": "語音頻道同步發文字",
+}
+ON_OFF = {True: "開", False: "關"}
 
 
 def _tool_names(kwargs: Dict[str, Any]) -> set[str]:
@@ -310,6 +324,117 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         self._ensure_daily_job_idle("topics")
         self._spawn_daily_job("topics", partial(self._topic_scout.run_all, datetime.now(), config))
         return {"started": True}
+
+    # ===== WebUI：语音 =====
+
+    def _describe_channel(self, channel_id: Any) -> str:
+        """Discord 频道 ID -> 「频道名 @ 服务器名」；没连上 Discord 或找不到时带上 ID 说明。"""
+        client = self._client_manager.client if self._client_manager is not None else None
+        channel = client.get_channel(int(channel_id)) if client is not None and str(channel_id).isdigit() else None
+        if channel is None:
+            return f"{channel_id}（找不到頻道或還沒連上 Discord）"
+        guild = getattr(channel, "guild", None)
+        return f"{channel.name} @ {guild.name}" if guild is not None else str(channel.name)
+
+    @API("webui_voice", description="讀取語音功能的連線狀態與頻道設定", version="1")
+    async def webui_voice(self) -> Dict[str, Any]:
+        """WebUI 语音页：现在在哪个频道、页面管的各项设置目前的值、自动加入的频道。"""
+        settings = self._load_settings()
+        voice = settings.voice
+        channel_id = self._voice_manager.get_connected_channel_id() if self._voice_manager is not None else None
+        if not voice.enabled:
+            notice = "語音功能未啟用，到插件設定的「語音」分頁開啟。"
+        elif not settings.connection.intent_voice_states:
+            notice = "插件設定裡的「語音狀態權限」沒開，加入語音頻道、自動進出和語音辨識都不會動。"
+        else:
+            notice = ""
+        current = {
+            "voice_mode": VOICE_MODE_LABELS[voice.voice_mode],
+            "fixed_channel_id": self._describe_channel(voice.fixed_channel_id) if voice.fixed_channel_id else "—",
+            "idle_timeout_sec": voice.idle_timeout_sec,
+            "enable_vad": ON_OFF[voice.enable_vad],
+            "vad_threshold_db": voice.vad_threshold_db,
+            "vad_deactivation_delay_ms": voice.vad_deactivation_delay_ms,
+            "send_text_in_voice": ON_OFF[voice.send_text_in_voice],
+        }
+        return {
+            "notice": notice,
+            "connected": channel_id is not None,
+            "current_channel": self._describe_channel(channel_id) if channel_id is not None else "未連線",
+            "mode": VOICE_MODE_LABELS[voice.voice_mode],
+            "tts": voice.tts_provider,
+            "stt": voice.stt_provider,
+            "settings": [{"item": VOICE_FIELD_LABELS[field], "value": str(value)} for field, value in current.items()],
+            "auto_channels": [
+                {"channel_id": item, "channel": self._describe_channel(item)} for item in voice.auto_channel_list
+            ],
+        }
+
+    async def _save_voice_settings(self, updates: Dict[str, Any]) -> None:
+        """先把所有改动一起交给配置模型校验和转换，全部通过才存，然后重连让语音管理器套用。"""
+        voice = self._load_settings().voice
+        try:
+            checked = type(voice).model_validate({**voice.model_dump(), **updates})
+        except ValidationError as exc:
+            fields = "、".join(VOICE_FIELD_LABELS.get(str(error["loc"][0]), str(error["loc"][0])) for error in exc.errors())
+            raise ValueError(f"格式不對：{fields}") from exc
+        for field in updates:
+            self._save_page_setting("voice", field, getattr(checked, field))
+        await self._restart_if_needed()
+
+    @API("webui_voice_save", description="儲存語音的頻道模式、空閒退出與 VAD 設定", version="1")
+    async def webui_voice_save(
+        self,
+        voice_mode: Optional[str] = None,
+        fixed_channel_id: Optional[str] = None,
+        idle_timeout_sec: Optional[str] = None,
+        enable_vad: Optional[str] = None,
+        vad_threshold_db: Optional[str] = None,
+        vad_deactivation_delay_ms: Optional[str] = None,
+        send_text_in_voice: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """只改有填的项目；数字与开关由配置模型转换。"""
+        submitted = {
+            "voice_mode": voice_mode,
+            "fixed_channel_id": fixed_channel_id,
+            "idle_timeout_sec": idle_timeout_sec,
+            "enable_vad": enable_vad,
+            "vad_threshold_db": vad_threshold_db,
+            "vad_deactivation_delay_ms": vad_deactivation_delay_ms,
+            "send_text_in_voice": send_text_in_voice,
+        }
+        updates = {field: value.strip() for field, value in submitted.items() if value is not None}
+        if not updates:
+            raise ValueError("沒有填任何要改的項目")
+        if updates.get("fixed_channel_id") and not updates["fixed_channel_id"].isdigit():
+            raise ValueError("固定頻道要填語音頻道 ID（一串數字），清空則不指定")
+        await self._save_voice_settings(updates)
+        return {"saved": sorted(updates)}
+
+    @API("webui_voice_add_channel", description="加入自動模式的語音頻道", version="1")
+    async def webui_voice_add_channel(self, new_channel_id: str = "") -> Dict[str, Any]:
+        channel_id = new_channel_id.strip()
+        if not channel_id.isdigit():
+            raise ValueError("頻道 ID 要是一串數字（在 Discord 對語音頻道按右鍵 → 複製頻道 ID）")
+        channels = self._load_settings().voice.auto_channel_list
+        if channel_id in channels:
+            raise ValueError("這個頻道已經在列表裡")
+        await self._save_voice_settings({"auto_channel_list": [*channels, channel_id]})
+        return {"saved": True}
+
+    @API("webui_voice_remove_channel", description="移除自動模式的語音頻道", version="1")
+    async def webui_voice_remove_channel(self, channel_id: str = "") -> Dict[str, Any]:
+        channels = self._load_settings().voice.auto_channel_list
+        await self._save_voice_settings({"auto_channel_list": [item for item in channels if item != channel_id]})
+        return {"saved": True}
+
+    @API("webui_voice_leave", description="讓麥麥離開目前的語音頻道", version="1")
+    async def webui_voice_leave(self) -> Dict[str, Any]:
+        """固定模式下离开后要等下次重连才会回去。"""
+        if self._voice_manager is None or self._voice_manager.get_connected_channel_id() is None:
+            raise ValueError("目前不在語音頻道")
+        await self._voice_manager.disconnect()
+        return {"left": True}
 
     @API("webui_topics", description="讀取主動話題的排程、頻道與分享紀錄", version="1")
     async def webui_topics(self) -> Dict[str, Any]:

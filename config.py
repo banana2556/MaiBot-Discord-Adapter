@@ -374,7 +374,7 @@ class DiscordFilterConfig(PluginConfigBase):
 
 
 class DiscordVoiceConfig(PluginConfigBase):
-    """语音功能配置。开关语音或切换 TTS / STT 提供商后，保存并刷新页面即可只显示所选服务商的设置。"""
+    """语音功能配置。开关语音或切换 TTS / STT 提供商后，保存并刷新页面即可只显示所选服务商的设置；频道、空闲退出与 VAD 在「DC生活 → 語音」页面设置。"""
 
     __ui_label__: ClassVar[str] = "语音功能"
     __ui_order__: ClassVar[int] = 6
@@ -906,7 +906,7 @@ class ReminderConfig(PluginConfigBase):
 
 
 class LifeConfig(PluginConfigBase):
-    """日常生活：每天生成麦麦每小时的生活时程，定期按聊天调整，当前状态会注入对话并同步到 Discord 状态。生活设定在「日常 → 日常生活」页面填写。"""
+    """日常生活：每天生成麦麦每小时的生活时程，定期按聊天调整，当前状态会注入对话并同步到 Discord 状态。生活设定在「DC生活 → 日常生活」页面填写。"""
 
     __ui_label__: ClassVar[str] = "日常生活"
     __ui_order__: ClassVar[int] = 21
@@ -965,7 +965,7 @@ class LifeConfig(PluginConfigBase):
 
 
 class TopicConfig(PluginConfigBase):
-    """主动话题：按排程根据群的记忆和最近聊天找相关新闻或影片，唤醒麦麦分享到群里。频道和排程在「日常 → 主動話題」页面设置。"""
+    """主动话题：按排程根据群的记忆和最近聊天找相关新闻或影片，唤醒麦麦分享到群里。频道和排程在「DC生活 → 主動話題」页面设置。"""
 
     __ui_label__: ClassVar[str] = "主动话题"
     __ui_order__: ClassVar[int] = 22
@@ -1022,9 +1022,26 @@ class TopicConfig(PluginConfigBase):
         return " ".join(_normalize_string(value).split()) or "0 12,20 * * *"
 
 
-# 改到「日常」工作区页面设置、不在插件配置页显示的字段：(配置节, 字段)。值存在插件数据目录的 daily_settings.json，
+# 改到「DC生活」工作区页面设置、不在插件配置页显示的字段：(配置节, 字段)。值存在插件数据目录的 daily_settings.json，
 # 运行时覆盖配置里的同名字段；第一次启动时从原配置搬过去
-PAGE_MANAGED_FIELDS: tuple[tuple[str, str], ...] = (("life", "life_setting"), ("topics", "channel_list"), ("topics", "cron"))
+PAGE_MANAGED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("life", "life_setting"),
+    ("topics", "channel_list"),
+    ("topics", "cron"),
+    *(
+        ("voice", field)
+        for field in (
+            "voice_mode",
+            "fixed_channel_id",
+            "auto_channel_list",
+            "idle_timeout_sec",
+            "enable_vad",
+            "vad_threshold_db",
+            "vad_deactivation_delay_ms",
+            "send_text_in_voice",
+        )
+    ),
+)
 
 # WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。
 WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (

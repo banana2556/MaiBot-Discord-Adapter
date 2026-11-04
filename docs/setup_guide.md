@@ -248,31 +248,19 @@ ignore_bot_message = true
 ```toml
 [voice]
 enabled = false
-voice_mode = "auto"
-fixed_channel_id = ""
-auto_channel_list = []
-idle_timeout_sec = 300
 tts_provider = "siliconflow"
 stt_provider = "siliconflow_sensevoice"
-enable_vad = true
-vad_threshold_db = -50
-vad_deactivation_delay_ms = 500
-send_text_in_voice = false
 ```
 
 字段说明：
 
 - `enabled`
   - 语音总开关；为 `false` 时插件不会创建语音管理器，也不会尝试加入语音频道
-- `voice_mode`
-  - `fixed`：固定语音频道
-  - `auto`：在候选频道中自动进出
-- `fixed_channel_id`
-  - `voice_mode = "fixed"` 时使用，必须填语音频道 ID，不是频道分类 ID
-- `auto_channel_list`
-  - `voice_mode = "auto"` 时使用
-- `send_text_in_voice`
-  - 播放 TTS 时是否也在文本侧补发文字
+- `tts_provider` / `stt_provider`
+  - 选用的语音合成 / 识别服务商，对应的 `[xxx_tts]` / `[xxx_stt]` 节填金钥与模型
+
+频道模式（固定 / 自动）、固定频道、自动加入的频道、空闲退出、VAD 与「语音频道同步发文字」改到顶部「DC生活 → 語音」页面设置，
+存在插件数据目录的 `daily_settings.json`；第一次启动会把配置文件里原有的值搬过去，之后配置文件里的这些字段不再生效。
 
 更细的语音配置见 [voice_config_guide.md](./voice_config_guide.md)。
 
@@ -317,16 +305,8 @@ ignore_bot_message = true
 
 [voice]
 enabled = false
-voice_mode = "auto"
-fixed_channel_id = ""
-auto_channel_list = []
-idle_timeout_sec = 300
 tts_provider = "siliconflow"
 stt_provider = "siliconflow_sensevoice"
-enable_vad = true
-vad_threshold_db = -50
-vad_deactivation_delay_ms = 500
-send_text_in_voice = false
 ```
 
 ## 7. WebUI 与自动生成配置
