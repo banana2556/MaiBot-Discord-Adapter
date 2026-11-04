@@ -60,6 +60,23 @@ send_text_in_voice = false
 
 当前适配器会先尝试从缓存取频道，取不到时再回退到 Discord API `fetch_channel()`，并同时支持普通语音频道和 Stage Channel。
 
+## Gemini STT
+
+```toml
+[voice]
+stt_provider = "gemini"
+
+[gemini_stt]
+api_key = "AIza..."
+model = "gemini-3.5-transcribe-live"
+mode = "SMART"
+```
+
+- `api_key` 在 Google AI Studio 申请；走 Live API 的 WebSocket，不需要额外装套件
+- `mode = "SMART"` 会去掉口头禅、整理成通顺文字；`"VERBATIM"` 逐字照录
+- 语言自动侦测，中英混说也能转
+- 适配器是在对方关麦（或 VAD 判定说完）后才把整段音频送出，所以延迟约等于一次 Live 会话往返，不是边说边出字
+
 ## 其他 TTS 默认建议
 
 ### SiliconFlow

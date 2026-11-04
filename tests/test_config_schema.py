@@ -11,6 +11,7 @@ VOICE_PROVIDER_SECTIONS = {
     "siliconflow_stt",
     "aliyun_stt",
     "tencent_stt",
+    "gemini_stt",
 }
 
 

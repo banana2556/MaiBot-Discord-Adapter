@@ -2172,6 +2172,9 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         elif voice_cfg.stt_provider == "tencent":
             from .src.voice.stt.tencent_stt import TencentSTTProvider
             stt_provider = TencentSTTProvider(settings.tencent_stt, logger)
+        elif voice_cfg.stt_provider == "gemini":
+            from .src.voice.stt.gemini_stt import GeminiSTTProvider
+            stt_provider = GeminiSTTProvider(settings.gemini_stt, logger)
 
         platform_name = settings.platform.platform_name
         gateway_name = DISCORD_GATEWAY_NAME

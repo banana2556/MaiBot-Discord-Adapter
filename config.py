@@ -441,7 +441,7 @@ class DiscordVoiceConfig(PluginConfigBase):
             "order": 5,
         },
     )
-    stt_provider: Literal["siliconflow_sensevoice", "aliyun", "tencent"] = Field(
+    stt_provider: Literal["siliconflow_sensevoice", "aliyun", "tencent", "gemini"] = Field(
         default="siliconflow_sensevoice",
         description="STT 语音识别服务提供商。",
         json_schema_extra={
@@ -845,6 +845,30 @@ class TencentSTTConfig(PluginConfigBase):
     )
 
 
+class GeminiSTTConfig(PluginConfigBase):
+    """Google Gemini STT 配置（Live API）。"""
+
+    __ui_label__: ClassVar[str] = "Gemini 语音识别"
+    __ui_order__: ClassVar[int] = 14
+    __ui_visible_when__: ClassVar[UIVisibleWhen] = (("voice.enabled", True), ("voice.stt_provider", "gemini"))
+
+    api_key: str = Field(
+        default="",
+        description="Gemini API 密钥（Google AI Studio 申请）。",
+        json_schema_extra={"label": "API Key", "input_type": "password", "order": 0},
+    )
+    model: str = Field(
+        default="gemini-3.5-transcribe-live",
+        description="Live API 转写模型。",
+        json_schema_extra={"label": "模型", "order": 1},
+    )
+    mode: Literal["SMART", "VERBATIM"] = Field(
+        default="SMART",
+        description="转写模式：SMART=去掉嗯、啊等口头禅并整理成通顺文字, VERBATIM=逐字照录。",
+        json_schema_extra={"label": "转写模式", "order": 2},
+    )
+
+
 class ReminderConfig(PluginConfigBase):
     """定时提醒（原 luca.reminder 插件）。启用前请停用旧的定时提醒插件，提醒会自动搬过来。"""
 
@@ -1010,6 +1034,7 @@ WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "siliconflow_stt",
             "aliyun_stt",
             "tencent_stt",
+            "gemini_stt",
         ),
     ),
 )
@@ -1031,6 +1056,7 @@ class DiscordPluginSettings(PluginConfigBase):
     siliconflow_stt: SiliconFlowSTTConfig = Field(default_factory=SiliconFlowSTTConfig)
     aliyun_stt: AliyunSTTConfig = Field(default_factory=AliyunSTTConfig)
     tencent_stt: TencentSTTConfig = Field(default_factory=TencentSTTConfig)
+    gemini_stt: GeminiSTTConfig = Field(default_factory=GeminiSTTConfig)
     reminder: ReminderConfig = Field(default_factory=ReminderConfig)
     life: LifeConfig = Field(default_factory=LifeConfig)
     topics: TopicConfig = Field(default_factory=TopicConfig)

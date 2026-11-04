@@ -74,6 +74,7 @@ STT:
 - `siliconflow`
 - `aliyun`
 - `tencent`
+- `gemini`（Gemini Live API，默认 `gemini-3.5-transcribe-live`）
 
 语音功能的最低前置条件：
 
