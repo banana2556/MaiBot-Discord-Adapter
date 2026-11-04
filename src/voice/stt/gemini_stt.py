@@ -98,6 +98,7 @@ class GeminiSTTProvider(STTProvider):
         await ws.send_json({"realtimeInput": {"audioStreamEnd": True}})
 
         parts: list[str] = []
+        interim = ""
         while True:
             try:
                 message = await self._receive(ws, SETTLE_SECONDS if parts else FIRST_RESULT_SECONDS)
@@ -107,9 +108,13 @@ class GeminiSTTProvider(STTProvider):
             text = (content.get("inputTranscription") or {}).get("text")
             if text:
                 parts.append(text)
+                interim = ""
+            elif (content.get("interimInputTranscription") or {}).get("text"):
+                # Interim messages revise the same phrase; only the latest is useful.
+                interim = content["interimInputTranscription"]["text"]
             if content.get("turnComplete"):
                 break
-        return "".join(parts).strip()
+        return ("".join(parts) + interim).strip()
 
     @staticmethod
     async def _receive(ws: Any, timeout: float) -> Dict[str, Any]:

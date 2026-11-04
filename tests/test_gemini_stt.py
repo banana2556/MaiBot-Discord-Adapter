@@ -56,6 +56,16 @@ def test_live_session_sends_chunks_and_joins_final_transcripts() -> None:
     assert ws.sent[-1] == {"realtimeInput": {"audioStreamEnd": True}}
 
 
+def test_live_session_falls_back_to_interim_when_final_never_arrives() -> None:
+    _, provider = _provider(model="gemini-3.5-transcribe-live", mode="SMART")
+    ws = FakeWs([
+        {"setupComplete": {}},
+        {"serverContent": {"interimInputTranscription": {"text": "This is a"}}},
+        {"serverContent": {"interimInputTranscription": {"text": "This is a speech test"}}},
+    ])
+    assert asyncio.run(provider._transcribe(ws, b"\x00\x00" * 100)) == "This is a speech test"
+
+
 def test_live_session_ends_on_silence_without_turn_complete() -> None:
     _, provider = _provider(model="models/gemini-3.5-transcribe-live", mode="VERBATIM")
     ws = FakeWs([{"setupComplete": {}}, {"serverContent": {"inputTranscription": {"text": " hello "}}}])
