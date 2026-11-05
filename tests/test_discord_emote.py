@@ -46,6 +46,25 @@ def test_find_message_checks_group_channel_then_dm() -> None:
     asyncio.run(run())
 
 
+def test_rebinding_client_drops_channels_from_the_old_client() -> None:
+    routing_cls = _load_adapter_module("src.send_handler.thread_send_handler").ThreadRoutingManager
+    old_message, new_message = object(), object()
+
+    async def fetch_old(channel_id):
+        return _FakeChannel(channel_id, {1: old_message})
+
+    routing = routing_cls(logger=SimpleNamespace(), chat_config=SimpleNamespace())
+    routing.bind_client(SimpleNamespace(get_channel=lambda _id: None, fetch_channel=fetch_old))
+    new_client = SimpleNamespace(get_channel={10: _FakeChannel(10, {1: new_message})}.get)
+
+    async def run() -> None:
+        assert await routing.find_message("1", group_id="10") is old_message  # 旧客户端拉来的频道进了缓存
+        routing.bind_client(new_client)  # 改设定或重连后重建客户端
+        assert await routing.find_message("1", group_id="10") is new_message, "不能再用连着已关闭 session 的旧频道"
+
+    asyncio.run(run())
+
+
 def _png(color: str) -> str:
     from PIL import Image
 

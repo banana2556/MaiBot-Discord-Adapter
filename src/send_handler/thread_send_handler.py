@@ -34,7 +34,11 @@ class ThreadRoutingManager:
         Args:
             client: 已就绪的 `discord.Client`。
         """
-
+        # 改设定或断线重连都会重建客户端；旧的频道/用户对象还连着已关闭的 HTTP session，
+        # 再拿来发消息或拉被回复的消息会报 Session is closed
+        if client is not self._client:
+            self._channel_cache.clear()
+            self._user_cache.clear()
         self._client = client
 
     def update_config(self, chat_config: Any) -> None:
