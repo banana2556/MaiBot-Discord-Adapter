@@ -23,7 +23,7 @@ async def list_group_streams(ctx: Any, platform: str) -> List[Dict[str, Any]]:
 
 
 async def readable_chat(ctx: Any, stream_id: str, since: datetime, until: datetime, limit: int) -> str:
-    """把一段时间内的聊天记录转成可读文本，没有消息或读取失败时返回空字符串。"""
+    """把一段時間內的聊天紀錄轉成可讀文字，沒有訊息或讀取失敗時回傳空字串。"""
     result = await ctx.message.build_readable(
         None,
         chat_id=stream_id,
@@ -33,9 +33,13 @@ async def readable_chat(ctx: Any, stream_id: str, since: datetime, until: dateti
         timestamp_mode="normal",
         truncate=True,
     )
-    if not isinstance(result, dict) or not result.get("success"):
-        return ""
-    return str(result.get("text") or "").strip()
+    # SDK 成功時會把 {"success", "text"} 拆成純文字（maibot_sdk.context._CAPABILITY_RESULT_KEYS），
+    # 失敗或舊版才回 dict；只認 dict 的話成功時永遠拿到空字串
+    if isinstance(result, str):
+        return result.strip()
+    if isinstance(result, dict) and result.get("success"):
+        return str(result.get("text") or "").strip()
+    return ""
 
 
 async def persona_text(ctx: Any) -> str:

@@ -177,6 +177,8 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         self._awake_until: Optional[datetime] = None
         # 载入后换成存在数据目录的版本
         self._decision_stats = DecisionStats(None)
+        # 有新的 Discord 訊息、還沒問過決策模型的聊天；一輪回合裡 planner 會請求好幾次，只有收到新訊息後的第一次要問
+        self._emote_unjudged: set[str] = set()
 
     async def on_load(self) -> None:
         """插件加载时启动日常功能的后台轮询，并根据当前配置启动或保持 Discord 连接。"""
@@ -576,14 +578,24 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         return self._append_system_text(kwargs, nudge) if nudge else {"action": "continue"}
 
     async def _emote_nudge(self, session_id: str) -> str:
-        """开了决策模型就问它最新那则值不值得表态、用哪种形式；没开或请求失败时按 chat.emote_chance 随机。"""
+        """開了決策模型就問它最新那則值不值得表態、用哪種形式；沒開、沒聊天紀錄或請求失敗時照 chat.emote_chance 隨機。
+
+        決策模型只在收到新訊息後的第一次 planner 請求問一次：同一輪後面的請求最新一則多半是麥麥自己剛說的話，
+        再問會變成判斷要不要對自己按表情，統計也會重複算。
+        """
         settings = self._load_settings()
         decision = settings.decision
         if decision.enabled and decision.api_key and session_id:
+            if session_id not in self._emote_unjudged:
+                return ""
+            self._emote_unjudged.discard(session_id)
             now = datetime.now()
             state = await readable_chat(
                 self.ctx, session_id, now - timedelta(hours=EMOTE_CONTEXT_HOURS), now, EMOTE_CONTEXT_MESSAGES
             )
+            if not state:
+                # 退回隨機時一定要留紀錄，不然決策模型從沒被呼叫也看不出來
+                self.ctx.logger.info(f"表情決策 [{session_id}]：最近一小時讀不到聊天紀錄，這輪改用隨機")
             if state:
                 latest = state.splitlines()[-1][:200]
                 started = time.monotonic()
@@ -1310,6 +1322,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         if session_id and isinstance(channel_id, int):
             self._client_manager.remember_typing_target(session_id, channel_id)
             self._discord_session_channels[session_id] = channel_id
+            self._emote_unjudged.add(session_id)
         return {"action": "continue"}
 
     _REPLYER_EMOJI_HINT: ClassVar[str] = (

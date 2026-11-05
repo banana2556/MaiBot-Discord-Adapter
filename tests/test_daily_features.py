@@ -64,7 +64,8 @@ class FakeCtx:
         return self.messages.get(message_id)
 
     async def _build_readable(self, messages, **kwargs):
-        return {"success": True, "text": "小明：晚上九點一起打遊戲？\n麥麥：好啊"}
+        # 照真的 SDK：成功時 {"success", "text"} 會被拆成純文字
+        return "小明：晚上九點一起打遊戲？\n麥麥：好啊"
 
     async def _generate(self, prompt, task_name=None):
         self.prompts.append(prompt)
@@ -614,3 +615,21 @@ def test_state_save_retries_when_windows_briefly_locks_the_file(tmp_path, monkey
     monkeypatch.setattr(common.time, "sleep", lambda _seconds: None)
     common.save_state(tmp_path / "state.json", {"ok": True})
     assert len(attempts) == 3 and common.load_state(tmp_path / "state.json") == {"ok": True}
+
+
+def test_readable_chat_accepts_what_the_sdk_actually_returns() -> None:
+    common = _load_adapter_module("src.life.common")
+
+    def ctx_returning(value):
+        async def build_readable(messages, **kwargs):
+            assert messages is None and kwargs["chat_id"] == "s1"
+            return value
+
+        return SimpleNamespace(message=SimpleNamespace(build_readable=build_readable))
+
+    async def read(value):
+        return await common.readable_chat(ctx_returning(value), "s1", NOW - timedelta(hours=1), NOW, 8)
+
+    assert _run(read(" 小明：早 \n")) == "小明：早", "新版 SDK 成功時直接回文字"
+    assert _run(read({"success": True, "text": "小明：早"})) == "小明：早", "舊版回 dict"
+    assert _run(read({"success": False, "error": "x"})) == ""

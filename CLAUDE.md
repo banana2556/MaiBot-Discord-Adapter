@@ -29,6 +29,7 @@ python -m venv .venv
 
 - 語言：一律用繁體中文，包括程式碼註解、docstring、日誌、設定頁說明、給模型看的提示詞、「DC生活」頁面和 commit 訊息。現有的簡體是舊的，改到哪段就順手換成繁體，不用專門整批轉。用 OpenCC 轉時檢查用語：MaiBot 說「插件」不是「外掛」，「语音频道」別被轉成「語音訊道」。
 - 新呼叫 Host 能力（`ctx.xxx`、`call_capability`）要加進 `_manifest.json` 的 `capabilities`，有測試檢查。新 Python 依賴同時加進 `requirements.txt`、`pyproject.toml`、`_manifest.json`。
+- SDK 會把部分 capability 的成功結果拆開（`maibot_sdk.context._CAPABILITY_RESULT_KEYS`）：例如 `message.build_readable` 直接回文字、`chat.get_all_streams` 直接回清單，失敗或舊版 SDK 才回 `{"success": ..., ...}`。處理結果要兩種都接受，測試的假物件也要照拆開後的樣子回傳，不然測試會蓋掉真正的錯。
 - 讀設定一律用 `self._load_settings()`，它會套上頁面設定（插件資料目錄的 `daily_settings.json`）。
 - 狀態檔案放 `ctx.paths.data_dir`，讀寫用 `src/life/common.py` 的 `load_state` / `save_state`。
 - 存任何插件設定都會觸發 `on_config_update`，整個 Discord 客戶端重建；長期存在的物件只存 ID，不要存 discord.py 的頻道、使用者、訊息物件。

@@ -74,7 +74,7 @@ def _decision_plugin(monkeypatch, answers, **decision):
     )
 
     async def build_readable(messages, **kwargs):
-        return {"success": True, "text": "小明：我抽到限定了！！"}
+        return "小明：我抽到限定了！！"  # 真的 SDK 成功時回純文字
 
     plugin._ctx = SimpleNamespace(
         message=SimpleNamespace(build_readable=build_readable),
@@ -95,6 +95,7 @@ def test_decision_model_picks_whether_and_how_to_emote(monkeypatch) -> None:
         plugin, module, asked = _decision_plugin(
             monkeypatch, {"emote": {"type": "choice", "probabilities": probabilities}} if probabilities else None, **decision
         )
+        plugin._emote_unjudged.add("s1")  # 收到新訊息
         result = asyncio.run(plugin._emote_nudge("s1"))
         return result, module, asked
 
@@ -169,6 +170,7 @@ def test_decision_page_counts_nudges_adoptions_and_failures(monkeypatch) -> None
     plugin._ctx.chat = SimpleNamespace(get_all_streams=all_streams)
 
     async def scenario():
+        plugin._emote_unjudged.add("s1")  # 收到新訊息
         assert await plugin._emote_nudge("s1") == module.STICKER_NUDGE
         # MaiBot 自己用 send_emoji 发了表情包，discord_emote 看不到，靠 after_send 记采纳
         await plugin.stop_discord_typing_after_send(
@@ -180,6 +182,7 @@ def test_decision_page_counts_nudges_adoptions_and_failures(monkeypatch) -> None
             return None
 
         monkeypatch.setattr(module, "ask_decision", broken)
+        plugin._emote_unjudged.add("s1")  # 收到新訊息
         await plugin._emote_nudge("s1")
         return first, await plugin.webui_decision()
 
@@ -231,3 +234,28 @@ def test_decision_test_button_reports_the_failure_reason(monkeypatch) -> None:
     else:
         raise AssertionError("测试失败要让页面显示错误")
     assert plugin._decision_stats.state["last_test"]["ok"] is False
+
+
+def test_decision_is_asked_once_per_new_message_not_every_planner_request(monkeypatch) -> None:
+    plugin, module, asked = _decision_plugin(
+        monkeypatch, {"emote": {"type": "choice", "probabilities": {"none": 0.1, "reaction": 0.8, "sticker": 0.1}}}
+    )
+    plugin._client_manager = SimpleNamespace(remember_typing_target=lambda session_id, channel_id: None)
+    inbound = {
+        "platform": "discord",
+        "session_id": "s1",
+        "message_info": {"additional_config": {"platform_io_target_channel_id": "123"}},
+    }
+
+    async def scenario():
+        await plugin.remember_discord_typing_target(message=inbound)  # 有人說話
+        first = await plugin._emote_nudge("s1")
+        # 同一輪麥麥回完話，planner 又請求一次：最新一則是她自己說的，不該再問
+        second = await plugin._emote_nudge("s1")
+        await plugin.remember_discord_typing_target(message=inbound)
+        third = await plugin._emote_nudge("s1")
+        return first, second, third
+
+    first, second, third = asyncio.run(scenario())
+    assert (first, second, third) == (module.EMOTE_NUDGE, "", module.EMOTE_NUDGE)
+    assert len(asked) == 2 and plugin._decision_stats.state["days"][next(iter(plugin._decision_stats.state["days"]))]["calls"] == 2
