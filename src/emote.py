@@ -171,7 +171,7 @@ class EmoteMixin:
     def _init_emote_state(self) -> None:
         # 有新的 Discord 訊息、還沒問過決策模型的聊天；一回合 planner 會請求好幾次，只有第一次問
         self._emote_unjudged: set[str] = set()
-        # 每個聊天最近收到的訊息：msg_id（別名與原始 ID 都記）-> 原始 ID、有沒有在跟她說話、是不是語音轉文字
+        # 每個聊天最近收到的訊息：msg_id（別名與原始 ID 都記）-> 原始 ID、有沒有在跟她說話、能不能按表情
         self._inbound: Dict[str, "OrderedDict[str, Dict[str, Any]]"] = {}
         # 每個聊天最新一則的頻道與發話人，送出時找頻道和訊息用
         self._latest_inbound: Dict[str, Dict[str, Any]] = {}
@@ -204,7 +204,6 @@ class EmoteMixin:
     def _remember_inbound(self, session_id: str, message: Mapping[str, Any]) -> None:
         """chat.receive 時記下這則：之後在 planner 上下文裡看到它的 msg_id，才換得回 Discord 訊息。"""
         info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
-        extra = info.get("additional_config") if isinstance(info.get("additional_config"), Mapping) else {}
         group = info.get("group_info") if isinstance(info.get("group_info"), Mapping) else {}
         user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
         message_id = str(message.get("message_id") or "")
@@ -218,7 +217,9 @@ class EmoteMixin:
         entry = {
             "id": message_id,
             "addressed": self._is_calling_her(message),
-            "voice": bool(extra.get("discord_voice_output")),
+            # 只有真的 Discord 訊息（數字 ID）按得了表情；別人的 reaction 事件（reaction_…）、
+            # 語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
+            "targetable": message_id.isdigit(),
             "at": time.monotonic(),
         }
         remembered = self._inbound.setdefault(session_id, OrderedDict())
@@ -237,29 +238,37 @@ class EmoteMixin:
         timeout_ms=5000,
     )
     async def decide_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """新訊息後第一次進 planner 時問決策模型；結果用系統提示告訴 planner，不動它的工具。"""
+        """Discord 聊天裡拿掉 MaiBot 原生的 send_emoji；新訊息後第一次進 planner 時問決策模型，結果用系統提示告訴 planner。"""
         # 沒有這個工具：不是 Discord 聊天，或睡覺時段只剩 stop
         if "discord_emote" not in tool_names(kwargs):
             return {"action": "continue"}
+        # discord_emote 的貼圖也從 MaiBot 表情庫挑，兩個都留就是兩套「要不要發表情包」的決定；
+        # 只拿掉 send_emoji，planner 手上還有 discord_emote，不會因為沒工具而把表情寫進正文
+        kwargs["tool_definitions"] = [
+            tool for tool in kwargs["tool_definitions"] if tool_names({"tool_definitions": [tool]}) != {"send_emoji"}
+        ]
+        result = {"action": "continue", "modified_kwargs": kwargs}
         settings = self._load_settings()
         decision = settings.decision
         session_id = str(kwargs.get("session_id") or "")
         if not (decision.enabled and decision.api_key.strip() and session_id):
             if random.random() < settings.chat.emote_chance:
-                return self._append_system_text(kwargs, EMOTE_NUDGE)
-            return {"action": "continue"}
+                self._append_system_text(kwargs, EMOTE_NUDGE)
+            return result
         # 同一回合後面的請求、沒有新訊息的回合（主動話題、提醒、逾時）不問
         if session_id not in self._emote_unjudged:
-            return {"action": "continue"}
+            return result
         self._emote_unjudged.discard(session_id)
         outcome = await self._decide_scene(decision, session_id, planner_messages(kwargs.get("items")))
         if outcome is None or outcome["scene"] == "text":
-            return {"action": "continue"}
+            return result
         if outcome["scene"] == "text_emote":
-            return self._append_system_text(kwargs, APPEND_NOTE)
+            self._append_system_text(kwargs, APPEND_NOTE)
+            return result
         what = "表情" if outcome["scene"] == "quick_reaction" else "一張圖"
         note = QUICK_ADDRESSED_NOTE if outcome["addressed"] else QUICK_NOTE
-        return self._append_system_text(kwargs, note.format(what=what, user=outcome["target"]["user"]))
+        self._append_system_text(kwargs, note.format(what=what, user=outcome["target"]["user"]))
+        return result
 
     async def _decide_scene(
         self, decision: Any, session_id: str, messages: Sequence[Mapping[str, Any]]
@@ -272,11 +281,11 @@ class EmoteMixin:
         now = datetime.now()
         remembered = self._inbound.get(session_id, {})
         window = list(messages)[-CONTEXT_MESSAGES:]
-        # 能表態的：別人說的、換得回 Discord 訊息、不是語音轉文字；取最後幾則
+        # 能表態的：別人說的、換得回真的 Discord 訊息；取最後幾則
         targets = [
             message
             for message in window
-            if not message["self"] and message["msg_id"] in remembered and not remembered[message["msg_id"]]["voice"]
+            if not message["self"] and message["msg_id"] in remembered and remembered[message["msg_id"]]["targetable"]
         ][-TARGET_CANDIDATES:]
         if not targets:
             self.ctx.logger.info(f"表情決策 [{session_id}]：planner 上下文裡沒有可以表態的訊息，這輪 planner 自己決定")
@@ -604,7 +613,8 @@ class EmoteMixin:
     @Tool(
         "discord_emote",
         description=(
-            "用 Discord 伺服器的原生表情回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張伺服器貼圖（sticker）。"
+            "用表情回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張貼圖或表情包（sticker，"
+            "從伺服器貼圖和 MaiBot 表情庫挑；要發表情包也用這個）。"
             "可以和 reply 在同一輪一起呼叫（邊回話邊按表情），也可以只按表情不說話。"
             "適合好笑、好消息、附和、按讚、表示收到、驚訝、無語、心疼的時候，像真人聊天一樣偶爾用。"
             "只傳目標訊息、想表達的情緒與形式，工具會照情緒從表情庫挑，不使用普通 Unicode emoji。"
@@ -622,7 +632,7 @@ class EmoteMixin:
             ToolParameterInfo(
                 name="form",
                 param_type=ToolParamType.STRING,
-                description="送出形式：reaction 按在該訊息上（最輕），emoji 單獨發一個表情，sticker 發一張貼圖。預設 reaction。",
+                description="送出形式：reaction 按在該訊息上（最輕），emoji 單獨發一個表情，sticker 發一張貼圖或表情包。預設 reaction。",
                 required=False,
                 enum_values=list(_EMOTE_FORMS),
             ),
