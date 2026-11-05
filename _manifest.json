@@ -37,6 +37,11 @@
       "type": "python_package",
       "name": "PyNaCl",
       "version_spec": ">=1.5.0"
+    },
+    {
+      "type": "python_package",
+      "name": "opencc",
+      "version_spec": ">=1.1.0"
     }
   ],
   "capabilities": [

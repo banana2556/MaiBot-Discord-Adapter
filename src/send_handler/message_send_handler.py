@@ -2,12 +2,13 @@
 
 import base64
 import binascii
+import functools
 import io
 import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import discord
 from maim_message import Seg
@@ -17,6 +18,32 @@ from ..native_emoji import NativeEmojiRegistry
 _logger = logging.getLogger("discord_adapter.content_builder")
 
 SegmentDict = Dict[str, Any]
+
+# split 用的分组：奇数位是网址，原样保留，免得中文路径被转坏
+_URL_PATTERN = re.compile(r"(https?://\S+)")
+
+
+@functools.lru_cache(maxsize=None)
+def script_converter(mode: str) -> Optional[Callable[[str], str]]:
+    """OpenCC 简转繁的转换函数。
+
+    Args:
+        mode: OpenCC 配置名（s2twp / s2t / s2hk），``off`` 表示不转。
+
+    Returns:
+        转换函数；不转或没安装 opencc 时返回 None（缺套件只警告一次）。
+    """
+    if mode == "off":
+        return None
+    try:
+        import opencc
+    except ImportError:
+        _logger.warning("没有安装 opencc，发出的文字不会转繁体；请执行 pip install opencc")
+        return None
+    convert = opencc.OpenCC(mode).convert
+    return lambda text: "".join(
+        part if index % 2 else convert(part) for index, part in enumerate(_URL_PATTERN.split(text))
+    )
 
 
 class DiscordContentBuilder:
@@ -37,6 +64,13 @@ class DiscordContentBuilder:
 
         self._logger = logger or _logger
         self._native_emoji = native_emoji
+        # chat.output_script，插件每次套用配置时更新
+        self.output_script = "off"
+
+    def to_output_script(self, text: str) -> str:
+        """按 output_script 把要发出去的文字转成繁体；不转时原样返回。"""
+        convert = script_converter(self.output_script)
+        return convert(text) if convert else text
 
     def build(
         self,
@@ -73,7 +107,8 @@ class DiscordContentBuilder:
 
             if seg.type == "text":
                 if seg.data is not None:
-                    content_parts.append(self._render_emoji_names(str(seg.data), channel))
+                    # 先转繁体再换 :名称:，换上去的 <:名称:id> 不会被动到
+                    content_parts.append(self._render_emoji_names(self.to_output_script(str(seg.data)), channel))
                 return
 
             if seg.type == "mention":

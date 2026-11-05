@@ -497,6 +497,9 @@ class DiscordMessageHandler:
         try:
             user_info = self._build_user_info(message.author)
             group_info, additional_config, thread_context = self._build_chat_context(message)
+            # 只有 @ 到 bot 自己才算（回复她的消息且开着提醒也算）；is_at 是有 @ 任何人都会标
+            if any(str(user.id) == self._account_id for user in message.mentions):
+                additional_config["discord_mentions_bot"] = True
 
             message_segments: List[Seg] = []
             mentions_info = self._process_mentions(message)

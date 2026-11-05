@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import asyncio
 import json
 import logging
+import random
 
 import pytest
 
@@ -244,6 +245,23 @@ def test_life_adjusts_only_future_hours(tmp_path) -> None:
     assert life.state["note"] == "答應晚上九點一起打遊戲"
 
 
+def test_life_adjust_can_be_switched_off(tmp_path) -> None:
+    life, ctx = _life(tmp_path, [_hours("原本")], [])
+    config = _life_config(adjust_enabled=False)
+    _run(life.tick(NOW, config))
+    _run(life.tick(NOW + timedelta(hours=6), config))
+    assert len(ctx.prompts) == 1, "只有早上生成那一次，不再问 LLM 要不要改"
+
+
+def test_regenerating_in_the_same_hour_pushes_the_new_presence(tmp_path) -> None:
+    presence: list = []
+    life, _ = _life(tmp_path, [_hours("睡覺"), _hours("醒著")], presence)
+    _run(life.tick(NOW, _life_config()))
+    _run(life.generate(NOW, _life_config()))  # 页面上的「重新生成」
+    _run(life.tick(NOW + timedelta(minutes=1), _life_config()))
+    assert presence == [("✨ 睡覺12", "online"), ("✨ 醒著12", "online")]
+
+
 def test_life_generation_failure_backs_off(tmp_path) -> None:
     life, ctx = _life(tmp_path, ["不是 JSON"], [])
     _run(life.tick(NOW, _life_config()))
@@ -438,6 +456,66 @@ def test_sleep_silences_discord_planner_until_woken(tmp_path) -> None:
     assert _run(plugin.silence_planner_while_asleep(**_planner_kwargs("reply", "discord_emote"))) == {
         "action": "continue"
     }, "叫醒后照常回复"
+
+
+def test_daily_loop_survives_a_failed_call_and_restores_after_regenerate(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(_load_adapter_module("plugin"), "DAILY_POLL_SECONDS", 0)
+    # 睡觉时静默了 s1，之后重新生成，现在这个小时醒着
+    plugin, ctx = _sleeping_plugin(tmp_path, asleep=False)
+    plugin.set_plugin_config(_cfg({"life": {"enabled": True, "adjust_interval_hours": 0, "sync_presence": False}}))
+    plugin._silenced_sessions.add("s1")
+    real_call, calls = ctx.call_capability, []
+
+    async def flaky(capability, **kwargs):
+        calls.append(capability)
+        if len(calls) == 1:
+            raise TimeoutError("RPC 超时")
+        return await real_call(capability, **kwargs)
+
+    ctx.call_capability = flaky
+
+    async def scenario():
+        plugin._daily_task = asyncio.create_task(plugin._run_daily_loop())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if not plugin._silenced_sessions:
+                break
+        plugin._daily_task.cancel()
+
+    _run(scenario())
+    assert len(calls) == 2 and ctx.adjusts == [("s1", 1.0)] and not plugin._silenced_sessions
+
+
+def test_mention_or_dm_while_asleep_may_wake_her(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(random, "random", lambda: 0.5)
+    plugin, ctx = _sleeping_plugin(tmp_path)
+    plugin.set_plugin_config(_cfg({"life": {"enabled": True, "wake_on_mention_chance": 0.6}}))
+    plugin._silenced_sessions.add("s1")
+
+    def incoming(group=True, mention=False, platform="discord"):
+        info = {"additional_config": {"discord_mentions_bot": True} if mention else {}}
+        if group:
+            info["group_info"] = {"group_id": "111"}
+        return {"platform": platform, "message_info": info}
+
+    for message in (incoming(), incoming(group=False, platform="qq")):
+        _run(plugin.wake_when_called(message=message))
+    assert plugin._sleeping(datetime.now()), "群里没 @ 她、别的平台的私讯都不算"
+
+    _run(plugin.wake_when_called(message=incoming(mention=True)))
+    assert not plugin._sleeping(datetime.now()) and ctx.adjusts == [("s1", 1.0)], "先还原频率，这则 @ 进去才会触发回复"
+    kwargs = _planner_kwargs()
+    _run(plugin.inject_life_state_into_planner(**kwargs))
+    assert "剛被吵醒" in kwargs["items"][0]["parts"][-1]["text"]
+
+    plugin._awake_until = None
+    _run(plugin.wake_when_called(message=incoming(group=False)))
+    assert not plugin._sleeping(datetime.now()), "私讯也算在叫她"
+
+    plugin._awake_until = None
+    plugin.set_plugin_config(_cfg({"life": {"enabled": True, "wake_on_mention_chance": 0.3}}))
+    _run(plugin.wake_when_called(message=incoming(mention=True)))
+    assert plugin._sleeping(datetime.now()), "没骰中就继续睡"
 
 
 def test_sleep_silence_respects_setting_and_awake_hours(tmp_path) -> None:

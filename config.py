@@ -293,7 +293,7 @@ class DiscordChatConfig(PluginConfigBase):
         le=1,
         description="每次思考时，有这个机率提醒麦麦可以顺手用服务器表情按 reaction 或发表情；0 表示不提醒。",
         json_schema_extra={
-            "hint": "只是提醒，最后发不发仍由麦麦判断。不提醒时她几乎只会在被要求时才用表情。",
+            "hint": "只是提醒，最后发不发仍由麦麦判断。不提醒时她几乎只会在被要求时才用表情。启用「决策模型」后改由它判断，这里只在它连不上时备用。",
             "label": "主动表情机率",
             "order": 14,
             "step": 0.05,
@@ -309,6 +309,18 @@ class DiscordChatConfig(PluginConfigBase):
             "label": "影片截图间隔(秒)",
             "order": 15,
             "step": 0.5,
+        },
+    )
+    output_script: Literal["off", "s2twp", "s2t", "s2hk"] = Field(
+        default="off",
+        description=(
+            "把麦麦发到 Discord 的简体字用 OpenCC 转成繁体，语音播报也一样。"
+            "s2twp：台湾正体并换成台湾用语（软件→軟體、视频→影片）；s2t：只换字；s2hk：香港繁体；off：不转。"
+        ),
+        json_schema_extra={
+            "hint": "只改发出去的文字，MaiBot 自己的聊天记录不变；网址不会被转。需要安装 opencc。",
+            "label": "输出转繁体",
+            "order": 16,
         },
     )
 
@@ -943,37 +955,88 @@ class LifeConfig(PluginConfigBase):
         description="每天生成当天时程的时间（HH:MM）；生成前沿用前一天同一时段。",
         json_schema_extra={"label": "每日生成时间", "order": 2, "placeholder": "00:00"},
     )
+    adjust_enabled: bool = Field(
+        default=True,
+        description="每隔一段时间把最近的聊天交给 LLM，看有没有答应别人、约好的事要改之后的行程；关掉就整天照早上生成的时程走。",
+        json_schema_extra={"label": "按聊天调整时程", "order": 3, "hint": "每次调整会用一次 LLM。"},
+    )
     adjust_interval_hours: int = Field(
         default=3,
         ge=0,
-        description="每隔几小时根据最近的聊天调整之后的时段，0 表示不调整。",
-        json_schema_extra={"label": "调整间隔（小时）", "order": 3, "step": 1},
+        description="开启「按聊天调整时程」时，每隔几小时调整一次；0 也等于不调整。",
+        json_schema_extra={"label": "调整间隔（小时）", "order": 4, "step": 1},
     )
     sync_presence: bool = Field(
         default=True,
         description="换时段时把当前活动同步成 Discord 状态文字与在线状态。",
-        json_schema_extra={"label": "同步 Discord 状态", "order": 4},
+        json_schema_extra={"label": "同步 Discord 状态", "order": 5},
     )
     inject_prompt: bool = Field(
         default=True,
         description="把当前生活状态加进麦麦的对话上下文，让她聊天时知道自己正在做什么。",
-        json_schema_extra={"label": "注入对话上下文", "order": 5},
+        json_schema_extra={"label": "注入对话上下文", "order": 6},
     )
     sleep_silence: bool = Field(
         default=True,
         description="时程上在睡觉的时段，Discord 群聊与私聊只静默接收消息、不回复，也不主动开话题；有提醒到点会叫醒她 30 分钟。",
-        json_schema_extra={"label": "睡觉时不回复", "order": 6},
+        json_schema_extra={"label": "睡觉时不回复", "order": 7},
+    )
+    wake_on_mention_chance: float = Field(
+        default=0.3,
+        ge=0,
+        le=1,
+        description="睡觉时被 @ 或收到私讯，每次有这个机率被吵醒，醒着 30 分钟；0 表示怎么叫都不醒。",
+        json_schema_extra={"label": "被 @ 吵醒的机率", "order": 8, "step": 0.05},
     )
     model_task: Literal["replyer", "planner"] = Field(
         default="replyer",
         description="生成与调整时程沿用 MaiBot 哪个模型任务：replyer=回复模型, planner=规划模型。",
-        json_schema_extra={"label": "使用模型", "order": 7},
+        json_schema_extra={"label": "使用模型", "order": 9},
     )
 
     @field_validator("generate_time", mode="before")
     @classmethod
     def _normalize_generate_time(cls, value: Any) -> str:
         return _normalize_string(value) or "00:00"
+
+
+class DecisionConfig(PluginConfigBase):
+    """决策模型：Jev、vLLM-SR Decision 这类只回概率、不写文字的模型，用来做快速判断；目前用来决定要不要提醒麦麦按表情或发贴图。"""
+
+    __ui_label__: ClassVar[str] = "决策模型"
+    __ui_order__: ClassVar[int] = 5
+
+    enabled: bool = Field(
+        default=False,
+        description="开启后每次思考先问决策模型这轮值不值得用表情表态，取代「主动表情机率」的随机提醒；请求失败时自动退回随机。",
+        json_schema_extra={"label": "启用决策模型", "order": 0, "hint": "每轮多约 0.2～1 秒；聊天内容会送到决策模型的服务商。"},
+    )
+    base_url: str = Field(
+        default="https://app.vllm-sr.ai",
+        description="System One 接口的网址，不含 /v1/systemone。",
+        json_schema_extra={
+            "label": "API 地址",
+            "order": 1,
+            "hint": "vLLM-SR Decision（有免费额度）：https://app.vllm-sr.ai；Jev：https://api.typesafe.ai",
+        },
+    )
+    api_key: str = Field(
+        default="",
+        description="决策模型服务商的 API Key。",
+        json_schema_extra={"label": "API Key", "input_type": "password", "order": 2},
+    )
+    model: str = Field(
+        default="vllm-sr/d3-flash",
+        description="模型名称。",
+        json_schema_extra={"label": "模型", "order": 3, "hint": "vLLM-SR：vllm-sr/d3-flash；Jev：jev-latest"},
+    )
+    emote_threshold: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="决策模型认为值得表态的机率高过这个值才提醒麦麦；越高越少按。",
+        json_schema_extra={"label": "表情门槛", "order": 4, "step": 0.05},
+    )
 
 
 class TopicConfig(PluginConfigBase):
@@ -1058,7 +1121,7 @@ PAGE_MANAGED_FIELDS: tuple[tuple[str, str], ...] = (
 # WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。
 WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("basic", "基础设置", ("plugin", "connection", "platform")),
-    ("chat", "聊天与过滤", ("chat", "filters")),
+    ("chat", "聊天与过滤", ("chat", "filters", "decision")),
     ("daily", "日常", ("reminder", "life", "topics")),
     (
         "voice",
@@ -1086,6 +1149,7 @@ class DiscordPluginSettings(PluginConfigBase):
     chat: DiscordChatConfig = Field(default_factory=DiscordChatConfig)
     platform: DiscordPlatformConfig = Field(default_factory=DiscordPlatformConfig)
     filters: DiscordFilterConfig = Field(default_factory=DiscordFilterConfig)
+    decision: DecisionConfig = Field(default_factory=DecisionConfig)
     voice: DiscordVoiceConfig = Field(default_factory=DiscordVoiceConfig)
     siliconflow_tts: SiliconFlowTTSConfig = Field(default_factory=SiliconFlowTTSConfig)
     gptsovits_tts: GPTSoVITSConfig = Field(default_factory=GPTSoVITSConfig)

@@ -310,6 +310,8 @@ def _tool_plugin(target: object):
 
     plugin._thread_routing = SimpleNamespace(find_message=find_message)
     plugin._client_manager = SimpleNamespace(client=SimpleNamespace(user=SimpleNamespace(id=1)))
+    plugin._content_builder = _load_adapter_module("src.send_handler.message_send_handler").DiscordContentBuilder()
+    plugin._content_builder.output_script = "s2twp"
     return plugin
 
 
@@ -335,7 +337,7 @@ def test_edit_and_delete_tools_only_touch_own_messages() -> None:
         assert "不是自己发的" in (await plugin.handle_discord_message_edit(msg_id="555", content="x"))["error"]
 
     asyncio.run(run())
-    assert calls == [("edit", "打错字"), "delete"]
+    assert calls == [("edit", "打錯字"), "delete"], "改消息也照「输出转繁体」转"
 
 
 
@@ -348,3 +350,13 @@ def test_names_are_quoted_so_model_can_tell_them_from_content() -> None:
     assert result["message_info"]["user_info"]["user_cardname"] == "「［GM］ 小 明」"
     assert result["processed_plain_text"] == "@「［GM］ 小 明」 早"
     assert _convert(handler, _message(content="hi"))["message_info"]["user_info"]["user_cardname"] is None
+
+
+def test_only_mentions_of_the_bot_itself_are_flagged() -> None:
+    handler = _handler()
+    handler.set_account_id("42")
+    bot = SimpleNamespace(id=42, name="mai", display_name="麥麥", nick=None, global_name=None, bot=True, discriminator="0")
+    friend = SimpleNamespace(id=8, name="x", display_name="小明", nick=None, global_name=None, bot=False, discriminator="0")
+    flagged = _convert(handler, _message(content="<@42> 起床", mentions=[bot]))["message_info"]["additional_config"]
+    other = _convert(handler, _message(content="<@8> 早", mentions=[friend]))["message_info"]["additional_config"]
+    assert flagged["discord_mentions_bot"] is True and "discord_mentions_bot" not in other

@@ -6,3 +6,4 @@ tomlkit
 aiofiles
 aiohttp>=3.9.0
 pillow
+opencc>=1.1.0

@@ -142,7 +142,7 @@ class DailyLife:
             await self._push_presence(now)
 
     def _adjust_due(self, now: datetime, config: Any) -> bool:
-        if config.adjust_interval_hours <= 0:
+        if not config.adjust_enabled or config.adjust_interval_hours <= 0:
             return False
         last = self._state.get("adjusted_at") or self._state.get("generated_at")
         return not last or now - datetime.fromisoformat(last) >= timedelta(hours=config.adjust_interval_hours)
@@ -163,6 +163,8 @@ class DailyLife:
             return False
         stamp = now.isoformat(timespec="seconds")
         self._state = {"date": now.date().isoformat(), "generated_at": stamp, "adjusted_at": stamp, "hours": hours, "note": "今日初始安排"}
+        # 页面上重新生成时还是同一个「日期 小时」，不清掉的话 Discord 状态要等到下个时段才换
+        self.invalidate_presence()
         self._save()
         self._ctx.logger.info(f"已生成今天的日常生活时程，现在：{hours[now.hour]['activity']}")
         return True

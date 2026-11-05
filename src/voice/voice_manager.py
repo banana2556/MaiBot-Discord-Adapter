@@ -61,6 +61,8 @@ class VoiceDataSink(voice_recv.AudioSink):  # type: ignore
         user_id = user.id if hasattr(user, "id") else user
         if user_id not in self.user_audio_buffers:
             self.user_audio_buffers[user_id] = io.BytesIO()
+            # 每人每次连线只打一次：日志里没有这行就是 Discord 的声音根本没进来，不是 STT 的问题
+            self.voice_manager._logger.info(f"收到用户 {user_id} 的第一个语音封包")
         pcm_bytes: bytes = b""
         if hasattr(data, "pcm"):
             pcm_bytes = data.pcm
@@ -838,8 +840,11 @@ class VoiceManager:
             if not audio_data:
                 return
 
+            # 48kHz 立体声 s16le：每秒 192000 字节
+            self._logger.info(f"{member.display_name} 说完一段，{len(audio_data) / 192000:.1f} 秒，送去识别")
             pcm_data = convert_audio_to_pcm(audio_data, self._logger)
             text = await self.stt_provider.recognize(pcm_data)
+            self._logger.info(f"语音识别结果：{text}" if text else "语音识别没有结果")
 
             if text and self._stt_callback:
                 await self._stt_callback(member, text)

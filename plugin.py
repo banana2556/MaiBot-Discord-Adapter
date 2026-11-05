@@ -25,6 +25,7 @@ from .config import PAGE_MANAGED_FIELDS, WEBUI_CONFIG_TABS, DiscordPluginSetting
 from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
+from .src.decision import ask as ask_decision
 from .src.emoji_grid import build_numbered_grid, grid_shape
 from .src.life.common import list_group_streams, load_state, readable_chat, save_state
 from .src.life.cron import describe, parse_cron
@@ -47,11 +48,30 @@ EMOTE_NUDGE = (
     "【表情】這一輪如果有值得表態的訊息（好笑、好消息、附和、驚訝、無語），"
     "可以用 discord_emote 在那則訊息按個 reaction；可以和 reply 同一輪一起呼叫，也可以只按表情不說話。沒有合適的就略過。"
 )
+# 决策模型觉得发图比按 reaction 更合适时换这段
+STICKER_NUDGE = (
+    "【表情】最新那則很適合用圖表態，可以用 discord_emote（form=sticker）發一張伺服器貼圖，或用 send_emoji 發表情包；"
+    "可以和 reply 同一輪一起，也可以不說話只發圖。真的不合適就略過。"
+)
+# 问决策模型时带最近多久、最多几则聊天
+EMOTE_CONTEXT_HOURS = 1
+EMOTE_CONTEXT_MESSAGES = 8
+EMOTE_QUESTION = {
+    "type": "choice",
+    "instructions": "看聊天記錄的最後一則訊息：像真人一樣用表情回應它合適嗎？用哪種方式？",
+    "criteria": {
+        "none": "不用表情：一般資訊、提問、需要認真回答，或沒什麼情緒",
+        "reaction": "在訊息上按個表情就好：附和、按讚、收到、小小的好笑或驚訝",
+        "sticker": "值得發一張貼圖或表情包：很好笑、情緒很強烈、用圖比用字更到位",
+    },
+}
 # 睡觉时段这一轮规划只留这些工具，并接上这段提醒
 SLEEP_ALLOWED_TOOLS = {"stop"}
 SLEEP_NOTE = "【睡眠中】你現在正在睡覺，看不到也不會回這些訊息。這一輪不要回覆、不要發任何東西，直接呼叫 stop()。"
-# 提醒到点或从页面叫醒后，这么多分钟内当作醒着
+# 提醒到点、被 @ 吵醒或从页面叫醒后，这么多分钟内当作醒着
 WAKE_MINUTES = 30
+# 时程上在睡觉、但被叫醒了，接在生活状态后面
+WOKEN_NOTE = "不過你本來在睡覺，剛被吵醒（{until} 前醒著），回話可以帶點剛睡醒的感覺。"
 ONLINE_STATUS_LABELS = {"online": "🟢 在線", "idle": "🌙 閒置", "dnd": "⛔ 請勿打擾"}
 TOPIC_SOURCE_LABELS = {"news": "新聞", "video": "影片", "mixed": "新聞或影片"}
 VOICE_MODE_LABELS = {"fixed": "固定頻道常駐", "auto": "有人進來才加入"}
@@ -164,18 +184,23 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         # 要调 LLM 的生活时程和主动话题放到独立任务，慢的时候也不会拖住提醒
         while True:
             await asyncio.sleep(DAILY_POLL_SECONDS)
-            settings = self._load_settings()
-            now = datetime.now()
-            if settings.reminder.enabled:
-                await self.fire_due_reminders(now)
-            if settings.life.enabled and self._daily_life is not None:
-                self._spawn_daily_job("life", partial(self._daily_life.tick, now, settings.life))
-            sleeping = self._sleeping(now)
-            if not sleeping and self._silenced_sessions:
-                await self._restore_silenced()
-            # ponytail: 睡觉时跳过整轮，错过的话题醒来后马上补发；要严格按时就改成睡觉时只推进 next_due
-            if settings.topics.enabled and self._topic_scout is not None and not sleeping:
-                self._spawn_daily_job("topics", partial(self._topic_scout.tick, now, settings.topics))
+            # 任何一步丢异常（例如还原回复频率时 RPC 超时）都只跳过这一轮；
+            # 不接住的话整个轮询就停了，之后醒来不还原频率、Discord 状态也不再更新
+            try:
+                settings = self._load_settings()
+                now = datetime.now()
+                if settings.reminder.enabled:
+                    await self.fire_due_reminders(now)
+                if settings.life.enabled and self._daily_life is not None:
+                    self._spawn_daily_job("life", partial(self._daily_life.tick, now, settings.life))
+                sleeping = self._sleeping(now)
+                if not sleeping and self._silenced_sessions:
+                    await self._restore_silenced()
+                # ponytail: 睡觉时跳过整轮，错过的话题醒来后马上补发；要严格按时就改成睡觉时只推进 next_due
+                if settings.topics.enabled and self._topic_scout is not None and not sleeping:
+                    self._spawn_daily_job("topics", partial(self._topic_scout.tick, now, settings.topics))
+            except Exception:
+                self.ctx.logger.exception("日常轮询这一轮失败，下一轮再试")
 
     def _spawn_daily_job(self, name: str, factory: Callable[[], Awaitable[None]]) -> None:
         """上一次同名任务还没跑完时跳过这一轮。"""
@@ -499,7 +524,10 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         life_config = self._load_settings().life
         if not (life_config.enabled and life_config.inject_prompt) or self._daily_life is None:
             return {"action": "continue"}
-        text = self._daily_life.prompt_text(datetime.now())
+        now = datetime.now()
+        text = self._daily_life.prompt_text(now)
+        if text and self._awake_until is not None and now < self._awake_until and self._daily_life.asleep(now):
+            text += WOKEN_NOTE.format(until=f"{self._awake_until:%H:%M}")
         return self._append_system_text(kwargs, text) if text else {"action": "continue"}
 
     @HookHandler(
@@ -507,16 +535,37 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         name="discord_emote_nudge",
         mode="blocking",
         order="late",
-        timeout_ms=1000,
+        timeout_ms=5000,
     )
     async def nudge_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """按 chat.emote_chance 偶尔提醒可以按表情；不提醒时 planner 几乎只会选 reply。
+        """提醒这轮可以按表情或发贴图；不提醒时 planner 几乎只会选 reply。
 
-        只在本轮工具列表里有 discord_emote（也就是 Discord 聊天）时才提醒。
+        只在本轮工具列表里有 discord_emote（也就是 Discord 聊天）时才提醒；最后发不发仍由 planner 决定。
         """
-        if "discord_emote" not in _tool_names(kwargs) or random.random() >= self._load_settings().chat.emote_chance:
+        if "discord_emote" not in _tool_names(kwargs):
             return {"action": "continue"}
-        return self._append_system_text(kwargs, EMOTE_NUDGE)
+        nudge = await self._emote_nudge(str(kwargs.get("session_id") or ""))
+        return self._append_system_text(kwargs, nudge) if nudge else {"action": "continue"}
+
+    async def _emote_nudge(self, session_id: str) -> str:
+        """开了决策模型就问它最新那则值不值得表态、用哪种形式；没开或请求失败时按 chat.emote_chance 随机。"""
+        settings = self._load_settings()
+        decision = settings.decision
+        if decision.enabled and decision.api_key and session_id:
+            now = datetime.now()
+            state = await readable_chat(
+                self.ctx, session_id, now - timedelta(hours=EMOTE_CONTEXT_HOURS), now, EMOTE_CONTEXT_MESSAGES
+            )
+            answers = await ask_decision(decision, state, {"emote": EMOTE_QUESTION}, self.ctx.logger) if state else None
+            probabilities = ((answers or {}).get("emote") or {}).get("probabilities")
+            if isinstance(probabilities, dict):
+                reaction = float(probabilities.get("reaction") or 0)
+                sticker = float(probabilities.get("sticker") or 0)
+                self.ctx.logger.debug(f"表情决策：按表情 {reaction:.2f}，发贴图 {sticker:.2f}")
+                if reaction + sticker < decision.emote_threshold:
+                    return ""
+                return STICKER_NUDGE if sticker > reaction else EMOTE_NUDGE
+        return EMOTE_NUDGE if random.random() < settings.chat.emote_chance else ""
 
     # ===== 日常生活：睡觉时不回复 =====
 
@@ -545,6 +594,34 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         self._awake_until = now + timedelta(minutes=WAKE_MINUTES)
         await self._restore_silenced()
         self.ctx.logger.info(f"麦麦被叫醒，{self._awake_until:%H:%M} 前照常回复")
+
+    @HookHandler(
+        "chat.receive.after_process",
+        name="daily_life_wake_on_mention",
+        mode="blocking",
+        order="early",
+        timeout_ms=3000,
+    )
+    async def wake_when_called(self, message: Dict[str, Any] | None = None, **kwargs: Any) -> Dict[str, Any]:
+        """睡觉时被 @ 或收到私讯，按机率被吵醒。
+
+        这个 Hook 在消息进聊天流之前；先把回复频率还原，这则 @ 进去时才会照常强制触发思考，
+        否则频率还是 0，MaiBot 会静默收下并清掉 @ 的强制触发。
+        """
+        del kwargs
+        if not isinstance(message, dict) or not self._sleeping(datetime.now()):
+            return {"action": "continue"}
+        settings = self._load_settings()
+        info = message.get("message_info") if isinstance(message.get("message_info"), dict) else {}
+        extra = info.get("additional_config") if isinstance(info.get("additional_config"), dict) else {}
+        called = extra.get("discord_mentions_bot") or not info.get("group_info")
+        if (
+            str(message.get("platform") or "") == settings.platform.platform_name
+            and called
+            and random.random() < settings.life.wake_on_mention_chance
+        ):
+            await self._wake_up()
+        return {"action": "continue"}
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -2054,6 +2131,8 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         target, error = await self._find_own_message(msg_id, group_id, user_id)
         if target is None:
             return {"success": False, "error": error}
+        if self._content_builder is not None:
+            content = self._content_builder.to_output_script(content)
         try:
             await target.edit(content=content)
         except discord.HTTPException as exc:
@@ -2492,6 +2571,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
 
         if self._content_builder is None:
             self._content_builder = DiscordContentBuilder(logger=self.ctx.logger, native_emoji=self._native_emoji)
+        self._content_builder.output_script = settings.chat.output_script
 
         if self._thread_routing is None:
             self._thread_routing = ThreadRoutingManager(
