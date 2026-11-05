@@ -1,7 +1,7 @@
 """Discord 子区路由管理器。"""
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import discord
 from maim_message import BaseMessageInfo, MessageBase, Seg

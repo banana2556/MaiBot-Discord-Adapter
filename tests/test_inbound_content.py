@@ -294,11 +294,12 @@ def test_video_frames_become_one_contact_sheet() -> None:
     seeks = [args[args.index("-ss") + 1] for args in calls if args[0] == "ffmpeg"]
     assert len(seeks) == 9 and seeks[1] == "6.67" and "每 6.7 秒" in raw["raw_message"][0]["data"]
 
-    # 读不到长度（没装 FFmpeg、格式不支持）或关掉截图，只留文件名
-    for handler, calls in (_video_handler(""), _video_handler("7", interval=0)):
+    # 讀不到長度（沒裝 FFmpeg、格式不支援）或關掉截圖，只留檔名
+    off_handler, off_calls = _video_handler("7", interval=0)
+    for handler in (_video_handler("")[0], off_handler):
         raw = _convert(handler, _message(attachments=[_attachment("x.mp4", "video/mp4")]))
         assert raw["processed_plain_text"] == "[视频: x.mp4]"
-    assert calls == [], "关掉时不跑 FFmpeg"
+    assert off_calls == [], "關掉時不跑 FFmpeg"
 
 
 def _tool_plugin(target: object):

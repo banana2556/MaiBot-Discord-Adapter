@@ -292,6 +292,8 @@ async def _run_sdk_hooks_start_and_stop_typing() -> None:
             },
         }
     )
+    # 訊息進來只記目標；planner 真的決定回覆、replyer 開始生成時才開始 typing
+    await plugin.start_discord_typing_on_reply(session_id="session-1")
     await plugin.stop_discord_typing_before_send(
         message={
             "session_id": "session-1",
@@ -336,11 +338,11 @@ def test_plugin_uses_existing_sdk_hook_names_for_typing() -> None:
     assert plugin_cls.stop_discord_typing_before_send.__maibot_component_info__.mode == "blocking"
 
 
-def test_inbound_discord_message_records_and_starts_typing() -> None:
-    asyncio.run(_run_inbound_discord_message_records_and_starts_typing())
+def test_inbound_discord_message_records_target_without_starting_typing() -> None:
+    asyncio.run(_run_inbound_discord_message_records_target_without_starting_typing())
 
 
-async def _run_inbound_discord_message_records_and_starts_typing() -> None:
+async def _run_inbound_discord_message_records_target_without_starting_typing() -> None:
     plugin_cls = _load_plugin_class()
     plugin = plugin_cls.__new__(plugin_cls)
     plugin._discord_session_channels = {}
@@ -371,10 +373,10 @@ async def _run_inbound_discord_message_records_and_starts_typing() -> None:
     )
 
     assert result == {"action": "continue"}
+    # typing 一次顯示約 10 秒，麥麥決定不回時沒有東西去停它，所以收到訊息時不啟動
     assert calls == [
         ("remember", "session-2"),
         ("channel", 123456789),
-        ("start", "session-2"),
     ]
 
 

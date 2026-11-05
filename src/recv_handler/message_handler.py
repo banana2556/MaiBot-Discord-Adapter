@@ -640,7 +640,7 @@ class DiscordMessageHandler:
             count, interval = VIDEO_MAX_FRAMES, duration / VIDEO_MAX_FRAMES  # 太长就平均分布
         times = [index * interval for index in range(count)]
         frames = await asyncio.gather(*(self._video_frame(attachment.url, at) for at in times))
-        shots = [(at, frame) for at, frame in zip(times, frames) if frame]
+        shots = [(at, frame) for at, frame in zip(times, frames, strict=True) if frame]
         if not shots:
             return [label]
         sheet = await asyncio.to_thread(

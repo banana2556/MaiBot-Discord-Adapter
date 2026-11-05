@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  push:
+    branches: [rdev, dev, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # SDK 与 maim_message 和 MaiBot 本体锁同一版；numpy 由 MaiBot 提供，插件的 requirements 里没有
+      - name: Install dependencies
+        run: pip install -r requirements.txt "maibot-plugin-sdk==2.21.0" "maim-message==0.6.8" numpy pytest ruff
+
+      - name: Ruff
+        run: ruff check . --output-format=github
+
+      - name: Pytest
+        run: pytest -q tests

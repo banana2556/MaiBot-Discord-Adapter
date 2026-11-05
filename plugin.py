@@ -1896,7 +1896,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
                     except Exception:
                         provider_last_error = ""
                 elif hasattr(provider, "_last_error"):
-                    provider_last_error = str(getattr(provider, "_last_error") or "").strip()
+                    provider_last_error = str(provider._last_error or "").strip()
             error_message = (
                 f"TTS 播报失败: {provider_last_error}"
                 if provider_last_error
@@ -2126,7 +2126,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
                 for item in candidates
             )
         )
-        loaded = [(item, image) for item, image in zip(candidates, images) if image]
+        loaded = [(item, image) for item, image in zip(candidates, images, strict=True) if image]
         if not loaded:
             return None
         grid = await asyncio.to_thread(build_numbered_grid, [base64.b64decode(image) for _, image in loaded])
