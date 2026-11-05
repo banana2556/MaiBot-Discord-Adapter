@@ -535,21 +535,18 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         timeout_ms=3000,
     )
     async def wake_when_called(self, message: Dict[str, Any] | None = None, **kwargs: Any) -> Dict[str, Any]:
-        """睡觉时被 @ 或收到私讯，按机率被吵醒。
+        """睡覺時有人叫她（@、私訊、喊她暱稱或別名），按機率被吵醒。
 
-        这个 Hook 在消息进聊天流之前；先把回复频率还原，这则 @ 进去时才会照常强制触发思考，
-        否则频率还是 0，MaiBot 会静默收下并清掉 @ 的强制触发。
+        這個 Hook 在訊息進聊天流之前；先把回覆頻率還原，這則進去時才會照常強制觸發思考，
+        否則頻率還是 0，MaiBot 會靜默收下並清掉強制觸發。
         """
         del kwargs
         if not isinstance(message, dict) or not self._sleeping(datetime.now()):
             return {"action": "continue"}
         settings = self._load_settings()
-        info = message.get("message_info") if isinstance(message.get("message_info"), dict) else {}
-        extra = info.get("additional_config") if isinstance(info.get("additional_config"), dict) else {}
-        called = extra.get("discord_mentions_bot") or not info.get("group_info")
         if (
             str(message.get("platform") or "") == settings.platform.platform_name
-            and called
+            and self._is_calling_her(message)
             and random.random() < settings.life.wake_on_mention_chance
         ):
             await self._wake_up()
@@ -1762,11 +1759,14 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         except (TypeError, ValueError):
             pass
         try:
-            channel = client.get_channel(int(channel_id))
-            if not channel:
-                channel = await client.fetch_channel(int(channel_id))
-
-            target_msg = await channel.fetch_message(int(target_message_id))
+            # 和工具共用 find_message：頻道不在快取、訊息在子區裡都找得到
+            target_msg = (
+                await self._thread_routing.find_message(str(target_message_id), str(channel_id))
+                if self._thread_routing is not None
+                else None
+            )
+            if target_msg is None:
+                return {"success": False, "error": f"找不到訊息 {target_message_id}"}
 
             if action == "add":
                 await target_msg.add_reaction(emoji_str)

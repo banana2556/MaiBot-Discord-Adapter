@@ -99,7 +99,7 @@ def load_state(path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def save_state(path: Path, data: Dict[str, Any]) -> None:
+def save_state(path: Path, data: Any) -> None:
     # 先寫暫存檔再替換，寫到一半當掉也不會弄壞原本的狀態
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

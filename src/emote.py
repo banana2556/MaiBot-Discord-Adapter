@@ -189,6 +189,18 @@ class EmoteMixin:
 
     # ===== 收訊與 planner =====
 
+    def _is_calling_her(self, message: Mapping[str, Any]) -> bool:
+        """這則是不是在叫她；和 MaiBot 判斷「被提及」一樣：@ 她（含回覆時的提醒）、私訊，
+        或提到 bot.nickname / bot.alias_names 裡的名字。睡覺被吵醒和表情決策共用這一個判斷。"""
+        info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
+        extra = info.get("additional_config") if isinstance(info.get("additional_config"), Mapping) else {}
+        text = str(message.get("processed_plain_text") or "")
+        return (
+            bool(extra.get("discord_mentions_bot"))
+            or not info.get("group_info")
+            or any(name in text for name in self._bot_names)
+        )
+
     def _remember_inbound(self, session_id: str, message: Mapping[str, Any]) -> None:
         """chat.receive 時記下這則：之後在 planner 上下文裡看到它的 msg_id，才換得回 Discord 訊息。"""
         info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
@@ -196,7 +208,6 @@ class EmoteMixin:
         group = info.get("group_info") if isinstance(info.get("group_info"), Mapping) else {}
         user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
         message_id = str(message.get("message_id") or "")
-        text = str(message.get("processed_plain_text") or "")
         self._emote_unjudged.add(session_id)
         self._latest_inbound[session_id] = {
             "group_id": str(group.get("group_id") or ""),
@@ -206,10 +217,7 @@ class EmoteMixin:
             return
         entry = {
             "id": message_id,
-            # 和 MaiBot 判斷「被提及」一樣：@ 她（含回覆時的提醒）、私訊，或提到她的暱稱、別名
-            "addressed": bool(extra.get("discord_mentions_bot"))
-            or not group
-            or any(name in text for name in self._bot_names),
+            "addressed": self._is_calling_her(message),
             "voice": bool(extra.get("discord_voice_output")),
             "at": time.monotonic(),
         }

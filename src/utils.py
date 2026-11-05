@@ -4,8 +4,50 @@
 
 import asyncio
 import time
-from typing import Any, List
+from typing import Any, List, Optional, Sequence
 from pathlib import Path
+
+
+async def run_ffmpeg(
+    args: Sequence[str],
+    logger: Any,
+    *,
+    input_data: Optional[bytes] = None,
+    timeout: float = 30.0,
+    purpose: str = "",
+) -> Optional[bytes]:
+    """非同步跑 FFmpeg / FFprobe，回傳標準輸出；沒裝、失敗或逾時都記日誌並回傳 None，由呼叫端決定退路。
+
+    插件裡所有 FFmpeg 呼叫都走這裡：同步呼叫會卡住整個事件迴圈，連 Discord 的連線心跳都會被拖住。
+
+    Args:
+        args: 完整指令，第一個是程式名（ffmpeg / ffprobe）。
+        logger: 日誌器。
+        input_data: 從 stdin 送進去的資料；None 表示不接 stdin。
+        timeout: 秒數上限，逾時會砍掉程序。
+        purpose: 寫進日誌的用途，例如「轉換語音訊息」。
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE if input_data is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, NotImplementedError) as exc:
+        logger.warning(f"無法啟動 {args[0]}（{purpose}）：{exc}")
+        return None
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(input_data), timeout)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        logger.warning(f"{args[0]} {purpose}逾時")
+        return None
+    if process.returncode != 0:
+        logger.warning(f"{args[0]} {purpose}失敗：{stderr.decode(errors='ignore')[-200:]}")
+        return None
+    return stdout
 
 
 def ensure_directory(path: str) -> None:

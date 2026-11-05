@@ -17,6 +17,7 @@ from maim_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Se
 
 from ..emoji_grid import build_numbered_grid
 from ..native_emoji import NativeEmojiRegistry
+from ..utils import run_ffmpeg
 from .emoji_mapping import format_reaction_for_ai, get_emoji_meaning
 
 VIDEO_MAX_FRAMES = 9  # 3x3，再多每格就太小，识图看不清
@@ -670,46 +671,22 @@ class DiscordMessageHandler:
         )
 
     async def _run_ffmpeg(self, *args: str) -> bytes:
-        """跑 FFmpeg/FFprobe 取标准输出；没装、失败或超时都返回空字节。"""
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-        except (FileNotFoundError, NotImplementedError) as exc:
-            self._logger.warning(f"无法启动 {args[0]}，影片只留文件名: {exc}")
-            return b""
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), VIDEO_FFMPEG_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            self._logger.warning(f"{args[0]} 处理影片超时")
-            return b""
-        if process.returncode != 0:
-            self._logger.debug(f"{args[0]} 处理影片失败: {stderr.decode(errors='ignore')[-200:]}")
-            return b""
-        return stdout
+        """影片用的 FFmpeg/FFprobe：取標準輸出；沒裝、失敗或逾時都回傳空位元組，影片只留檔名。"""
+        output = await run_ffmpeg(args, self._logger, timeout=VIDEO_FFMPEG_TIMEOUT_SECONDS, purpose="處理影片")
+        return output or b""
 
     async def _voice_message_to_wav(self, data: bytes) -> bytes:
         """Discord 语音消息是 ogg/opus，MaiBot 转写时一律当 audio.wav 上传，先转成 16kHz 单声道 wav。
 
         没有 FFmpeg 或转换失败时原样交出，由转写服务自己判断能不能认。
         """
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-i", "pipe:0", "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            wav, stderr = await process.communicate(data)
-        except (FileNotFoundError, NotImplementedError) as exc:
-            self._logger.warning(f"无法启动 FFmpeg 转换语音消息，原样交给转写: {exc}")
-            return data
-        if process.returncode != 0 or not wav:
-            self._logger.warning(f"FFmpeg 转换语音消息失败，原样交给转写: {stderr.decode(errors='ignore')[-200:]}")
-            return data
-        return wav
+        wav = await run_ffmpeg(
+            ("ffmpeg", "-i", "pipe:0", "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1"),
+            self._logger,
+            input_data=data,
+            purpose="轉換語音訊息",
+        )
+        return wav or data
 
     _EMBED_TEXT_LIMIT = 300
 

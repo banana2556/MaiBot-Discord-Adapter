@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from .life.common import save_state
+
 _logger = logging.getLogger("discord_adapter.native_emoji")
 
 
@@ -73,8 +75,6 @@ class NativeEmojiRegistry:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(self._entries), encoding="utf-8")
-            tmp_path.replace(self._path)
+            save_state(self._path, self._entries)
         except OSError as exc:
             self._logger.warning(f"保存原生表情映射失败：{exc}")

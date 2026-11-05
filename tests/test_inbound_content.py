@@ -127,6 +127,32 @@ def test_voice_conversion_falls_back_to_original_without_ffmpeg(monkeypatch) -> 
     assert asyncio.run(handler._voice_message_to_wav(b"ogg")) == b"ogg"
 
 
+def test_every_ffmpeg_call_goes_through_one_async_helper(monkeypatch) -> None:
+    utils = _load_adapter_module("src.utils")
+    voice = _load_adapter_module("src.voice.voice_manager")
+    calls = []
+
+    class FakeProcess:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+        async def communicate(self, data=None):
+            calls.append(data)
+            return b"pcm16k", b"bad input"
+
+    results = iter([0, 1])
+
+    async def spawn(*args, **kwargs):
+        return FakeProcess(next(results))
+
+    monkeypatch.setattr(utils.asyncio, "create_subprocess_exec", spawn)
+    logger = SimpleNamespace(warning=lambda *args: None)
+    # 語音頻道的轉檔以前是同步 subprocess，會卡住整個事件迴圈；現在是 await
+    assert asyncio.run(voice.convert_audio_to_pcm(b"pcm48k", logger)) == b"pcm16k"
+    assert asyncio.run(voice.convert_audio_to_pcm(b"pcm48k", logger)) == b"pcm48k", "失敗時原樣交出"
+    assert calls == [b"pcm48k", b"pcm48k"]
+
+
 def test_edit_and_delete_become_notices() -> None:
     handler = _handler()
     before, after = _message(content="今天下雨"), _message(content="今天放晴")

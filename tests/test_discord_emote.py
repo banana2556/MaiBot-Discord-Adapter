@@ -106,3 +106,33 @@ def test_emoji_grid_numbers_every_candidate() -> None:
         assert image.size == (2 * 168 - 8, 2 * 168 - 8), "每格 160px 加 8px 間距"
         # 16px 的小圖放大填滿整格，不是中間一小點
         assert image.convert("RGB").getpixel((150, 150)) == (255, 0, 0)
+
+
+def test_reaction_command_finds_messages_like_the_tools_do() -> None:
+    plugin_cls = _load_plugin_class()
+    plugin = plugin_cls.__new__(plugin_cls)
+    added, looked_up = [], []
+
+    async def add_reaction(emoji):
+        added.append(emoji)
+
+    in_thread = SimpleNamespace(add_reaction=add_reaction)
+
+    async def find_message(message_id, group_id=None, user_id=None):
+        looked_up.append((message_id, group_id))
+        return in_thread if message_id == "555" else None
+
+    plugin._thread_routing = SimpleNamespace(find_message=find_message)
+    plugin._client_manager = SimpleNamespace(
+        client=SimpleNamespace(user=SimpleNamespace(id=1)), stop_typing_indicator=lambda channel_id: None
+    )
+
+    async def run():
+        found = await plugin._handle_reaction_command({"message_id": "555", "channel_id": "10", "emoji": "👍"})
+        missing = await plugin._handle_reaction_command({"message_id": "404", "channel_id": "10", "emoji": "👍"})
+        return found, missing
+
+    found, missing = asyncio.run(run())
+    assert found == {"success": True} and added == ["👍"]
+    assert missing["success"] is False and "找不到" in missing["error"]
+    assert looked_up == [("555", "10"), ("404", "10")], "子區裡的訊息也靠 find_message 找得到"

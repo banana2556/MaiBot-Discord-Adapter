@@ -18,6 +18,7 @@ import json
 
 from maibot_sdk import API, Command, Tool
 
+from .common import save_state
 from .cron import describe, next_run, parse_at, parse_cron
 
 FOLLOWUP = "順手記下"
@@ -191,10 +192,7 @@ class ReminderMixin:
             self._save_reminders()
 
     def _save_reminders(self) -> None:
-        # 先写临时文件再替换，写到一半崩溃也不会损坏已有提醒
-        tmp = self._reminders_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._reminders, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._reminders_path)
+        save_state(self._reminders_path, self._reminders)
 
     def _add_reminder(self, reminder: Dict[str, Any], now: datetime) -> Dict[str, Any]:
         self._reminders.append(reminder)

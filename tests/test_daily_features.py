@@ -514,6 +514,12 @@ def test_mention_or_dm_while_asleep_may_wake_her(tmp_path, monkeypatch) -> None:
     assert not plugin._sleeping(datetime.now()), "私讯也算在叫她"
 
     plugin._awake_until = None
+    plugin._bot_names = ["麥麥", "C醬"]  # 背景輪詢讀到的 MaiBot 暱稱與別名
+    called_by_alias = {**incoming(), "processed_plain_text": "C醬起床了沒"}
+    _run(plugin.wake_when_called(message=called_by_alias))
+    assert not plugin._sleeping(datetime.now()), "喊她別名也算在叫她，和 MaiBot 的被提及判斷一致"
+
+    plugin._awake_until = None
     plugin.set_plugin_config(_cfg({"life": {"enabled": True, "wake_on_mention_chance": 0.3}}))
     _run(plugin.wake_when_called(message=incoming(mention=True)))
     assert plugin._sleeping(datetime.now()), "没骰中就继续睡"

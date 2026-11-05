@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import io
 import math
-import subprocess
 import time as _time
 import wave
 import numpy as np
@@ -20,6 +19,7 @@ from discord import VoiceClient
 from discord.ext import voice_recv
 
 from ...constants import DEFAULT_TTS_PLAYBACK_LEADING_SILENCE_MS
+from ..utils import run_ffmpeg
 from .base import STTProvider, TTSProvider
 
 VoiceConnectableChannel = discord.VoiceChannel | discord.StageChannel
@@ -100,42 +100,23 @@ class VoiceDataSink(voice_recv.AudioSink):  # type: ignore
         return b""
 
 
-def convert_audio_to_pcm(audio_data: bytes, logger: Any) -> bytes:
-    """将 Discord 侧 PCM（48kHz 立体声 s16le）转为 16kHz 单声道 PCM，供 STT 使用。
-
-    通过 FFmpeg 管道转换；若 FFmpeg 不可用或转换失败，则记录日志并原样返回输入。
+async def convert_audio_to_pcm(audio_data: bytes, logger: Any) -> bytes:
+    """把 Discord 收到的 PCM（48kHz 立體聲 s16le）轉成 16kHz 單聲道 PCM 給 STT；轉不了就原樣回傳。
 
     Args:
-        audio_data: 原始 PCM 字节流。
-        logger: 用于输出错误与诊断的日志器。
+        audio_data: 原始 PCM 位元組。
+        logger: 日誌器。
 
     Returns:
-        转换后的 PCM 字节；失败时返回未修改的 audio_data。
+        轉換後的 PCM；FFmpeg 沒裝或失敗時是原本的 audio_data。
     """
-    try:
-        process = subprocess.Popen(
-            [
-                "ffmpeg",
-                "-f", "s16le", "-ar", "48000", "-ac", "2",
-                "-i", "pipe:0",
-                "-f", "s16le", "-ar", "16000", "-ac", "1",
-                "pipe:1",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        pcm_data, stderr = process.communicate(input=audio_data)
-        if process.returncode != 0:
-            logger.error(f"FFmpeg 转换失败: {stderr.decode()}")
-            return audio_data
-        return pcm_data
-    except FileNotFoundError:
-        logger.error("FFmpeg 未安装或不在 PATH 中")
-        return audio_data
-    except Exception as exc:
-        logger.error(f"音频转换错误: {exc}")
-        return audio_data
+    pcm = await run_ffmpeg(
+        ("ffmpeg", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0", "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"),
+        logger,
+        input_data=audio_data,
+        purpose="轉換語音頻道的聲音",
+    )
+    return pcm or audio_data
 
 
 def _frame_db(pcm_bytes: bytes) -> float:
@@ -842,7 +823,7 @@ class VoiceManager:
 
             # 48kHz 立体声 s16le：每秒 192000 字节
             self._logger.info(f"{member.display_name} 说完一段，{len(audio_data) / 192000:.1f} 秒，送去识别")
-            pcm_data = convert_audio_to_pcm(audio_data, self._logger)
+            pcm_data = await convert_audio_to_pcm(audio_data, self._logger)
             text = await self.stt_provider.recognize(pcm_data)
             self._logger.info(f"语音识别结果：{text}" if text else "语音识别没有结果")
 
