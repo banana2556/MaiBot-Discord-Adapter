@@ -1,5 +1,4 @@
 import asyncio
-import base64
 from datetime import datetime, timedelta
 from functools import partial
 import json
@@ -7,8 +6,7 @@ from pathlib import Path
 import random
 import time
 import tomllib
-from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Mapping, Optional, Sequence, Union, cast
+from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Mapping, Optional, Sequence, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -27,9 +25,9 @@ from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
 from .src.decision import DecisionStats
-from .src.decision import ask as ask_decision
-from .src.emoji_grid import build_numbered_grid, grid_shape
-from .src.life.common import list_group_streams, load_state, readable_chat, save_state
+from .src.emote import EmoteMixin, tool_names
+from .src.emote_library import EmoteLibrary
+from .src.life.common import list_group_streams, load_state, readable_chat, save_state, short_time
 from .src.life.cron import describe, parse_cron
 from .src.life.daily_life import DailyLife
 from .src.life.reminders import ReminderMixin
@@ -45,36 +43,6 @@ from .src.voice.voice_manager import VoiceManager
 DAILY_POLL_SECONDS = 10
 # 调整生活时程时最多带这么多字的聊天记录，取最后面的
 LIFE_CHAT_CHAR_LIMIT = 8000
-# chat.emote_chance 命中时加进 planner 系统提示词的提醒
-EMOTE_NUDGE = (
-    "【表情】這一輪如果有值得表態的訊息（好笑、好消息、附和、驚訝、無語），"
-    "可以用 discord_emote 在那則訊息按個 reaction；可以和 reply 同一輪一起呼叫，也可以只按表情不說話。沒有合適的就略過。"
-)
-# 决策模型觉得发图比按 reaction 更合适时换这段
-STICKER_NUDGE = (
-    "【表情】最新那則很適合用圖表態，可以用 discord_emote（form=sticker）發一張伺服器貼圖，或用 send_emoji 發表情包；"
-    "可以和 reply 同一輪一起，也可以不說話只發圖。真的不合適就略過。"
-)
-DECISION_RESULT_LABELS = {
-    "reaction": "提醒按表情",
-    "sticker": "提醒發圖",
-    "skip": "不提醒",
-    "failed": "請求失敗（改用隨機）",
-}
-# 页面「测试连线」送的范例聊天
-DECISION_TEST_STATE = "[12:00] 小明：我終於抽到限定角色了！！！"
-# 问决策模型时带最近多久、最多几则聊天
-EMOTE_CONTEXT_HOURS = 1
-EMOTE_CONTEXT_MESSAGES = 8
-EMOTE_QUESTION = {
-    "type": "choice",
-    "instructions": "看聊天記錄的最後一則訊息：像真人一樣用表情回應它合適嗎？用哪種方式？",
-    "criteria": {
-        "none": "不用表情：一般資訊、提問、需要認真回答，或沒什麼情緒",
-        "reaction": "在訊息上按個表情就好：附和、按讚、收到、小小的好笑或驚訝",
-        "sticker": "值得發一張貼圖或表情包：很好笑、情緒很強烈、用圖比用字更到位",
-    },
-}
 # 睡觉时段这一轮规划只留这些工具，并接上这段提醒
 SLEEP_ALLOWED_TOOLS = {"stop"}
 SLEEP_NOTE = "【睡眠中】你現在正在睡覺，看不到也不會回這些訊息。這一輪不要回覆、不要發任何東西，直接呼叫 stop()。"
@@ -99,40 +67,7 @@ VOICE_FIELD_LABELS = {
 ON_OFF = {True: "開", False: "關"}
 
 
-def _tool_names(kwargs: Dict[str, Any]) -> set[str]:
-    """planner Hook 载荷里本轮候选工具的名称（OpenAI function 结构）。"""
-    tools = kwargs.get("tool_definitions")
-    return {
-        str((tool.get("function") or {}).get("name") or "")
-        for tool in (tools if isinstance(tools, list) else [])
-        if isinstance(tool, dict)
-    }
-
-
-def _nudges(counts: Mapping[str, int]) -> int:
-    """决策模型那天提醒了几次（按表情 + 发图）。"""
-    return counts.get("reaction", 0) + counts.get("sticker", 0)
-
-
-def _avg_latency(counts: Mapping[str, int]) -> int:
-    """成功请求的平均延迟（毫秒）；没有成功的请求时为 0。"""
-    succeeded = counts.get("calls", 0) - counts.get("failed", 0)
-    return round(counts.get("latency_ms", 0) / succeeded) if succeeded > 0 else 0
-
-
-def _ratio(part: int, whole: int) -> str:
-    return f"{part / whole:.0%}（{part}/{whole}）" if whole else "—"
-
-
-def _short_time(iso: Any) -> str:
-    """状态文件里的 ISO 时间 -> WebUI 显示的「MM-DD HH:MM」；没有或格式不对时显示「—」。"""
-    try:
-        return datetime.fromisoformat(str(iso)).strftime("%m-%d %H:%M")
-    except ValueError:
-        return "—"
-
-
-class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
+class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
     """Discord 消息网关插件。
 
     负责注册双工消息网关、管理 discord.py 客户端生命周期，并将 Host 出站消息路由到
@@ -175,10 +110,10 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         # 睡觉时被调成 0 回复频率的会话，醒来时还原
         self._silenced_sessions: set[str] = set()
         self._awake_until: Optional[datetime] = None
-        # 载入后换成存在数据目录的版本
+        # 載入後換成存在資料目錄的版本
         self._decision_stats = DecisionStats(None)
-        # 有新的 Discord 訊息、還沒問過決策模型的聊天；一輪回合裡 planner 會請求好幾次，只有收到新訊息後的第一次要問
-        self._emote_unjudged: set[str] = set()
+        self._emote_library: Optional[EmoteLibrary] = None
+        self._init_emote_state()
 
     async def on_load(self) -> None:
         """插件加载时启动日常功能的后台轮询，并根据当前配置启动或保持 Discord 连接。"""
@@ -207,6 +142,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         )
         self._topic_scout = TopicScout(self.ctx, data_dir / "topics.json", self._resolve_discord_stream)
         self._decision_stats = DecisionStats(data_dir / "decision_stats.json")
+        self._emote_library = EmoteLibrary(self.ctx, data_dir / "emote_vectors.json", lambda: self._native_emoji)
         self._daily_task = asyncio.create_task(self._run_daily_loop())
 
     async def _run_daily_loop(self) -> None:
@@ -229,6 +165,9 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
                 # ponytail: 睡觉时跳过整轮，错过的话题醒来后马上补发；要严格按时就改成睡觉时只推进 next_due
                 if settings.topics.enabled and self._topic_scout is not None and not sleeping:
                     self._spawn_daily_job("topics", partial(self._topic_scout.tick, now, settings.topics))
+                # 表情庫數量變了才重抓，新表情先算好向量（refresh 自己限制頻率）
+                if self._emote_library is not None:
+                    self._spawn_daily_job("emotes", self._emote_library.refresh)
             except Exception:
                 self.ctx.logger.exception("日常轮询这一轮失败，下一轮再试")
 
@@ -300,7 +239,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             if entry
             else "—",
             "date": state.get("date") or "—",
-            "adjusted_at": _short_time(state.get("adjusted_at")),
+            "adjusted_at": short_time(state.get("adjusted_at")),
             "note": state.get("note") or "—",
             "hours": [
                 {
@@ -528,7 +467,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             "channels": channels,
             "history": [
                 {
-                    "time": _short_time(when),
+                    "time": short_time(when),
                     "chat": names.get(stream_id, stream_id),
                     "kind": TOPIC_SOURCE_LABELS.get(item.get("source"), item.get("source") or "—"),
                     "topic": item.get("topic") or "—",
@@ -559,151 +498,6 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         if text and self._awake_until is not None and now < self._awake_until and self._daily_life.asleep(now):
             text += WOKEN_NOTE.format(until=f"{self._awake_until:%H:%M}")
         return self._append_system_text(kwargs, text) if text else {"action": "continue"}
-
-    @HookHandler(
-        "maisaka.planner.before_request",
-        name="discord_emote_nudge",
-        mode="blocking",
-        order="late",
-        timeout_ms=5000,
-    )
-    async def nudge_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """提醒这轮可以按表情或发贴图；不提醒时 planner 几乎只会选 reply。
-
-        只在本轮工具列表里有 discord_emote（也就是 Discord 聊天）时才提醒；最后发不发仍由 planner 决定。
-        """
-        if "discord_emote" not in _tool_names(kwargs):
-            return {"action": "continue"}
-        nudge = await self._emote_nudge(str(kwargs.get("session_id") or ""))
-        return self._append_system_text(kwargs, nudge) if nudge else {"action": "continue"}
-
-    async def _emote_nudge(self, session_id: str) -> str:
-        """開了決策模型就問它最新那則值不值得表態、用哪種形式；沒開、沒聊天紀錄或請求失敗時照 chat.emote_chance 隨機。
-
-        決策模型只在收到新訊息後的第一次 planner 請求問一次：同一輪後面的請求最新一則多半是麥麥自己剛說的話，
-        再問會變成判斷要不要對自己按表情，統計也會重複算。
-        """
-        settings = self._load_settings()
-        decision = settings.decision
-        if decision.enabled and decision.api_key and session_id:
-            if session_id not in self._emote_unjudged:
-                return ""
-            self._emote_unjudged.discard(session_id)
-            now = datetime.now()
-            state = await readable_chat(
-                self.ctx, session_id, now - timedelta(hours=EMOTE_CONTEXT_HOURS), now, EMOTE_CONTEXT_MESSAGES
-            )
-            if not state:
-                # 退回隨機時一定要留紀錄，不然決策模型從沒被呼叫也看不出來
-                self.ctx.logger.info(f"表情決策 [{session_id}]：最近一小時讀不到聊天紀錄，這輪改用隨機")
-            if state:
-                latest = state.splitlines()[-1][:200]
-                started = time.monotonic()
-                answers = await ask_decision(decision, state, {"emote": EMOTE_QUESTION}, self.ctx.logger)
-                latency_ms = round((time.monotonic() - started) * 1000)
-                probabilities = ((answers or {}).get("emote") or {}).get("probabilities")
-                if isinstance(probabilities, dict):
-                    reaction = float(probabilities.get("reaction") or 0)
-                    sticker = float(probabilities.get("sticker") or 0)
-                    if reaction + sticker < decision.emote_threshold:
-                        result = "skip"
-                    else:
-                        result = "sticker" if sticker > reaction else "reaction"
-                    self.ctx.logger.info(
-                        f"表情决策 [{session_id}]：{DECISION_RESULT_LABELS[result]}"
-                        f"（按表情 {reaction:.2f}，发图 {sticker:.2f}，门槛 {decision.emote_threshold:.2f}，{latency_ms} ms）"
-                    )
-                    self._decision_stats.record(now, session_id, latest, result, latency_ms, reaction, sticker)
-                    return {"skip": "", "sticker": STICKER_NUDGE, "reaction": EMOTE_NUDGE}[result]
-                self._decision_stats.record(now, session_id, latest, "failed", latency_ms)
-        return EMOTE_NUDGE if random.random() < settings.chat.emote_chance else ""
-
-    @API("webui_decision", description="讀取決策模型的設定與判斷統計", version="1")
-    async def webui_decision(self) -> Dict[str, Any]:
-        """決策模型頁：今天的計數、近 14 天走勢和最近幾十次判斷；沒啟用或沒填 Key 時用 notice 說明。"""
-        config = self._load_settings().decision
-        state = self._decision_stats.state
-        days = state.get("days") or {}
-        today = days.get(datetime.now().date().isoformat()) or {}
-        if not config.enabled:
-            notice = "決策模型未啟用，到插件設定「聊天與過濾 → 決策模型」開啟；沒開時照「主動表情機率」隨機提醒。"
-        elif not config.api_key:
-            notice = "還沒填 API Key，現在照「主動表情機率」隨機提醒。"
-        else:
-            notice = ""
-        last_test = state.get("last_test")
-        names = await self._webui_chat_names() if state.get("recent") else {}
-        return {
-            "notice": notice,
-            "provider": config.base_url,
-            "model": config.model,
-            "threshold": f"{config.emote_threshold:.2f}",
-            "last_test": (
-                f"{_short_time(last_test['time'])} {'✅' if last_test['ok'] else '❌'} {last_test['detail']}"
-                if last_test
-                else "還沒測試"
-            ),
-            "today_calls": today.get("calls", 0),
-            "today_nudge_rate": _ratio(_nudges(today), today.get("calls", 0)),
-            "today_adopt_rate": _ratio(today.get("adopted", 0), _nudges(today)),
-            "today_latency": f"{_avg_latency(today)} ms" if _avg_latency(today) else "—",
-            "today_failed": today.get("failed", 0),
-            "today_split": (
-                f"表情 {today.get('reaction', 0)}・發圖 {today.get('sticker', 0)}・不提醒 {today.get('skip', 0)}"
-            ),
-            "daily": [
-                {
-                    "date": day[5:],
-                    "calls": counts["calls"],
-                    "nudges": _nudges(counts),
-                    "adopted": counts["adopted"],
-                    "latency": _avg_latency(counts),
-                }
-                for day, counts in sorted(days.items())
-            ],
-            "recent": [
-                {
-                    "time": _short_time(item["time"]),
-                    "chat": names.get(item["chat"], item["chat"]),
-                    "result": DECISION_RESULT_LABELS.get(item["result"], item["result"]),
-                    "reaction": "—" if item["result"] == "failed" else f"{item['reaction']:.2f}",
-                    "sticker": "—" if item["result"] == "failed" else f"{item['sticker']:.2f}",
-                    "latency": f"{item['latency_ms']} ms",
-                    "adopted": item["adopted"] or "—",
-                    "message": item["message"],
-                }
-                for item in state.get("recent") or []
-            ],
-        }
-
-    @API("webui_decision_test", description="用一段範例聊天測試決策模型連不連得上", version="1")
-    async def webui_decision_test(self) -> Dict[str, Any]:
-        """沒啟用也能測，方便先確認 Key 和網址；結果記在頁面的「上次測試」。"""
-        config = self._load_settings().decision
-        if not config.api_key.strip():
-            raise ValueError("還沒填 API Key")
-        errors: List[str] = []
-        started = time.monotonic()
-        answers = await ask_decision(
-            config, DECISION_TEST_STATE, {"emote": EMOTE_QUESTION}, SimpleNamespace(warning=errors.append)
-        )
-        latency_ms = round((time.monotonic() - started) * 1000)
-        probabilities = ((answers or {}).get("emote") or {}).get("probabilities")
-        if isinstance(probabilities, dict):
-            detail = (
-                f"{latency_ms} ms，按表情 {float(probabilities.get('reaction') or 0):.2f}・"
-                f"發圖 {float(probabilities.get('sticker') or 0):.2f}"
-            )
-            self._decision_stats.set_last_test(datetime.now(), True, detail)
-            return {"ok": True, "detail": detail}
-        detail = errors[-1] if errors else "回應裡沒有判斷結果，檢查模型名稱"
-        self._decision_stats.set_last_test(datetime.now(), False, detail)
-        raise ValueError(f"決策模型測試失敗：{detail}")
-
-    @API("webui_decision_reset", description="清除決策模型的判斷統計", version="1")
-    async def webui_decision_reset(self) -> Dict[str, Any]:
-        self._decision_stats.reset()
-        return {"cleared": True}
 
     # ===== 日常生活：睡觉时不回复 =====
 
@@ -773,7 +567,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
 
         私聊不吃回复频率，每轮都会走到这里被拿掉工具。
         """
-        if not any(name.startswith("discord_") for name in _tool_names(kwargs)) or not self._sleeping(datetime.now()):
+        if not any(name.startswith("discord_") for name in tool_names(kwargs)) or not self._sleeping(datetime.now()):
             return {"action": "continue"}
         session_id = str(kwargs.get("session_id") or "")
         if session_id:
@@ -781,7 +575,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             await self.ctx.call_capability("frequency.set_adjust", chat_id=session_id, value=0)
             self._silenced_sessions.add(session_id)
         kwargs["tool_definitions"] = [
-            tool for tool in kwargs["tool_definitions"] if _tool_names({"tool_definitions": [tool]}) & SLEEP_ALLOWED_TOOLS
+            tool for tool in kwargs["tool_definitions"] if tool_names({"tool_definitions": [tool]}) & SLEEP_ALLOWED_TOOLS
         ]
         self._append_system_text(kwargs, SLEEP_NOTE)
         return {"action": "continue", "modified_kwargs": kwargs}
@@ -1322,7 +1116,7 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         if session_id and isinstance(channel_id, int):
             self._client_manager.remember_typing_target(session_id, channel_id)
             self._discord_session_channels[session_id] = channel_id
-            self._emote_unjudged.add(session_id)
+            self._remember_inbound(session_id, message)
         return {"action": "continue"}
 
     _REPLYER_EMOJI_HINT: ClassVar[str] = (
@@ -1415,13 +1209,10 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
         message: Dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """发送流程结束后按出站消息再收束一次 Discord typing；发出的是表情包或贴图时记为采纳了表情提醒。"""
+        """發送流程結束後按出站訊息再收束一次 Discord typing；她的文字送出後，該附圖的聊天重新計時附圖。"""
         self._stop_discord_typing_for_hook_message(message)
-        # 贴图（discord_emote form=sticker）和 MaiBot 自己的 send_emoji 都走这里，discord_emote 工具看不到后者
-        if kwargs.get("sent") and isinstance(message, Mapping) and any(
-            segment.get("type") == "emoji" for segment in self._iter_message_segments(message.get("raw_message"))
-        ):
-            self._decision_stats.adopt(datetime.now(), str(message.get("session_id") or ""), "貼圖或表情包")
+        if kwargs.get("sent") and isinstance(message, Mapping):
+            self._schedule_append(message)
         return {"action": "continue"}
 
     def _stop_discord_typing_for_hook_message(self, message: Mapping[str, Any] | None) -> None:
@@ -1990,210 +1781,6 @@ class DiscordAdapterPlugin(ReminderMixin, MaiBotPlugin):
             return {"success": False, "error": str(exc)}
         except (ValueError, TypeError) as exc:
             return {"success": False, "error": f"参数格式错误: {exc}"}
-
-    _EMOTE_FORMS: ClassVar[Dict[str, str]] = {"reaction": "表情回应", "emoji": "表情", "sticker": "贴图"}
-
-    # ponytail: platforms 写死默认平台名，platform_name 改成别的名字时工具不会出现
-    # 按表情、单发表情、发贴图是同一种「不用文字回应」的情境，合成一个工具，只用 form 区分送出形式；
-    # 首轮就可能用来代替回复，保持 visible；描述兼作检索索引，写进用户会说的动词和同义词
-    @Tool(
-        "discord_emote",
-        description=(
-            "用 Discord 伺服器的原生表情回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張伺服器貼圖（sticker）。"
-            "可以和 reply 在同一輪一起呼叫（邊回話邊按表情），也可以只按表情不說話。"
-            "適合好笑、好消息、附和、按讚、表示收到、驚訝、無語、心疼的時候，像真人聊天一樣偶爾用。"
-            "只傳目標訊息、想表達的情緒與形式，工具會看聊天上下文與候選圖自行挑選，不使用普通 Unicode emoji。"
-        ),
-        parameters=[
-            ToolParameterInfo(
-                name="msg_id", param_type=ToolParamType.STRING, description="要回應的訊息 msg_id。", required=True
-            ),
-            ToolParameterInfo(
-                name="feeling",
-                param_type=ToolParamType.STRING,
-                description="想表達的情緒或態度，如笑翻、認同、無語、心疼；只描述情緒，不指定表情符號。",
-                required=False,
-            ),
-            ToolParameterInfo(
-                name="form",
-                param_type=ToolParamType.STRING,
-                description="送出形式：reaction 按在該訊息上（最輕），emoji 單獨發一個表情，sticker 發一張貼圖。預設 reaction。",
-                required=False,
-                enum_values=list(_EMOTE_FORMS),
-            ),
-        ],
-        platforms=DEFAULT_PLATFORM_NAME,
-        visibility="visible",
-    )
-    async def handle_discord_emote(
-        self,
-        msg_id: str = "",
-        feeling: str = "",
-        form: str = "reaction",
-        group_id: str = "",
-        user_id: str = "",
-        stream_id: str = "",
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Maisaka 工具：挑一个服务器表情或贴图，按 form 加成 reaction 或单独发出。
-
-        Args:
-            msg_id: 目标消息 ID（Host 已把模型可见的别名换回原始 ID）。
-            feeling: 想表達的情緒提示；選圖模型會依上下文挑選。
-            form: ``reaction`` 加在目标消息上，``emoji`` 单发服务器表情，``sticker`` 发服务器贴图。
-            group_id: Host 注入的会话频道 ID。
-            user_id: Host 注入的私聊对象用户 ID。
-            stream_id: Host 注入的聊天流 ID，用于取挑图时的聊天上下文，也是单发时的目标。
-
-        Returns:
-            dict: ``success`` 与给模型看的 ``content`` 或 ``error``。
-        """
-        del kwargs
-        if self._thread_routing is None or self._client_manager is None or self._client_manager.client is None:
-            return {"success": False, "error": "Discord 客户端未就绪"}
-        form = str(form or "reaction").strip()
-        if form not in self._EMOTE_FORMS:
-            return {"success": False, "error": f"form 只能是 {'、'.join(self._EMOTE_FORMS)}"}
-        stream_id = str(stream_id or "").strip()
-        if form != "reaction" and not stream_id:
-            return {"success": False, "error": "缺少聊天流，无法单独发送"}
-
-        target = await self._thread_routing.find_message(str(msg_id or "").strip(), group_id, user_id)
-        if target is None:
-            return {"success": False, "error": f"找不到消息 {msg_id}"}
-
-        label = self._EMOTE_FORMS[form]
-        picked = await self._pick_native_item(target, str(feeling or "").strip(), stream_id, stickers=form == "sticker")
-        if picked is None:
-            return {"success": False, "error": f"本伺服器沒有可用的{label}，或選圖失敗；沒有送出"}
-        item, image_b64 = picked
-
-        if form == "reaction":
-            try:
-                await target.add_reaction(item)
-            except discord.HTTPException as exc:
-                return {"success": False, "error": f"添加表情回应 {item} 失败：{exc}"}
-            self._decision_stats.adopt(datetime.now(), stream_id, label)
-            return {"success": True, "content": f"已用 {item} 回应消息 {msg_id}"}
-
-        # 走 Host 发送链路，消息才会进聊天记录
-        if form == "emoji":
-            sent = await self.ctx.send.text(str(item), stream_id, sync_to_maisaka_history=True)
-        else:
-            if self._native_emoji is None:
-                return {"success": False, "error": "原生贴图映射未就绪"}
-            # 发送链路只收表情图片：先登记这张图的哈希，出站时 DiscordContentBuilder 会还原成原生贴图
-            self._native_emoji.remember(image_b64, "sticker", item.id)
-            sent = await self.ctx.send.emoji(image_b64, stream_id, sync_to_maisaka_history=True)
-        if not sent:
-            return {"success": False, "error": f"发送{label}失败"}
-        if form == "emoji":  # 贴图走 send.emoji，由 send_service.after_send 那边记采纳
-            self._decision_stats.adopt(datetime.now(), stream_id, label)
-        return {"success": True, "content": f"已发送{label} {item if form == 'emoji' else item.name}"}
-
-    _EMOJI_CONTEXT_LIMIT: ClassVar[int] = 12  # 与 MaiBot 表情子代理带的上下文条数一致
-    _EMOJI_SELECTION_PROMPT: ClassVar[str] = (
-        "你需要根据上下文和当前语气，选择一个合适的{kind}来回应指定的消息。\n"
-        "其中包含一张 {rows}x{columns} 的{kind}拼图，一共 {count} 个位置。\n"
-        "每张小图左上角都有一个较大的序号，范围是 1 到 {count}。\n"
-        "你需要从这 {count} 张图里选出最合适的一张。\n"
-        "你必须返回一个 JSON 对象（json object），不要输出任何 JSON 之外的内容。\n"
-        '返回格式为：{{"emoji_index":1,"reason":"简短理由"}}'
-    )
-
-    async def _pick_native_item(
-        self, target: discord.Message, feeling: str, stream_id: str, *, stickers: bool = False
-    ) -> Optional[tuple[Union[discord.Emoji, discord.GuildSticker], str]]:
-        """照 MaiBot send_emoji：随机抽候选表情或贴图拼成带序号的图，让视觉模型看着聊天上下文挑一张。
-
-        Args:
-            target: 要回应的消息。
-            feeling: planner 给的情绪提示，可为空。
-            stream_id: 聊天流 ID，用于取最近的聊天记录。
-            stickers: True 时从服务器贴图里挑，否则从服务器自定义表情里挑。
-
-        Returns:
-            选中的表情或贴图及其图片 base64；没有可用候选、图片全部下载失败或模型不可用时返回 None。
-        """
-        guild = target.guild
-        if guild is None or self._message_handler is None:
-            return None
-        if stickers:
-            # Lottie 贴图是动画 JSON，不是图片，视觉模型看不了
-            usable: List[Any] = [
-                item for item in guild.stickers if item.available and item.format != discord.StickerFormatType.lottie
-            ]
-        else:
-            usable = [item for item in guild.emojis if item.is_usable()]
-        if not usable:
-            return None
-        # 插件没有跨模块读取 emoji.emoji_send_num 的能力令牌；
-        # Discord reaction 只需少量候选，固定抽 25 张即可避免整条路径被拒绝。
-        candidates = random.sample(usable, min(len(usable), 25))
-        # 动态表情取第一帧 png，视觉模型多半不收动图
-        images = await asyncio.gather(
-            *(
-                self._message_handler._fetch_emoji_bytes(
-                    str(item.url) if stickers else f"{discord.Asset.BASE}/emojis/{item.id}.png", size=128
-                )
-                for item in candidates
-            )
-        )
-        loaded = [(item, image) for item, image in zip(candidates, images, strict=True) if image]
-        if not loaded:
-            return None
-        grid = await asyncio.to_thread(build_numbered_grid, [base64.b64decode(image) for _, image in loaded])
-        rows, columns = grid_shape(len(loaded))
-
-        history = ""
-        if stream_id:
-            try:
-                recent = await self.ctx.message.get_recent(chat_id=stream_id, limit=self._EMOJI_CONTEXT_LIMIT)
-                history = await self.ctx.message.build_readable(recent) if isinstance(recent, list) and recent else ""
-            except Exception as exc:  # 拿不到上下文就只看被回应的消息
-                self.ctx.logger.debug(f"读取表情选择上下文失败：{exc}")
-        task_text = (
-            f"[聊天记录]\n{history if isinstance(history, str) and history else '（无）'}\n\n"
-            f"[要回应的消息]{(target.content or '[无文字]')[:200]}\n"
-            + (f"[想表达]{feeling}\n" if feeling else "")
-            + f"[选择任务]\n候选总数: {len(loaded)}\n拼图布局: {rows}x{columns}\n请只输出 JSON。"
-        )
-        system_prompt = self._EMOJI_SELECTION_PROMPT.format(
-            kind="贴图" if stickers else "表情", rows=rows, columns=columns, count=len(loaded)
-        )
-        prompt = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": task_text},
-                    {"type": "image", "image_format": "png", "image_base64": base64.b64encode(grid).decode("ascii")},
-                ],
-            },
-        ]
-        # ponytail: MaiBot 在 emoji 任务没配模型时会先看 planner 是否支持视觉；插件读不到模型配置，直接退到 vlm
-        result: Dict[str, Any] = {}
-        for task_name in ("emoji", "vlm"):
-            try:
-                result = await self.ctx.llm.generate(prompt, task_name=task_name)
-            except Exception as exc:
-                result = {"success": False, "error": str(exc)}
-            if result.get("success"):
-                break
-        else:
-            self.ctx.logger.warning(f"挑选表情失败：{result.get('error')}")
-            return None
-
-        response = str(result.get("response") or "")
-        try:
-            index = int(json.loads(response[response.find("{") : response.rfind("}") + 1])["emoji_index"])
-        except (ValueError, KeyError, TypeError):
-            self.ctx.logger.warning("選圖模型未回傳有效 emoji_index；不送出")
-            return None
-        if not 1 <= index <= len(loaded):
-            self.ctx.logger.warning(f"選圖模型回傳超出候選範圍的序號 {index}；不送出")
-            return None
-        return loaded[index - 1]
 
     # 以下工具首轮用不到，设为 deferred：名称统一 discord_ 前缀，tool_search 搜 discord 时会一起命中；
     # MaiBot 的检索按子串匹配，描述里简繁两种写法的常用说法都放进去

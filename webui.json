@@ -1087,7 +1087,7 @@
     {
       "id": "decision",
       "title": "決策模型",
-      "description": "每次思考前問決策模型最新那則值不值得用表情表態；這裡看它判斷了幾次、提醒了幾次、麥麥採納了幾次。",
+      "description": "新訊息第一次進 planner 時，決策模型判斷這則要用文字、文字＋附圖、只按表情還是只發圖回應；表情用 MaiBot 表情庫描述的向量相似度挑。",
       "placement": "workspace",
       "icon": "chart",
       "queries": {
@@ -1125,22 +1125,6 @@
             },
             {
               "type": "stat",
-              "label": "提醒率",
-              "value": {
-                "source": "decision",
-                "field": "today_nudge_rate"
-              }
-            },
-            {
-              "type": "stat",
-              "label": "採納率（提醒後 3 分鐘內有用表情）",
-              "value": {
-                "source": "decision",
-                "field": "today_adopt_rate"
-              }
-            },
-            {
-              "type": "stat",
               "label": "平均延遲",
               "value": {
                 "source": "decision",
@@ -1157,26 +1141,40 @@
             },
             {
               "type": "stat",
-              "label": "今天的結果",
-              "value": {
-                "source": "decision",
-                "field": "today_split"
-              }
-            },
-            {
-              "type": "stat",
-              "label": "表情門檻",
+              "label": "情境門檻",
               "value": {
                 "source": "decision",
                 "field": "threshold"
               }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "columns": 3,
+          "children": [
+            {
+              "type": "stat",
+              "label": "今天的情境",
+              "value": {
+                "source": "decision",
+                "field": "today_scenes"
+              }
             },
             {
               "type": "stat",
-              "label": "上次測試",
+              "label": "今天送出的表情",
               "value": {
                 "source": "decision",
-                "field": "last_test"
+                "field": "today_sends"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "挑表情平均延遲",
+              "value": {
+                "source": "decision",
+                "field": "today_send_latency"
               }
             }
           ]
@@ -1186,7 +1184,7 @@
           "children": [
             {
               "type": "text",
-              "label": "API 地址",
+              "label": "API 位址",
               "value": {
                 "source": "decision",
                 "field": "provider"
@@ -1198,6 +1196,14 @@
               "value": {
                 "source": "decision",
                 "field": "model"
+              }
+            },
+            {
+              "type": "text",
+              "label": "上次測試",
+              "value": {
+                "source": "decision",
+                "field": "last_test"
               }
             },
             {
@@ -1219,7 +1225,7 @@
           "when": {
             "reference": {
               "source": "decision",
-              "field": "recent"
+              "field": "decisions"
             },
             "operator": "empty"
           }
@@ -1244,14 +1250,14 @@
         },
         {
           "type": "chart",
-          "label": "每天提醒次數",
+          "label": "每天判斷要用表情的次數",
           "chart_type": "bar",
           "value": {
             "source": "decision",
             "field": "daily"
           },
           "x": "date",
-          "y": "nudges",
+          "y": "emotes",
           "when": {
             "reference": {
               "source": "decision",
@@ -1262,14 +1268,14 @@
         },
         {
           "type": "chart",
-          "label": "每天採納次數",
+          "label": "每天送出的表情",
           "chart_type": "bar",
           "value": {
             "source": "decision",
             "field": "daily"
           },
           "x": "date",
-          "y": "adopted",
+          "y": "sends",
           "when": {
             "reference": {
               "source": "decision",
@@ -1301,12 +1307,12 @@
           "label": "最近的判斷（新的在前；點一列看那則訊息）",
           "value": {
             "source": "decision",
-            "field": "recent"
+            "field": "decisions"
           },
           "when": {
             "reference": {
               "source": "decision",
-              "field": "recent"
+              "field": "decisions"
             },
             "operator": "not_empty"
           },
@@ -1322,24 +1328,24 @@
               "label": "聊天"
             },
             {
-              "field": "result",
-              "label": "結果"
+              "field": "scene",
+              "label": "採用"
             },
             {
-              "field": "reaction",
-              "label": "按表情"
+              "field": "requested",
+              "label": "模型原本選"
             },
             {
-              "field": "sticker",
-              "label": "發圖"
+              "field": "emotion",
+              "label": "情緒"
+            },
+            {
+              "field": "probability",
+              "label": "機率"
             },
             {
               "field": "latency",
               "label": "延遲"
-            },
-            {
-              "field": "adopted",
-              "label": "採納"
             }
           ]
         },
@@ -1377,29 +1383,38 @@
             },
             {
               "type": "text",
-              "label": "結果",
+              "label": "採用",
               "value": {
                 "scope": "selection",
                 "source": "decisionRow",
-                "field": "result"
+                "field": "scene"
               }
             },
             {
               "type": "text",
-              "label": "按表情機率",
+              "label": "模型原本選",
               "value": {
                 "scope": "selection",
                 "source": "decisionRow",
-                "field": "reaction"
+                "field": "requested"
               }
             },
             {
               "type": "text",
-              "label": "發圖機率",
+              "label": "情緒",
               "value": {
                 "scope": "selection",
                 "source": "decisionRow",
-                "field": "sticker"
+                "field": "emotion"
+              }
+            },
+            {
+              "type": "text",
+              "label": "機率",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "probability"
               }
             },
             {
@@ -1410,15 +1425,51 @@
                 "source": "decisionRow",
                 "field": "latency"
               }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "label": "最近送出的表情（新的在前）",
+          "value": {
+            "source": "decision",
+            "field": "sends"
+          },
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "sends"
+            },
+            "operator": "not_empty"
+          },
+          "columns": [
+            {
+              "field": "time",
+              "label": "時間"
             },
             {
-              "type": "text",
-              "label": "麥麥用了",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "adopted"
-              }
+              "field": "chat",
+              "label": "聊天"
+            },
+            {
+              "field": "kind",
+              "label": "種類"
+            },
+            {
+              "field": "picked",
+              "label": "選中"
+            },
+            {
+              "field": "score",
+              "label": "相似度"
+            },
+            {
+              "field": "latency",
+              "label": "延遲"
+            },
+            {
+              "field": "result",
+              "label": "結果"
             }
           ]
         }

@@ -42,6 +42,14 @@ async def readable_chat(ctx: Any, stream_id: str, since: datetime, until: dateti
     return ""
 
 
+def short_time(iso: Any) -> str:
+    """狀態檔裡的 ISO 時間 -> WebUI 顯示的「MM-DD HH:MM」；沒有或格式不對時顯示「—」。"""
+    try:
+        return datetime.fromisoformat(str(iso)).strftime("%m-%d %H:%M")
+    except ValueError:
+        return "—"
+
+
 async def persona_text(ctx: Any) -> str:
     """当前人设的文字描述；读不到时返回空字符串，由调用方只靠配置里的生活设定。"""
     try:

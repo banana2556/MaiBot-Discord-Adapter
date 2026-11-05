@@ -1,4 +1,4 @@
-"""把多张图拼成带标签的网格图：候选表情标序号让视觉模型挑选，影片截图标时间点。"""
+"""把多張圖拼成帶標籤的網格圖（影片截圖標時間點），比格子小的圖會放大填滿。"""
 
 import io
 import math
@@ -6,7 +6,8 @@ from typing import List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-_TILE = 128
+# 視覺模型多半要求短邊至少 64px，格子取寬鬆一點
+_TILE = 160
 _GAP = 8
 
 
@@ -16,13 +17,20 @@ def grid_shape(count: int) -> Tuple[int, int]:
     return max(1, math.ceil(count / columns)), columns
 
 
+def _fit(image: Image.Image, side: int) -> Image.Image:
+    """等比縮放到最長邊剛好是 side：太大縮小、太小放大（表情常只有幾十像素）。"""
+    scale = side / max(image.width, image.height)
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
 def build_numbered_grid(images: List[bytes], labels: Optional[List[str]] = None, tile: int = _TILE) -> bytes:
     """每张图缩放进白底方格，左上角标上标签（默认从 1 开始的序号），输出 PNG 字节。
 
     Args:
         images: 图片字节，顺序即格子顺序。
         labels: 每格的标签；不传时用序号。
-        tile: 每格边长（像素）。
+        tile: 每格边长（像素）；比格子小的圖會放大填滿。
 
     Returns:
         拼好的 PNG 图片字节。
@@ -37,8 +45,7 @@ def build_numbered_grid(images: List[bytes], labels: Optional[List[str]] = None,
         x, y = (index % columns) * step, (index // columns) * step
         try:
             with Image.open(io.BytesIO(data)) as raw:
-                image = raw.convert("RGBA")
-            image.thumbnail((tile, tile))
+                image = _fit(raw.convert("RGBA"), tile)
             canvas.paste(image, (x + (tile - image.width) // 2, y + (tile - image.height) // 2), image)
         except OSError:  # 读不了的图留白，标签照标
             pass

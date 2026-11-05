@@ -1001,41 +1001,61 @@ class LifeConfig(PluginConfigBase):
 
 
 class DecisionConfig(PluginConfigBase):
-    """决策模型：Jev、vLLM-SR Decision 这类只回概率、不写文字的模型，用来做快速判断；目前用来决定要不要提醒麦麦按表情或发贴图。"""
+    """決策模型：Jev、vLLM-SR Decision 這類只回機率、不寫文字的模型，用來判斷這則訊息要用文字、表情還是兩者回應。挑哪張表情不用模型，用 MaiBot 表情庫描述的向量相似度。"""
 
-    __ui_label__: ClassVar[str] = "决策模型"
+    __ui_label__: ClassVar[str] = "決策模型"
     __ui_order__: ClassVar[int] = 5
 
     enabled: bool = Field(
         default=False,
-        description="开启后每次思考先问决策模型这轮值不值得用表情表态，取代「主动表情机率」的随机提醒；请求失败时自动退回随机。",
-        json_schema_extra={"label": "启用决策模型", "order": 0, "hint": "每轮多约 0.2～1 秒；聊天内容会送到决策模型的服务商。"},
+        description=(
+            "收到新訊息後第一次進 planner 時，先問決策模型這則該怎麼回應：只要文字、文字＋附圖、只按表情或只發圖。"
+            "開啟後表情一律由這裡決定，planner 拿不到 discord_emote 和 MaiBot 的 send_emoji；請求失敗的那輪 planner 照舊自己決定。"
+        ),
+        json_schema_extra={"label": "啟用決策模型", "order": 0, "hint": "最近幾則聊天會送到決策模型的服務商；只送文字。"},
     )
     base_url: str = Field(
         default="https://app.vllm-sr.ai",
-        description="System One 接口的网址，不含 /v1/systemone。",
+        description="System One 介面的網址，不含 /v1/systemone。",
         json_schema_extra={
-            "label": "API 地址",
+            "label": "API 位址",
             "order": 1,
-            "hint": "vLLM-SR Decision（有免费额度）：https://app.vllm-sr.ai；Jev：https://api.typesafe.ai",
+            "hint": "vLLM-SR Decision（有免費額度）：https://app.vllm-sr.ai；Jev：https://api.typesafe.ai",
         },
     )
     api_key: str = Field(
         default="",
-        description="决策模型服务商的 API Key。",
+        description="決策模型服務商的 API Key。",
         json_schema_extra={"label": "API Key", "input_type": "password", "order": 2},
     )
     model: str = Field(
         default="vllm-sr/d3-flash",
-        description="模型名称。",
-        json_schema_extra={"label": "模型", "order": 3, "hint": "vLLM-SR：vllm-sr/d3-flash；Jev：jev-latest"},
+        description="模型名稱。",
+        json_schema_extra={"label": "模型", "order": 3, "hint": "vLLM-SR：vllm-sr/d3-flash 或 d3-ultra；Jev：jev-latest"},
+    )
+    quick_enabled: bool = Field(
+        default=True,
+        description=(
+            "決策模型判斷最新那則只需要快速表態（按個表情或回一張圖）時，直接替她做，這輪 planner 只能結束不說話。"
+            "@ 她、回覆她、私訊和語音轉文字的訊息不會這樣做。"
+        ),
+        json_schema_extra={
+            "label": "純快速反應",
+            "order": 4,
+            "hint": "MaiBot 不讓插件跳過 planner，所以那次 planner 請求仍會發生，只是只能結束。",
+        },
+    )
+    append_enabled: bool = Field(
+        default=True,
+        description="決策模型判斷適合「文字回覆＋一張圖」時，等她的文字送出後自動附一張符合情緒的表情或貼圖。",
+        json_schema_extra={"label": "回覆後附圖", "order": 5},
     )
     emote_threshold: float = Field(
         default=0.5,
         ge=0,
         le=1,
-        description="决策模型认为值得表态的机率高过这个值才提醒麦麦；越高越少按。",
-        json_schema_extra={"label": "表情门槛", "order": 4, "step": 0.05},
+        description="決策模型選的情境機率要高過這個值才照做，否則當成只要文字回覆；越高越少用表情。",
+        json_schema_extra={"label": "表情情境門檻", "order": 6, "step": 0.05},
     )
 
 

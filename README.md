@@ -92,7 +92,7 @@ STT:
 
 设置页「聊天与过滤」标签里：
 
-- **决策模型**：接 [vLLM-SR Decision](https://app.vllm-sr.ai)（有免费额度）或 [Jev](https://api.typesafe.ai) 这类只回概率的模型，两家都是 `POST /v1/systemone`，填 API 地址、Key 和模型名即可切换。开启后每次思考先问它最新那则值不值得用表情表态、按 reaction 还是发贴图/表情包，过了「表情门槛」才提醒麦麦；最后发不发仍由麦麦决定。请求失败时退回「主动表情机率」的随机提醒。决策模型不是聊天模型，没办法放进 MaiBot 原生的模型管理。「DC生活 → 決策模型」页面能看今天的判断次数、提醒率、采纳率（提醒后 3 分钟内她有按表情或发贴图/表情包）、平均延迟、近 14 天走势和最近 50 次判断，也能测试连线、清除统计；纪录存在插件数据目录的 `decision_stats.json`。
+- **決策模型**：接 [vLLM-SR Decision](https://app.vllm-sr.ai)（有免費額度）或 [Jev](https://api.typesafe.ai) 這類只回機率的模型，兩家都是 `POST /v1/systemone`，填 API 位址、Key 和模型名就能切換。收到新訊息後第一次進 planner 時，問它這則該用「只要文字」「文字＋附圖」「只按表情」還是「只發圖」回應，以及要表達什麼情緒；開啟後表情一律由這裡決定，planner 拿不到 `discord_emote` 和 MaiBot 的 `send_emoji`。只按表情／只發圖會直接替她做，那輪 planner 只能結束（MaiBot 不讓插件跳過 planner；@ 她、回覆她、私訊和語音轉文字的訊息不會這樣做）；文字＋附圖會等她的回覆送完再附一張。挑哪張不經過 LLM：用 MaiBot 的 embedding 模型算表情庫描述的向量（收過的 Discord 表情與貼圖會自動換回原生的），照「情緒＋相關文字」從最接近的前三名隨機挑；向量失敗時改用 MaiBot 照情緒標籤挑。請求失敗的那輪 planner 照舊自己決定。「DC生活 → 決策模型」頁面能看每天的判斷與送出、近 14 天走勢和最近紀錄，也能測試連線、清除統計；紀錄存在插件資料目錄的 `decision_stats.json`，向量快取在 `emote_vectors.json`。
 - **输出转繁体**：用 OpenCC 把发到 Discord 的文字（含语音播报、修改消息）转成繁体，`s2twp` 会一起换成台湾用语；网址不转，MaiBot 自己的聊天记录不变。需要 `pip install opencc`。
 
 ---

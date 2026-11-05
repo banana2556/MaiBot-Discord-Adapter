@@ -386,14 +386,15 @@ class DiscordMessageHandler:
         return False
 
     async def _fetch_emoji_bytes(self, url: str, size: Optional[int] = 48) -> Optional[str]:
-        """下载自定义表情、贴纸或嵌入预览图，返回 base64；超过大小上限或失败时返回 None。
+        """下載自訂表情、貼圖或嵌入預覽圖，回傳 base64；超過大小上限或失敗時回傳 None。
 
-        ``size`` 为 None 时不加尺寸参数（非表情 CDN 的图片）。
+        ``size`` 為 None 時不加尺寸參數（非表情 CDN 的圖片）。
         """
         try:
             timeout = aiohttp.ClientTimeout(total=10)
-            # Discord CDN 的表情与贴纸支持 ?size= 指定边长（16 到 4096 的 2 的幂），
-            # 直接取小图，避免下载原图再上传时比原生表情大。
+            # Discord CDN 的表情與貼圖支援 ?size= 指定邊長（16 到 4096 的 2 的冪）。
+            # 收到的表情維持 48px 不要改：MaiBot 表情庫用圖片雜湊去重，改尺寸會把每個表情再收一次；
+            # 低於 64px 時 MaiBot 識別前會自己整數倍放大，只是會印一行提示。
             request_url = url if size is None else url + (("&" if "?" in url else "?") + f"size={size}")
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(request_url) as resp:

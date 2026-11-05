@@ -60,7 +60,11 @@
     "component.disable",
     "knowledge.search",
     "personality.get_current",
-    "frequency.set_adjust"
+    "frequency.set_adjust",
+    "emoji.get_all",
+    "emoji.get_count",
+    "emoji.get_by_description",
+    "llm.embed"
   ],
   "i18n": {
     "default_locale": "zh-CN",
