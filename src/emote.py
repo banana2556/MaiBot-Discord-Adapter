@@ -1,19 +1,31 @@
-"""表情：決定這則訊息要用文字、文字＋附圖、只按表情還是只發圖回應，並挑表情送出。
+"""表情：planner 啟動時判斷這輪要用文字、文字＋附圖、只按表情還是只發圖參與群聊，並挑表情送出。
 
-- 收到新的 Discord 訊息後第一次進 planner 時，問決策模型這則屬於哪種情境、該表達什麼情緒（一次請求兩題）。
-  決策模型開著且回答成功時，表情一律由這裡處理，planner 拿不到 discord_emote 和 MaiBot 的 send_emoji。
-- 只按表情／只發圖：替她做，這輪 planner 只留 stop（MaiBot 不讓插件跳過 planner）。
-- 文字＋附圖：等她的文字送出、停 APPEND_DELAY_SECONDS 秒沒再送，再附一張圖（回覆可能被拆成好幾則）。
-- 挑哪張用 MaiBot 表情庫描述的向量相似度（EmoteLibrary），從前 TOP_CANDIDATES 名隨機挑，不經過 LLM。
-- 決策模型沒開或那輪請求失敗：planner 照舊有 discord_emote 工具，偶爾照 chat.emote_chance 提醒它。
+- 收到新的 Discord 訊息後第一次進 planner 時，拿 planner 這輪看到的同一份上下文（hook 的 items），
+  取最後 TARGET_CANDIDATES 則別人的訊息當可以表態的對象，一次問決策模型：情境、最值得表態的是哪一則、什麼情緒。
+  群聊裡真正好笑的那則常常已經被別人接了幾句，所以表態對象不一定是最新一則。
+- 不動 planner 的工具：拿掉工具時 planner 會把回覆或表情直接寫在自己的正文裡，打亂 reply / replyer 的流程。
+  決策結果只用一句系統提示告訴 planner 已經做了什麼、這輪該怎麼收尾。
+- 只按表情／只發圖：替她做，並提醒 planner 這輪不用再說話（MaiBot 不讓插件跳過 planner）；
+  多久表態一次由 planner 的啟動頻率決定。
+- 文字＋附圖：等她的文字送出、停 APPEND_DELAY_SECONDS 秒沒再送，再附一張圖（回覆可能被拆成好幾則），
+  並提醒 planner 不用自己發表情。
+- 挑哪張用 MaiBot 表情庫描述的向量相似度（EmoteLibrary），不經過 LLM：排除這個聊天最近用過的，
+  再從前 PICK_POOL 名照相似度加權抽一張，免得每次都發同一張。
+- 決策模型沒開時偶爾照 chat.emote_chance 提醒 planner 可以用 discord_emote；那個工具挑圖一樣用向量，不經過 LLM。
 """
 
 import asyncio
+import base64
+import hashlib
+import html
+import math
 import random
+import re
 import time
+from collections import OrderedDict, deque
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import discord
 from maibot_sdk import API, HookHandler, Tool
@@ -21,21 +33,27 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import ask as ask_decision
-from .life.common import readable_chat, short_time
+from .life.common import short_time
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
     "【表情】這一輪如果有值得表態的訊息（好笑、好消息、附和、驚訝、無語），"
     "可以用 discord_emote 在那則訊息按個 reaction；可以和 reply 同一輪一起呼叫，也可以只按表情不說話。沒有合適的就略過。"
 )
-# 決策模型負責時從 planner 拿掉的工具：這兩個都是「要不要發表情或貼圖」，留著就變成兩套決定
-EMOTE_TOOLS = {"discord_emote", "send_emoji"}
-QUICK_NOTE = "【表情】你已經用{what}回應了最新那則訊息，這輪不用再說話，直接呼叫 stop()。"
+# 決策結果用系統提示告訴 planner；不動它的工具
+QUICK_NOTE = (
+    "【表情】你已經用{what}回應了「{user}」那則訊息，也不要再發表情或貼圖。"
+    "如果沒有人在問你或叫你，這輪就不用再說話，直接呼叫 stop() 結束。"
+)
+QUICK_ADDRESSED_NOTE = (
+    "【表情】你已經用{what}回應了「{user}」那則訊息，不要再發表情或貼圖。有人在跟你說話，需要的話照常回覆。"
+)
+APPEND_NOTE = "【表情】這輪你回覆送出後，會自動附上一張符合情緒的表情或貼圖，你不用自己發表情或貼圖。"
 SCENES = {
-    "text": "只需要用文字回應：在聊話題、在問問題、要給意見或資訊，或在跟你說話",
-    "text_emote": "用文字回應，說完再附一張表情或貼圖讓語氣更生動",
-    "quick_reaction": "不用說話，在這則訊息上按個表情就好：附和、按讚、收到、小小的好笑或驚訝",
-    "quick_sticker": "不用說話，回一張表情或貼圖就好：很好笑、情緒很強烈，用圖比打字自然",
+    "text": "用文字參與：在聊話題、有人在問問題或在跟你說話、要給意見或資訊",
+    "text_emote": "用文字參與，說完再附一張表情或貼圖讓語氣更生動",
+    "quick_reaction": "不用說話，在某則訊息上按個表情就好：附和、按讚、跟著大家笑、小小的驚訝",
+    "quick_sticker": "不用說話，回一張表情或貼圖就好：現在的話題很好笑或情緒很強烈，用圖比打字自然",
 }
 SCENE_LABELS = {
     "text": "只要文字",
@@ -60,27 +78,76 @@ EMOTIONS = {
 }
 SCENE_QUESTION = {
     "type": "choice",
-    "instructions": "看聊天紀錄的最後一則訊息：你要怎麼回應它最自然？",
+    "instructions": "看最近的群聊，你這輪要怎麼參與最自然？快速表態可以針對前面任何一則 # 訊息，不一定是最新的。",
     "criteria": SCENES,
 }
+TARGET_INSTRUCTIONS = "如果要按表情或發圖表態，最值得回應的是哪一則 # 訊息？真正好笑或有梗的那則，常常已經被別人接了幾句。"
 EMOTION_QUESTION = {
     "type": "choice",
-    "instructions": "回應最後一則訊息時，你最想表達的情緒是哪一個？",
+    "instructions": "表態或回應時，你最想表達的情緒是哪一個？",
     "criteria": EMOTIONS,
 }
 SEND_KIND_LABELS = {"reaction": "按表情", "sticker": "只發圖", "append": "回覆後附圖", "tool": "planner 工具"}
 # 頁面「測試連線」送的範例聊天
-DECISION_TEST_STATE = "你是「麥麥」，在 Discord 上跟大家聊天。最新一則沒有 @ 你。\n\n[12:00] 小明说：我終於抽到限定角色了！！！"
-# 問決策模型時帶最近多久、最多幾則聊天
-EMOTE_CONTEXT_HOURS = 1
-EMOTE_CONTEXT_MESSAGES = 8
-# 決策結果在同一回合後面的 planner 請求還有效多久（期間 planner 拿不到 discord_emote）
-SCENE_TTL = timedelta(minutes=2)
+DECISION_TEST_TARGETS = {"1": "「小明」：我終於抽到限定角色了！！！", "2": "「阿華」：笑死 歐皇", "3": "「小美」：羨慕"}
+DECISION_TEST_STATE = "你是「麥麥」，在 Discord 群組聊天。上次之後沒有人 @ 你。\n\n最近的群聊（越下面越新，# 是可以表態的訊息）：\n" + "\n".join(
+    f"#{number} {text}" for number, text in DECISION_TEST_TARGETS.items()
+)
+# 給決策模型看的群聊：planner 上下文的最後幾則；其中最後幾則別人的訊息可以當表態對象
+CONTEXT_MESSAGES = 15
+TARGET_CANDIDATES = 8
+# 發圖不能指定回覆哪一則，表態對象不是最後這幾則別人的訊息時改成按在那則上，免得群組看不懂
+STICKER_RECENT = 2
+# MaiBot 的暱稱與別名（bot.nickname / bot.alias_names）多久重讀一次，用來判斷訊息是不是在叫她
+BOT_NAMES_REFRESH_SECONDS = 600
+# 每個聊天記住最近幾則收到的訊息（planner 上下文裡只有 msg_id 別名，靠這裡換回 Discord 訊息 ID）
+INBOUND_REMEMBERED = 60
 # 回覆後附圖：她的文字最後一則送出後等幾秒；決定附圖後多久內沒回覆就作廢
 APPEND_DELAY_SECONDS = 1.5
 APPEND_TTL = timedelta(minutes=2)
-# 向量排序後從前幾名隨機挑，免得每次都發同一張
-TOP_CANDIDATES = 3
+# 挑表情：向量排序取前 PICK_POOL 名，越接近越容易抽中（溫度越小越偏向最接近的）；
+# 同一個聊天最近 RECENT_PICKS 次用過的先排除，剩不到 MIN_FRESH 個才放回來
+PICK_POOL = 8
+PICK_TEMPERATURE = 0.05
+RECENT_PICKS = 10
+MIN_FRESH = 3
+
+_MESSAGE_HEAD = re.compile(r'<message ((?:[\w-]+="[^"]*"\s*)*)>\n?')
+_ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+
+
+def display_message_id(message_id: str) -> str:
+    """MaiBot planner 上下文裡顯示的 msg_id：超過 12 字元的 ID 換成 ``m`` + 6 位 base32 雜湊。
+
+    照抄 MaiBot ``maisaka/context/message_id_alias.py``（2026-10-02 起）；改了的話這裡也要跟著改，有測試釘住。
+    """
+    if len(message_id) <= 12:
+        return message_id
+    return "m" + base64.b32encode(hashlib.sha1(message_id.encode("utf-8")).digest()).decode("ascii").lower()[:6]
+
+
+def planner_messages(items: Any) -> List[Dict[str, Any]]:
+    """從 planner hook 的 items 取出聊天訊息：每則一個 item，第一段文字開頭是 ``<message msg_id=… user=…>``。"""
+    messages: List[Dict[str, Any]] = []
+    for item in items if isinstance(items, list) else []:
+        parts = item.get("parts") if isinstance(item, dict) else None
+        parts = parts if isinstance(parts, list) else []
+        texts = [part.get("text") or "" for part in parts if isinstance(part, dict) and part.get("type") == "text"]
+        head = _MESSAGE_HEAD.match(texts[0]) if texts else None
+        if head is None:
+            continue
+        attributes = {key: html.unescape(value) for key, value in _ATTRIBUTE.findall(head.group(1))}
+        images = sum(1 for part in parts if isinstance(part, dict) and part.get("type") == "image")
+        content = (texts[0][head.end() :] + "".join(texts[1:])).strip() + " [圖片]" * images
+        messages.append(
+            {
+                "msg_id": attributes.get("msg_id", ""),
+                "user": attributes.get("group_card") or attributes.get("user", ""),
+                "self": attributes.get("is_self_message") == "true",
+                "text": " ".join(content.split())[:120],
+            }
+        )
+    return messages
 
 
 def tool_names(kwargs: Mapping[str, Any]) -> set[str]:
@@ -91,10 +158,6 @@ def tool_names(kwargs: Mapping[str, Any]) -> set[str]:
         for tool in (tools if isinstance(tools, list) else [])
         if isinstance(tool, dict)
     }
-
-
-def _keep_tools(kwargs: Dict[str, Any], keep: Any) -> None:
-    kwargs["tool_definitions"] = [tool for tool in kwargs["tool_definitions"] if keep(tool_names({"tool_definitions": [tool]}))]
 
 
 def _avg(total: int, count: int) -> int:
@@ -108,33 +171,55 @@ class EmoteMixin:
     def _init_emote_state(self) -> None:
         # 有新的 Discord 訊息、還沒問過決策模型的聊天；一回合 planner 會請求好幾次，只有第一次問
         self._emote_unjudged: set[str] = set()
-        # 每個聊天最新一則 Discord 訊息的摘要（目標訊息 ID、有沒有在跟她說話）
+        # 每個聊天最近收到的訊息：msg_id（別名與原始 ID 都記）-> 原始 ID、有沒有在跟她說話、是不是語音轉文字
+        self._inbound: Dict[str, "OrderedDict[str, Dict[str, Any]]"] = {}
+        # 每個聊天最新一則的頻道與發話人，送出時找頻道和訊息用
         self._latest_inbound: Dict[str, Dict[str, Any]] = {}
-        # 決策成功的聊天 -> 結果有效到何時；期間 planner 拿不到 discord_emote
-        self._emote_scene: Dict[str, datetime] = {}
+        # 上次問決策模型的時間（time.monotonic）；之後收到的才算「新訊息」
+        self._judged_at: Dict[str, float] = {}
         self._pending_append: Dict[str, Dict[str, Any]] = {}
         self._append_tasks: Dict[str, asyncio.Task[None]] = {}
         # 只按表情／只發圖的背景任務；要留著引用，沒人引用的 Task 可能被回收
         self._emote_tasks: set[asyncio.Task[None]] = set()
+        # 每個聊天最近挑過的表情 key，下次先排除
+        self._recent_picks: Dict[str, "deque[str]"] = {}
+        # MaiBot 設定的暱稱與別名，和它的「被提及必回覆」用同一份
+        self._bot_names: List[str] = []
+        self._bot_names_at = 0.0
 
     # ===== 收訊與 planner =====
 
     def _remember_inbound(self, session_id: str, message: Mapping[str, Any]) -> None:
-        """chat.receive 時記下最新一則，給決策和只按表情用。"""
+        """chat.receive 時記下這則：之後在 planner 上下文裡看到它的 msg_id，才換得回 Discord 訊息。"""
         info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
         extra = info.get("additional_config") if isinstance(info.get("additional_config"), Mapping) else {}
         group = info.get("group_info") if isinstance(info.get("group_info"), Mapping) else {}
         user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
+        message_id = str(message.get("message_id") or "")
+        text = str(message.get("processed_plain_text") or "")
         self._emote_unjudged.add(session_id)
         self._latest_inbound[session_id] = {
-            "message_id": str(message.get("message_id") or ""),
             "group_id": str(group.get("group_id") or ""),
             "user_id": str(user.get("user_id") or ""),
-            # 私訊一定是在跟她說話
-            "addressed": bool(extra.get("discord_mentions_bot")) or not group,
-            "voice": bool(extra.get("discord_voice_output")),
-            "text": str(message.get("processed_plain_text") or "")[:200],
         }
+        if not message_id:
+            return
+        entry = {
+            "id": message_id,
+            # 和 MaiBot 判斷「被提及」一樣：@ 她（含回覆時的提醒）、私訊，或提到她的暱稱、別名
+            "addressed": bool(extra.get("discord_mentions_bot"))
+            or not group
+            or any(name in text for name in self._bot_names),
+            "voice": bool(extra.get("discord_voice_output")),
+            "at": time.monotonic(),
+        }
+        remembered = self._inbound.setdefault(session_id, OrderedDict())
+        # 新版 MaiBot 顯示別名，舊版顯示原始 ID，兩個都記
+        for key in {display_message_id(message_id), message_id}:
+            remembered[key] = entry
+            remembered.move_to_end(key)
+        while len(remembered) > INBOUND_REMEMBERED * 2:
+            remembered.popitem(last=False)
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -144,7 +229,7 @@ class EmoteMixin:
         timeout_ms=5000,
     )
     async def decide_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """新訊息後第一次進 planner 時問決策模型；成功時表情由插件處理，planner 拿不到 discord_emote 和 send_emoji。"""
+        """新訊息後第一次進 planner 時問決策模型；結果用系統提示告訴 planner，不動它的工具。"""
         # 沒有這個工具：不是 Discord 聊天，或睡覺時段只剩 stop
         if "discord_emote" not in tool_names(kwargs):
             return {"action": "continue"}
@@ -155,113 +240,171 @@ class EmoteMixin:
             if random.random() < settings.chat.emote_chance:
                 return self._append_system_text(kwargs, EMOTE_NUDGE)
             return {"action": "continue"}
-
-        scene = None
-        if session_id in self._emote_unjudged:
-            self._emote_unjudged.discard(session_id)
-            scene = await self._decide_scene(decision, session_id)
-            if scene is None:
-                # 請求失敗：這回合 planner 照舊有 discord_emote，自己決定
-                self._emote_scene.pop(session_id, None)
-                return {"action": "continue"}
-            self._emote_scene[session_id] = datetime.now() + SCENE_TTL
-        elif datetime.now() > self._emote_scene.get(session_id, datetime.min):
-            # 沒有新訊息的回合（主動話題、提醒、逾時）或決策失敗：planner 照舊自己決定
+        # 同一回合後面的請求、沒有新訊息的回合（主動話題、提醒、逾時）不問
+        if session_id not in self._emote_unjudged:
             return {"action": "continue"}
+        self._emote_unjudged.discard(session_id)
+        outcome = await self._decide_scene(decision, session_id, planner_messages(kwargs.get("items")))
+        if outcome is None or outcome["scene"] == "text":
+            return {"action": "continue"}
+        if outcome["scene"] == "text_emote":
+            return self._append_system_text(kwargs, APPEND_NOTE)
+        what = "表情" if outcome["scene"] == "quick_reaction" else "一張圖"
+        note = QUICK_ADDRESSED_NOTE if outcome["addressed"] else QUICK_NOTE
+        return self._append_system_text(kwargs, note.format(what=what, user=outcome["target"]["user"]))
 
-        _keep_tools(kwargs, lambda names: not names & EMOTE_TOOLS)
-        if scene in ("quick_reaction", "quick_sticker"):
-            _keep_tools(kwargs, lambda names: names == {"stop"})
-            self._append_system_text(kwargs, QUICK_NOTE.format(what="表情" if scene == "quick_reaction" else "一張圖"))
-        return {"action": "continue", "modified_kwargs": kwargs}
+    async def _decide_scene(
+        self, decision: Any, session_id: str, messages: Sequence[Mapping[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """問決策模型情境、表態對象與情緒，套上安全條件；只按表情／只發圖在背景送出，文字＋附圖記下等她回完。
 
-    async def _decide_scene(self, decision: Any, session_id: str) -> Optional[str]:
-        """問決策模型情境與情緒，套上安全條件；只按表情／只發圖在背景送出，文字＋附圖記下等她回完。"""
+        Returns:
+            ``{"scene", "target", "addressed"}``；planner 上下文裡沒有可以表態的訊息或請求失敗時回傳 None。
+        """
         now = datetime.now()
-        chat = await readable_chat(
-            self.ctx, session_id, now - timedelta(hours=EMOTE_CONTEXT_HOURS), now, EMOTE_CONTEXT_MESSAGES
-        )
-        if not chat:
-            self.ctx.logger.info(f"表情決策 [{session_id}]：最近一小時讀不到聊天紀錄，這輪 planner 自己決定")
+        remembered = self._inbound.get(session_id, {})
+        window = list(messages)[-CONTEXT_MESSAGES:]
+        # 能表態的：別人說的、換得回 Discord 訊息、不是語音轉文字；取最後幾則
+        targets = [
+            message
+            for message in window
+            if not message["self"] and message["msg_id"] in remembered and not remembered[message["msg_id"]]["voice"]
+        ][-TARGET_CANDIDATES:]
+        if not targets:
+            self.ctx.logger.info(f"表情決策 [{session_id}]：planner 上下文裡沒有可以表態的訊息，這輪 planner 自己決定")
             return None
-        latest = self._latest_inbound.get(session_id, {})
-        addressed = "是在跟你說話（@ 你、回覆你或私訊）" if latest.get("addressed") else "沒有 @ 你"
-        state = f"你是「{self._bot_name()}」，在 Discord 上跟大家聊天。最新一則{addressed}。\n\n聊天紀錄（最後一則是最新的）：\n{chat}"
+        numbers = {id(message): str(index) for index, message in enumerate(targets, 1)}
+        reactions = self._reaction_summaries([remembered[message["msg_id"]]["id"] for message in targets])
+        lines = []
+        for message in window:
+            if message["self"]:
+                lines.append(f"（你）：{message['text']}")
+                continue
+            number = numbers.get(id(message))
+            extra = reactions.get(remembered[message["msg_id"]]["id"], "") if number else ""
+            lines.append(f"{'#' + number + ' ' if number else ''}「{message['user']}」：{message['text']}{extra}")
+        judged_at = self._judged_at.get(session_id, 0.0)
+        self._judged_at[session_id] = time.monotonic()
+        addressed = any(entry["addressed"] and entry["at"] > judged_at for entry in remembered.values())
+        state = (
+            f"你是「{self._bot_name()}」，在 Discord 群組聊天。"
+            + ("上次之後有人 @ 你、回覆你或私訊你。" if addressed else "上次之後沒有人 @ 你。")
+            + "\n\n最近的群聊（越下面越新，# 是可以表態的訊息）：\n"
+            + "\n".join(lines)
+        )
+        target_question = {
+            "type": "choice",
+            "instructions": TARGET_INSTRUCTIONS,
+            "criteria": {numbers[id(message)]: f"「{message['user']}」：{message['text']}" for message in targets},
+        }
         started = time.monotonic()
         answers = await ask_decision(
-            decision, state, {"scene": SCENE_QUESTION, "emotion": EMOTION_QUESTION}, self.ctx.logger
+            decision,
+            state,
+            {"scene": SCENE_QUESTION, "target": target_question, "emotion": EMOTION_QUESTION},
+            self.ctx.logger,
         )
         latency_ms = round((time.monotonic() - started) * 1000)
-        message = chat.splitlines()[-1][:200]
         scene_answer = (answers or {}).get("scene") or {}
         requested = str(scene_answer.get("choice") or "")
+        target_choice = str(((answers or {}).get("target") or {}).get("choice") or "")
+        valid = target_choice.isdigit() and 1 <= int(target_choice) <= len(targets)
+        index = int(target_choice) - 1 if valid else len(targets) - 1
+        target = {
+            **targets[index],
+            "id": remembered[targets[index]["msg_id"]]["id"],
+            "recent": index >= len(targets) - STICKER_RECENT,
+        }
+        summary = f"「{target['user']}」：{target['text']}"
         if requested not in SCENES:
             self.ctx.logger.warning(f"表情決策 [{session_id}]：沒拿到有效的情境，這輪 planner 自己決定")
-            self._decision_stats.record_decision(now, session_id, message, "failed", latency_ms)
+            self._decision_stats.record_decision(now, session_id, summary, "failed", latency_ms)
             return None
         probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}
         probability = float(probabilities.get(requested) or 0)
         emotion = str(((answers or {}).get("emotion") or {}).get("choice") or "")
         emotion = emotion if emotion in EMOTIONS else "開心"
-        scene = self._guard_scene(decision, requested, probability, latest)
+        scene = self._guard_scene(decision, requested, probability, target, session_id)
         self.ctx.logger.info(
-            f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，"
-            f"情緒「{emotion}」，門檻 {decision.emote_threshold:.2f}，{latency_ms} ms）"
+            f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{index + 1}/{len(targets)} {summary[:40]}"
+            f"（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，情緒「{emotion}」，"
+            f"門檻 {decision.emote_threshold:.2f}，{latency_ms} ms）"
         )
         self._decision_stats.record_decision(
-            now, session_id, message, scene, latency_ms, requested=requested, emotion=emotion, probability=probability
+            now, session_id, summary, scene, latency_ms, requested=requested, emotion=emotion, probability=probability
         )
         if scene in ("quick_reaction", "quick_sticker"):
-            task = asyncio.create_task(self._quick_send(session_id, scene, emotion, latest))
+            task = asyncio.create_task(self._quick_send(session_id, scene, emotion, target))
             self._emote_tasks.add(task)
             task.add_done_callback(self._emote_tasks.discard)
         elif scene == "text_emote":
             self._pending_append[session_id] = {"emotion": emotion, "expires": now + APPEND_TTL, "reply": ""}
-        return scene
+        return {"scene": scene, "target": target, "addressed": addressed}
 
-    def _guard_scene(self, decision: Any, requested: str, probability: float, latest: Mapping[str, Any]) -> str:
-        """模型選的情境要過門檻；只按表情／只發圖還要不是在跟她說話、有地方按、有東西可發，否則降成文字＋附圖。"""
+    def _reaction_summaries(self, message_ids: Sequence[str]) -> Dict[str, str]:
+        """從 discord.py 的訊息快取讀別人已經按了什麼（不打 API），給決策模型當「大家都在笑哪則」的線索。"""
+        client = getattr(self._client_manager, "client", None)
+        wanted = set(message_ids)
+        summaries: Dict[str, str] = {}
+        for cached in getattr(client, "cached_messages", None) or []:
+            if str(cached.id) not in wanted or not cached.reactions:
+                continue
+            shown = "、".join(f"{reaction.emoji}×{reaction.count}" for reaction in cached.reactions[:4])
+            mine = "，你也按了" if any(reaction.me for reaction in cached.reactions) else ""
+            summaries[str(cached.id)] = f"（已有人按 {shown}{mine}）"
+        return summaries
+
+    def _guard_scene(
+        self,
+        decision: Any,
+        requested: str,
+        probability: float,
+        target: Mapping[str, Any],
+        session_id: str,
+    ) -> str:
+        """模型選的情境要過門檻；只按表情／只發圖還要有地方按、有東西可發，否則降成文字＋附圖。
+
+        有人在叫她時（例如「幫這則按個讚」）也照做，只是那輪 planner 照常可以說話，不會被限制成只能 stop。
+        """
         if requested == "text" or probability < decision.emote_threshold:
             return "text"
+        if requested == "quick_sticker" and not target["recent"]:
+            # 發圖不能指定回覆哪一則，對象是比較早的訊息時改成按在那則上
+            requested = "quick_reaction"
         if requested.startswith("quick_"):
-            guild = self._guild_of(latest.get("group_id"))
+            guild = self._guild_of(self._latest_inbound.get(session_id, {}).get("group_id"))
             usable = guild is not None and (
                 any(emoji.is_usable() for emoji in guild.emojis)
                 if requested == "quick_reaction"
                 else bool(guild.stickers or self._emote_library.entries)
             )
-            if (
-                decision.quick_enabled
-                and usable
-                and latest.get("message_id")
-                and not latest.get("addressed")
-                and not latest.get("voice")
-            ):
+            if decision.quick_enabled and usable:
                 return requested
             requested = "text_emote"
         return "text_emote" if decision.append_enabled else "text"
 
     # ===== 送出 =====
 
-    async def _quick_send(self, session_id: str, scene: str, emotion: str, latest: Mapping[str, Any]) -> None:
-        """只按表情：按在最新那則上；只發圖：在聊天裡發一張。背景執行，planner 不用等。"""
+    async def _quick_send(self, session_id: str, scene: str, emotion: str, target: Mapping[str, Any]) -> None:
+        """只按表情：按在表態對象上；只發圖：在聊天裡發一張。背景執行，planner 不用等。"""
         started = time.monotonic()
-        query = f"{emotion}：{latest.get('text') or ''}"
+        query = f"{emotion}：{target.get('text') or ''}"
         kind = "reaction" if scene == "quick_reaction" else "sticker"
+        latest = self._latest_inbound.get(session_id, {})
         picked, score, ok = "", 0.0, False
         try:
             guild = self._guild_of(latest.get("group_id"))
             if kind == "reaction":
-                target = await self._thread_routing.find_message(
-                    str(latest.get("message_id") or ""), str(latest.get("group_id") or ""), str(latest.get("user_id") or "")
+                message = await self._thread_routing.find_message(
+                    str(target.get("id") or ""), str(latest.get("group_id") or ""), str(latest.get("user_id") or "")
                 )
-                found = await self._pick_custom_emoji(guild, query) if target is not None else None
+                found = await self._pick_custom_emoji(guild, query, session_id) if message is not None else None
                 if found:
                     emoji, score = found
-                    await target.add_reaction(emoji)
+                    await message.add_reaction(emoji)
                     picked, ok = str(emoji), True
             else:
-                found_image = await self._pick_image(guild, query, emotion)
+                found_image = await self._pick_image(guild, query, emotion, session_id)
                 if found_image:
                     picked, image_b64, score = found_image
                     ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True))
@@ -305,7 +448,9 @@ class EmoteMixin:
         guild = self._guild_of(latest.get("group_id"))
         picked, score, ok = "", 0.0, False
         try:
-            found = await self._pick_image(guild, f"{pending['emotion']}：{pending['reply'][-200:]}", pending["emotion"])
+            found = await self._pick_image(
+                guild, f"{pending['emotion']}：{pending['reply'][-200:]}", pending["emotion"], session_id
+            )
             if found:
                 picked, image_b64, score = found
                 ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True))
@@ -323,58 +468,113 @@ class EmoteMixin:
 
     # ===== 挑表情（向量，不經過 LLM）=====
 
-    async def _pick_custom_emoji(self, guild: Any, query: str) -> Optional[Tuple[Any, float]]:
-        """從伺服器能用的自訂表情挑一個：有收進表情庫的用描述比，沒收過的只能用名稱比。"""
-        usable = [emoji for emoji in (guild.emojis if guild is not None else []) if emoji.is_usable()]
+    def _emoji_items(self, guild: Any) -> Dict[str, Tuple[Any, str]]:
+        """伺服器能用的自訂表情：key -> (表情, 比對用文字)；收進表情庫的用描述，沒收過的只有名稱。"""
+        return {
+            f"emoji:{emoji.id}": (emoji, self._emote_library.text_for(f"emoji:{emoji.id}") or emoji.name)
+            for emoji in (guild.emojis if guild is not None else [])
+            if emoji.is_usable()
+        }
+
+    def _sticker_items(self, guild: Any) -> Dict[str, Tuple[Any, str]]:
+        """伺服器能發的貼圖：key -> (貼圖, 比對用文字)；收進表情庫的用描述，沒收過的用名稱和說明。"""
+        return {
+            f"sticker:{sticker.id}": (
+                sticker,
+                self._emote_library.text_for(f"sticker:{sticker.id}") or f"{sticker.name}：{sticker.description or ''}",
+            )
+            for sticker in (guild.stickers if guild is not None else [])
+            if sticker.available and sticker.format != discord.StickerFormatType.lottie
+        }
+
+    async def warm_emote_vectors(self) -> None:
+        """背景先算好表情庫和各伺服器表情、貼圖的向量，第一次挑圖不用現算（refresh 自己限制頻率）；順便重讀她的名字。"""
+        await self._refresh_bot_names()
+        await self._emote_library.refresh()
+        for guild in getattr(getattr(self._client_manager, "client", None), "guilds", None) or []:
+            items = {**self._emoji_items(guild), **self._sticker_items(guild)}
+            await self._emote_library.ensure_vectors([(key, text) for key, (_, text) in items.items()])
+
+    async def _rank_fresh(
+        self, session_id: str, query: str, items: Sequence[Tuple[str, str]]
+    ) -> Optional[Tuple[str, float]]:
+        """排除這個聊天最近用過的（剩不到 MIN_FRESH 個時才放回來），向量排序後照相似度加權抽一個。
+
+        Returns:
+            ``(key, 相似度)``；embedding 失敗時回傳 None。
+        """
+        recent = self._recent_picks.setdefault(session_id, deque(maxlen=RECENT_PICKS))
+        fresh = [item for item in items if item[0] not in recent]
+        ranked = await self._emote_library.rank(query, fresh if len(fresh) >= MIN_FRESH else items, top=PICK_POOL)
+        if not ranked:
+            return None
+        best = ranked[0][1]
+        weights = [math.exp((score - best) / PICK_TEMPERATURE) for _, score in ranked]
+        key, score = random.choices(ranked, weights=weights, k=1)[0]
+        recent.append(key)
+        return key, score
+
+    async def _pick_custom_emoji(self, guild: Any, query: str, session_id: str) -> Optional[Tuple[Any, float]]:
+        """從伺服器能用的自訂表情挑一個。"""
+        await self._emote_library.refresh()
+        usable = self._emoji_items(guild)
         if not usable:
             return None
-        await self._emote_library.refresh()
-        items = [(f"emoji:{emoji.id}", self._emote_library.text_for(f"emoji:{emoji.id}") or emoji.name) for emoji in usable]
-        ranked = await self._emote_library.rank(query, items, top=TOP_CANDIDATES)
-        if not ranked:
+        picked = await self._rank_fresh(session_id, query, [(key, text) for key, (_, text) in usable.items()])
+        if picked is None:
             self.ctx.logger.warning("表情向量排序失敗，改成隨機挑一個伺服器表情")
-            return random.choice(usable), 0.0
-        key, score = random.choice(ranked)
-        by_key = {f"emoji:{emoji.id}": emoji for emoji in usable}
-        return by_key[key], score
+            return random.choice([emoji for emoji, _ in usable.values()]), 0.0
+        key, score = picked
+        return usable[key][0], score
 
-    async def _pick_image(self, guild: Any, query: str, emotion: str) -> Optional[Tuple[str, str, float]]:
+    async def _pick_image(
+        self, guild: Any, query: str, emotion: str, session_id: str
+    ) -> Optional[Tuple[str, str, float]]:
         """從 MaiBot 表情庫和這個伺服器的貼圖挑一張，回傳 ``(名稱, 圖片 base64, 相似度)``。
 
         表情庫裡的 Discord 表情與貼圖送出時會自動換回原生的；沒收過的伺服器貼圖用名稱和說明比，選中時才下載。
         """
         await self._emote_library.refresh()
         library = {entry["key"]: entry for entry in self._emote_library.entries}
-        stickers = {
-            f"sticker:{sticker.id}": sticker
-            for sticker in (guild.stickers if guild is not None else [])
-            if sticker.available and sticker.format != discord.StickerFormatType.lottie
-        }
+        stickers = self._sticker_items(guild)
         items = [(key, entry["text"]) for key, entry in library.items()]
-        items += [
-            (key, f"{sticker.name}：{sticker.description or ''}") for key, sticker in stickers.items() if key not in library
-        ]
+        items += [(key, text) for key, (_, text) in stickers.items() if key not in library]
         if not items:
             return None
-        ranked = await self._emote_library.rank(query, items, top=TOP_CANDIDATES)
-        if not ranked:
+        picked = await self._rank_fresh(session_id, query, items)
+        if picked is None:
             # embedding 失敗：改用 MaiBot 自己照情緒標籤挑的方式
             self.ctx.logger.warning("表情向量排序失敗，改用 MaiBot 表情庫照情緒挑")
             found = await self.ctx.emoji.get_by_description(emotion)
             found = found.get("emoji") if isinstance(found, dict) and "success" in found else found
             return (emotion, str(found["base64"]), 0.0) if isinstance(found, dict) and found.get("base64") else None
-        key, score = random.choice(ranked)
+        key, score = picked
         if key in library:
             entry = library[key]
-            sticker = stickers.get(key)
+            sticker = stickers.get(key, (None, ""))[0]
             return (sticker.name if sticker is not None else entry["text"][:20]), entry["b64"], score
-        sticker = stickers[key]
+        sticker = stickers[key][0]
         image_b64 = await self._message_handler._fetch_emoji_bytes(str(sticker.url), size=256)
         if not image_b64:
             return None
         # 發送鏈路只收圖片：先登記這張圖，出站時 DiscordContentBuilder 會換回原生貼圖
         self._native_emoji.remember(image_b64, "sticker", sticker.id)
         return sticker.name, image_b64, score
+
+    async def _refresh_bot_names(self) -> None:
+        """讀 MaiBot 的 bot.nickname 和 bot.alias_names；讀不到就沿用上次的。"""
+        if self._bot_names and time.monotonic() - self._bot_names_at < BOT_NAMES_REFRESH_SECONDS:
+            return
+        self._bot_names_at = time.monotonic()
+        names: List[str] = []
+        for key in ("bot.nickname", "bot.alias_names"):
+            value = await self.ctx.config.get(key)
+            # SDK 成功時把 {"value": …} 拆開；失敗回 dict
+            value = value.get("value") if isinstance(value, dict) else value
+            names += [value] if isinstance(value, str) else list(value or []) if isinstance(value, list) else []
+        names = [name.strip() for name in names if isinstance(name, str) and name.strip()]
+        if names:
+            self._bot_names = names
 
     def _guild_of(self, channel_id: Any) -> Any:
         client = getattr(self._client_manager, "client", None)
@@ -450,13 +650,13 @@ class EmoteMixin:
         label = self._EMOTE_FORMS[form]
         query = f"{str(feeling or '').strip() or '開心'}：{(target.content or '')[:200]}"
         if form == "sticker":
-            found_image = await self._pick_image(target.guild, query, str(feeling or "開心"))
+            found_image = await self._pick_image(target.guild, query, str(feeling or "開心"), stream_id)
             if not found_image:
                 return {"success": False, "error": f"沒有可用的{label}，沒有送出"}
             picked, image_b64, score = found_image
             sent = await self.ctx.send.emoji(image_b64, stream_id, sync_to_maisaka_history=True)
         else:
-            found = await self._pick_custom_emoji(target.guild, query)
+            found = await self._pick_custom_emoji(target.guild, query, stream_id)
             if not found:
                 return {"success": False, "error": f"本伺服器沒有可用的{label}，沒有送出"}
             emoji, score = found
@@ -569,14 +769,19 @@ class EmoteMixin:
         answers = await ask_decision(
             config,
             DECISION_TEST_STATE,
-            {"scene": SCENE_QUESTION, "emotion": EMOTION_QUESTION},
+            {
+                "scene": SCENE_QUESTION,
+                "target": {"type": "choice", "instructions": TARGET_INSTRUCTIONS, "criteria": DECISION_TEST_TARGETS},
+                "emotion": EMOTION_QUESTION,
+            },
             SimpleNamespace(warning=errors.append),
         )
         latency_ms = round((time.monotonic() - started) * 1000)
         scene = str(((answers or {}).get("scene") or {}).get("choice") or "")
         if scene in SCENES:
             emotion = str(((answers or {}).get("emotion") or {}).get("choice") or "—")
-            detail = f"{latency_ms} ms，範例判斷成「{SCENE_LABELS[scene]}」、情緒「{emotion}」"
+            target = str(((answers or {}).get("target") or {}).get("choice") or "—")
+            detail = f"{latency_ms} ms，範例判斷成「{SCENE_LABELS[scene]}」、對象 #{target}、情緒「{emotion}」"
             self._decision_stats.set_last_test(datetime.now(), True, detail)
             return {"ok": True, "detail": detail}
         detail = errors[-1] if errors else "回應裡沒有判斷結果，檢查模型名稱"

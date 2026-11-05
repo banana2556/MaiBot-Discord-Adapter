@@ -1009,8 +1009,8 @@ class DecisionConfig(PluginConfigBase):
     enabled: bool = Field(
         default=False,
         description=(
-            "收到新訊息後第一次進 planner 時，先問決策模型這則該怎麼回應：只要文字、文字＋附圖、只按表情或只發圖。"
-            "開啟後表情一律由這裡決定，planner 拿不到 discord_emote 和 MaiBot 的 send_emoji；請求失敗的那輪 planner 照舊自己決定。"
+            "收到新訊息後第一次進 planner 時，先問決策模型這輪該怎麼參與：只要文字、文字＋附圖、只按表情或只發圖。"
+            "結果只用一句提示告訴 planner，不會拿掉它的工具；請求失敗的那輪 planner 照舊自己決定。"
         ),
         json_schema_extra={"label": "啟用決策模型", "order": 0, "hint": "最近幾則聊天會送到決策模型的服務商；只送文字。"},
     )
@@ -1036,13 +1036,13 @@ class DecisionConfig(PluginConfigBase):
     quick_enabled: bool = Field(
         default=True,
         description=(
-            "決策模型判斷最新那則只需要快速表態（按個表情或回一張圖）時，直接替她做，這輪 planner 只能結束不說話。"
-            "@ 她、回覆她、私訊和語音轉文字的訊息不會這樣做。"
+            "決策模型判斷這輪只需要快速表態（在某則訊息按個表情或回一張圖）時，直接替她做，"
+            "並提醒 planner 沒人在問她的話這輪就不用再說話；有人 @ 她、回覆她、私訊或叫她暱稱和別名（和 MaiBot 判斷被提及用同一份）時照常可以回覆。"
         ),
         json_schema_extra={
             "label": "純快速反應",
             "order": 4,
-            "hint": "MaiBot 不讓插件跳過 planner，所以那次 planner 請求仍會發生，只是只能結束。",
+            "hint": "MaiBot 不讓插件跳過 planner，所以那次 planner 請求仍會發生；說不說話由 planner 決定。",
         },
     )
     append_enabled: bool = Field(

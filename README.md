@@ -92,7 +92,7 @@ STT:
 
 设置页「聊天与过滤」标签里：
 
-- **決策模型**：接 [vLLM-SR Decision](https://app.vllm-sr.ai)（有免費額度）或 [Jev](https://api.typesafe.ai) 這類只回機率的模型，兩家都是 `POST /v1/systemone`，填 API 位址、Key 和模型名就能切換。收到新訊息後第一次進 planner 時，問它這則該用「只要文字」「文字＋附圖」「只按表情」還是「只發圖」回應，以及要表達什麼情緒；開啟後表情一律由這裡決定，planner 拿不到 `discord_emote` 和 MaiBot 的 `send_emoji`。只按表情／只發圖會直接替她做，那輪 planner 只能結束（MaiBot 不讓插件跳過 planner；@ 她、回覆她、私訊和語音轉文字的訊息不會這樣做）；文字＋附圖會等她的回覆送完再附一張。挑哪張不經過 LLM：用 MaiBot 的 embedding 模型算表情庫描述的向量（收過的 Discord 表情與貼圖會自動換回原生的），照「情緒＋相關文字」從最接近的前三名隨機挑；向量失敗時改用 MaiBot 照情緒標籤挑。請求失敗的那輪 planner 照舊自己決定。「DC生活 → 決策模型」頁面能看每天的判斷與送出、近 14 天走勢和最近紀錄，也能測試連線、清除統計；紀錄存在插件資料目錄的 `decision_stats.json`，向量快取在 `emote_vectors.json`。
+- **決策模型**：接 [vLLM-SR Decision](https://app.vllm-sr.ai)（有免費額度）或 [Jev](https://api.typesafe.ai) 這類只回機率的模型，兩家都是 `POST /v1/systemone`，填 API 位址、Key 和模型名就能切換。收到新訊息後第一次進 planner 時，拿 planner 這輪看到的同一份群聊（最後 8 則別人的訊息當可以表態的對象，附上別人已經按的表情），問它這輪該用「只要文字」「文字＋附圖」「只按表情」還是「只發圖」參與、最值得表態的是哪一則（不一定是最新一則）、要表達什麼情緒；發圖的對象太早時改成按在那則上；結果只用一句提示告訴 planner，不會拿掉它的工具（拿掉時 planner 會把回覆直接寫在自己的正文裡，打亂 reply / replyer 的流程）。只按表情／只發圖會直接替她做，並提醒 planner 沒人在問她的話這輪就不用再說話（MaiBot 不讓插件跳過 planner）；「有沒有人在叫她」和 MaiBot 的被提及判斷一致：@ 她、回覆她、私訊，或提到 `bot.nickname` / `bot.alias_names` 裡的名字；文字＋附圖會等她的回覆送完再附一張，並提醒 planner 不用自己發表情。挑哪張不經過 LLM：用 MaiBot 的 embedding 模型算表情庫描述的向量（收過的 Discord 表情與貼圖會自動換回原生的），照「情緒＋相關文字」排除這個聊天最近 10 次用過的，再從最接近的前 8 名照相似度加權抽一張；向量失敗時改用 MaiBot 照情緒標籤挑。請求失敗的那輪 planner 照舊自己決定。「DC生活 → 決策模型」頁面能看每天的判斷與送出、近 14 天走勢和最近紀錄，也能測試連線、清除統計；紀錄存在插件資料目錄的 `decision_stats.json`，向量快取在 `emote_vectors.json`。
 - **输出转繁体**：用 OpenCC 把发到 Discord 的文字（含语音播报、修改消息）转成繁体，`s2twp` 会一起换成台湾用语；网址不转，MaiBot 自己的聊天记录不变。需要 `pip install opencc`。
 
 ---

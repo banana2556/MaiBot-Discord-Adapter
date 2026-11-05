@@ -165,9 +165,9 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
                 # ponytail: 睡觉时跳过整轮，错过的话题醒来后马上补发；要严格按时就改成睡觉时只推进 next_due
                 if settings.topics.enabled and self._topic_scout is not None and not sleeping:
                     self._spawn_daily_job("topics", partial(self._topic_scout.tick, now, settings.topics))
-                # 表情庫數量變了才重抓，新表情先算好向量（refresh 自己限制頻率）
+                # 表情庫數量變了才重抓；表情庫和各伺服器表情、貼圖先算好向量，第一次挑圖不用現算
                 if self._emote_library is not None:
-                    self._spawn_daily_job("emotes", self._emote_library.refresh)
+                    self._spawn_daily_job("emotes", self.warm_emote_vectors)
             except Exception:
                 self.ctx.logger.exception("日常轮询这一轮失败，下一轮再试")
 

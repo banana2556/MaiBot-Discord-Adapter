@@ -64,7 +64,8 @@
     "emoji.get_all",
     "emoji.get_count",
     "emoji.get_by_description",
-    "llm.embed"
+    "llm.embed",
+    "config.get"
   ],
   "i18n": {
     "default_locale": "zh-CN",
