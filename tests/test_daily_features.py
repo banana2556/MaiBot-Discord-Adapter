@@ -598,3 +598,19 @@ def test_voice_page_saves_only_filled_fields_and_reconnects(tmp_path) -> None:
 
     schema = plugin.get_webui_config_schema()
     assert set(schema["sections"]["voice"]["fields"]) == {"enabled", "tts_provider", "stt_provider"}
+
+
+def test_state_save_retries_when_windows_briefly_locks_the_file(tmp_path, monkeypatch) -> None:
+    common = _load_adapter_module("src.life.common")
+    real_replace, attempts = Path.replace, []
+
+    def flaky_replace(self, target):
+        attempts.append(target)
+        if len(attempts) < 3:
+            raise PermissionError("[WinError 5] 存取被拒")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    monkeypatch.setattr(common.time, "sleep", lambda _seconds: None)
+    common.save_state(tmp_path / "state.json", {"ok": True})
+    assert len(attempts) == 3 and common.load_state(tmp_path / "state.json") == {"ok": True}

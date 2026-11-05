@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import json
 import re
+import time
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
@@ -87,7 +88,15 @@ def load_state(path: Path) -> Dict[str, Any]:
 
 
 def save_state(path: Path, data: Dict[str, Any]) -> None:
-    # 先写临时文件再替换，写到一半崩溃也不会损坏已有状态
+    # 先寫暫存檔再替換，寫到一半當掉也不會弄壞原本的狀態
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    # ponytail: Windows 上防毒或索引程式剛好開著檔案時替換會被拒，最多同步等 0.2 秒再試
+    for attempt in range(5):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05)

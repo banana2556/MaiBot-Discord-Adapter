@@ -1,9 +1,9 @@
-from __future__ import annotations
+"""語音功能管理器。
 
-"""语音功能管理器。
-
-管理语音频道连接（固定/自动模式）、TTS 播放和 STT 识别。
+管理語音頻道連線（固定／自動模式）、TTS 播放和 STT 識別。
 """
+
+from __future__ import annotations
 
 import asyncio
 import io
@@ -910,21 +910,22 @@ class VoiceManager:
                     )
 
     async def _vad_deactivation_timer(self, user_id: int) -> None:
-        """VAD 关闭延迟计时器，超时后标记停止说话并触发 STT。
+        """VAD 停止延遲計時器：安靜滿延遲時間後標記停止說話並送去 STT。
 
         Args:
-            user_id: 用户 ID。
+            user_id: 使用者 ID。
         """
         try:
+            # 再開口時 _handle_vad_frame 會取消這個計時器；這裡只防它取消前剛好又有大聲音框。
+            # 不用「現在 - 上次大聲 < 延遲」判斷：Windows 的 monotonic 約 15.6ms 才跳一次，
+            # 量出來常比實際睡的短，計時器就會默默結束，這段話永遠不會送去識別
+            last_loud = self._vad_last_above.get(user_id, 0)
             await asyncio.sleep(self._vad_deactivation_delay_s)
-
-            now = _time.monotonic()
-            last = self._vad_last_above.get(user_id, 0)
-            if now - last < self._vad_deactivation_delay_s:
+            if self._vad_last_above.get(user_id, 0) != last_loud:
                 return
 
             self._vad_user_talking[user_id] = False
-            self._logger.debug(f"VAD: 用户 {user_id} 停止说话（延迟到期）")
+            self._logger.debug(f"VAD: 使用者 {user_id} 停止說話（延遲到期）")
 
             user_obj = self._vad_user_objects.get(user_id)
             if user_obj and hasattr(user_obj, "id") and self._voice_sink and self.stt_provider:
@@ -938,6 +939,6 @@ class VoiceManager:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            self._logger.error(f"VAD deactivation timer 异常: {exc}")
+            self._logger.error(f"VAD 停止延遲計時器異常: {exc}")
         finally:
             self._vad_deactivation_tasks.pop(user_id, None)
