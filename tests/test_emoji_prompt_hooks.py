@@ -77,7 +77,8 @@ def _decision_plugin(monkeypatch, answers, **decision):
         return {"success": True, "text": "小明：我抽到限定了！！"}
 
     plugin._ctx = SimpleNamespace(
-        message=SimpleNamespace(build_readable=build_readable), logger=SimpleNamespace(debug=print, warning=print)
+        message=SimpleNamespace(build_readable=build_readable),
+        logger=SimpleNamespace(debug=print, info=print, warning=print),
     )
     asked = []
 
@@ -156,3 +157,77 @@ def test_outbound_text_can_be_converted_to_traditional() -> None:
     content = builder.build(message, channel=SimpleNamespace(guild=GUILD))[0]
     assert content == "我們用軟體看影片<:pepe:111> https://zh.wikipedia.org/wiki/软件", "网址不转"
     assert builder.to_output_script("后来") == "後來"
+
+
+def test_decision_page_counts_nudges_adoptions_and_failures(monkeypatch) -> None:
+    sticker = {"emote": {"type": "choice", "probabilities": {"none": 0.1, "reaction": 0.2, "sticker": 0.7}}}
+    plugin, module, _ = _decision_plugin(monkeypatch, sticker)
+
+    async def all_streams(platform="all_platforms"):
+        return [{"stream_id": "s1", "group_name": "聊天大廳", "user_cardname": None, "user_nickname": "x"}]
+
+    plugin._ctx.chat = SimpleNamespace(get_all_streams=all_streams)
+
+    async def scenario():
+        assert await plugin._emote_nudge("s1") == module.STICKER_NUDGE
+        # MaiBot 自己用 send_emoji 发了表情包，discord_emote 看不到，靠 after_send 记采纳
+        await plugin.stop_discord_typing_after_send(
+            message={"session_id": "s1", "raw_message": [{"type": "emoji"}]}, sent=True
+        )
+        first = await plugin.webui_decision()
+
+        async def broken(config, state, questions, logger):
+            return None
+
+        monkeypatch.setattr(module, "ask_decision", broken)
+        await plugin._emote_nudge("s1")
+        return first, await plugin.webui_decision()
+
+    first, second = asyncio.run(scenario())
+    assert first["notice"] == "" and first["today_calls"] == 1
+    assert first["today_nudge_rate"] == "100%（1/1）" and first["today_adopt_rate"] == "100%（1/1）"
+    assert first["today_split"] == "表情 0・發圖 1・不提醒 0"
+    assert first["recent"][0]["chat"] == "聊天大廳" and first["recent"][0]["result"] == "提醒發圖"
+    assert first["recent"][0]["adopted"] == "貼圖或表情包" and first["recent"][0]["message"] == "小明：我抽到限定了！！"
+    assert first["daily"][0]["calls"] == 1 and first["daily"][0]["adopted"] == 1
+    assert second["today_failed"] == 1 and second["today_calls"] == 2 and second["recent"][0]["reaction"] == "—"
+    assert second["today_latency"] == first["today_latency"], "失败的请求不算进平均延迟"
+
+
+def test_adoption_only_counts_the_latest_nudge_in_that_chat_within_three_minutes() -> None:
+    from datetime import datetime, timedelta
+
+    stats = _load_adapter_module("src.decision").DecisionStats(None)
+    start = datetime(2026, 11, 5, 12, 0)
+    stats.record(start, "s1", "好耶", "reaction", 200, 0.8, 0.1)
+    stats.adopt(start + timedelta(minutes=4), "s1", "表情回應")
+    stats.adopt(start, "s2", "表情回應")
+    assert stats.state["recent"][0]["adopted"] == "", "超过 3 分钟、别的聊天都不算"
+    stats.record(start, "s1", "嗯", "skip", 200)
+    stats.adopt(start, "s1", "表情回應")
+    assert [item["adopted"] for item in stats.state["recent"]] == ["", ""], "最近一次是不提醒，就不算采纳"
+    stats.record(start, "s1", "哈哈", "reaction", 200, 0.9, 0)
+    stats.adopt(start + timedelta(minutes=1), "s1", "表情回應")
+    stats.adopt(start + timedelta(minutes=2), "s1", "表情")
+    assert stats.state["recent"][0]["adopted"] == "表情回應" and stats.state["days"]["2026-11-05"]["adopted"] == 1
+
+
+def test_decision_test_button_reports_the_failure_reason(monkeypatch) -> None:
+    plugin, module, _ = _decision_plugin(
+        monkeypatch, {"emote": {"type": "choice", "probabilities": {"none": 0.5, "reaction": 0.4, "sticker": 0.1}}}
+    )
+    assert asyncio.run(plugin.webui_decision_test())["ok"]
+    assert plugin._decision_stats.state["last_test"]["ok"] is True
+
+    async def unauthorized(config, state, questions, logger):
+        logger.warning("决策模型返回 HTTP 401：invalid key")
+        return None
+
+    monkeypatch.setattr(module, "ask_decision", unauthorized)
+    try:
+        asyncio.run(plugin.webui_decision_test())
+    except ValueError as exc:
+        assert "401" in str(exc)
+    else:
+        raise AssertionError("测试失败要让页面显示错误")
+    assert plugin._decision_stats.state["last_test"]["ok"] is False

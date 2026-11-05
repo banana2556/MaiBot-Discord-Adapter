@@ -77,6 +77,7 @@ def _emote_plugin(target: object, replies: list[dict], requests: list | None = N
     """搭一个只够跑 discord_emote 的插件：图片下载固定回红色小图，模型按 replies 依次回答。"""
     plugin_cls = _load_plugin_class()
     plugin = plugin_cls.__new__(plugin_cls)
+    plugin._decision_stats = _load_adapter_module("src.decision").DecisionStats(None)
     sent: list[tuple[str, str, dict]] = []
 
     async def find_message(msg_id, group_id, user_id):

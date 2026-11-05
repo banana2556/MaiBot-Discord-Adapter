@@ -1083,6 +1083,357 @@
           ]
         }
       ]
+    },
+    {
+      "id": "decision",
+      "title": "決策模型",
+      "description": "每次思考前問決策模型最新那則值不值得用表情表態；這裡看它判斷了幾次、提醒了幾次、麥麥採納了幾次。",
+      "placement": "workspace",
+      "icon": "chart",
+      "queries": {
+        "decision": {
+          "api": "webui_decision",
+          "version": "1"
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "value": {
+            "source": "decision",
+            "field": "notice"
+          },
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "notice"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "今天判斷",
+              "value": {
+                "source": "decision",
+                "field": "today_calls"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "提醒率",
+              "value": {
+                "source": "decision",
+                "field": "today_nudge_rate"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "採納率（提醒後 3 分鐘內有用表情）",
+              "value": {
+                "source": "decision",
+                "field": "today_adopt_rate"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "平均延遲",
+              "value": {
+                "source": "decision",
+                "field": "today_latency"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "請求失敗",
+              "value": {
+                "source": "decision",
+                "field": "today_failed"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "今天的結果",
+              "value": {
+                "source": "decision",
+                "field": "today_split"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "表情門檻",
+              "value": {
+                "source": "decision",
+                "field": "threshold"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "上次測試",
+              "value": {
+                "source": "decision",
+                "field": "last_test"
+              }
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "children": [
+            {
+              "type": "text",
+              "label": "API 地址",
+              "value": {
+                "source": "decision",
+                "field": "provider"
+              }
+            },
+            {
+              "type": "text",
+              "label": "模型",
+              "value": {
+                "source": "decision",
+                "field": "model"
+              }
+            },
+            {
+              "type": "button",
+              "label": "測試連線",
+              "action": "test"
+            },
+            {
+              "type": "button",
+              "label": "清除統計",
+              "action": "reset",
+              "variant": "danger"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "value": "還沒有判斷紀錄。",
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "recent"
+            },
+            "operator": "empty"
+          }
+        },
+        {
+          "type": "chart",
+          "label": "每天判斷次數",
+          "chart_type": "bar",
+          "value": {
+            "source": "decision",
+            "field": "daily"
+          },
+          "x": "date",
+          "y": "calls",
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "daily"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "chart",
+          "label": "每天提醒次數",
+          "chart_type": "bar",
+          "value": {
+            "source": "decision",
+            "field": "daily"
+          },
+          "x": "date",
+          "y": "nudges",
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "daily"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "chart",
+          "label": "每天採納次數",
+          "chart_type": "bar",
+          "value": {
+            "source": "decision",
+            "field": "daily"
+          },
+          "x": "date",
+          "y": "adopted",
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "daily"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "chart",
+          "label": "每天平均延遲（毫秒）",
+          "chart_type": "line",
+          "value": {
+            "source": "decision",
+            "field": "daily"
+          },
+          "x": "date",
+          "y": "latency",
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "daily"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "table",
+          "label": "最近的判斷（新的在前；點一列看那則訊息）",
+          "value": {
+            "source": "decision",
+            "field": "recent"
+          },
+          "when": {
+            "reference": {
+              "source": "decision",
+              "field": "recent"
+            },
+            "operator": "not_empty"
+          },
+          "selection": "decisionRow",
+          "detail": "decisionDetails",
+          "columns": [
+            {
+              "field": "time",
+              "label": "時間"
+            },
+            {
+              "field": "chat",
+              "label": "聊天"
+            },
+            {
+              "field": "result",
+              "label": "結果"
+            },
+            {
+              "field": "reaction",
+              "label": "按表情"
+            },
+            {
+              "field": "sticker",
+              "label": "發圖"
+            },
+            {
+              "field": "latency",
+              "label": "延遲"
+            },
+            {
+              "field": "adopted",
+              "label": "採納"
+            }
+          ]
+        },
+        {
+          "type": "dialog",
+          "name": "decisionDetails",
+          "label": "判斷詳情",
+          "children": [
+            {
+              "type": "text",
+              "label": "時間",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "time"
+              }
+            },
+            {
+              "type": "text",
+              "label": "聊天",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "chat"
+              }
+            },
+            {
+              "type": "text",
+              "label": "最新那則訊息",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "message"
+              }
+            },
+            {
+              "type": "text",
+              "label": "結果",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "result"
+              }
+            },
+            {
+              "type": "text",
+              "label": "按表情機率",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "reaction"
+              }
+            },
+            {
+              "type": "text",
+              "label": "發圖機率",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "sticker"
+              }
+            },
+            {
+              "type": "text",
+              "label": "延遲",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "latency"
+              }
+            },
+            {
+              "type": "text",
+              "label": "麥麥用了",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "adopted"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": {
+        "test": {
+          "api": "webui_decision_test",
+          "version": "1"
+        },
+        "reset": {
+          "api": "webui_decision_reset",
+          "version": "1",
+          "confirmation": "會清掉所有判斷紀錄和每日統計，不影響設定。確定？"
+        }
+      }
     }
   ]
 }
