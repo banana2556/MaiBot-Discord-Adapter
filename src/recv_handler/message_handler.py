@@ -341,7 +341,10 @@ class DiscordMessageHandler:
                 return
 
             if seg.type == "mention" and isinstance(seg.data, dict):
-                if seg.data.get("users") or seg.data.get("everyone") or seg.data.get("here"):
+                # 只有 @ 到 bot 自己才標：MaiBot 直接相信這兩個旗標，@ 別人也標的話她會被強制回覆
+                users = seg.data.get("users") or []
+                at_bot = any(isinstance(user, dict) and str(user.get("user_id")) == self._account_id for user in users)
+                if at_bot or seg.data.get("everyone") or seg.data.get("here"):
                     traits["is_mentioned"] = True
                     traits["is_at"] = True
                 return

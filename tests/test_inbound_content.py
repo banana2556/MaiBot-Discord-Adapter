@@ -358,6 +358,10 @@ def test_only_mentions_of_the_bot_itself_are_flagged() -> None:
     handler.set_account_id("42")
     bot = SimpleNamespace(id=42, name="mai", display_name="麥麥", nick=None, global_name=None, bot=True, discriminator="0")
     friend = SimpleNamespace(id=8, name="x", display_name="小明", nick=None, global_name=None, bot=False, discriminator="0")
-    flagged = _convert(handler, _message(content="<@42> 起床", mentions=[bot]))["message_info"]["additional_config"]
-    other = _convert(handler, _message(content="<@8> 早", mentions=[friend]))["message_info"]["additional_config"]
-    assert flagged["discord_mentions_bot"] is True and "discord_mentions_bot" not in other
+    flagged = _convert(handler, _message(content="<@42> 起床", mentions=[bot]))
+    other = _convert(handler, _message(content="<@8> 早", mentions=[friend]))
+    assert flagged["message_info"]["additional_config"]["discord_mentions_bot"] is True
+    assert "discord_mentions_bot" not in other["message_info"]["additional_config"]
+    # MaiBot 直接相信 is_at / is_mentioned：@ 別人時不能標，否則她會被強制回覆
+    assert flagged["is_at"] and flagged["is_mentioned"]
+    assert not other["is_at"] and not other["is_mentioned"]
