@@ -443,3 +443,38 @@ def test_stickers_are_read_at_a_size_the_model_can_see_and_keep_their_name() -> 
     handler._fetch_emoji_bytes = broken
     assert len(asyncio.run(handler._sticker_segments(wave, message))) == 1
     assert warnings and "讀不到貼圖「wave」" in warnings[0], "讀不到要看得到原因"
+
+
+def test_animated_images_become_still_so_image_memory_accepts_them() -> None:
+    import io
+
+    from PIL import Image
+
+    grid = _load_adapter_module("src.emoji_grid")
+
+    def encode(frames, fmt, **kwargs):
+        buffer = io.BytesIO()
+        frames[0].save(buffer, format=fmt, save_all=len(frames) > 1, append_images=frames[1:], **kwargs)
+        return buffer.getvalue()
+
+    colors = ["red", "green", "blue", "yellow", "white", "black"]
+    animated = encode([Image.new("RGB", (40, 30), color) for color in colors], "GIF", duration=50, loop=0)
+    single_gif = encode([Image.new("RGB", (40, 30), "red")], "GIF")
+    png = encode([Image.new("RGB", (40, 30), "red")], "PNG")
+
+    sheet = grid.still_image(animated)
+    with Image.open(io.BytesIO(sheet)) as image:
+        assert image.format == "PNG" and getattr(image, "n_frames", 1) == 1, "動圖拼成一張靜態 PNG"
+    with Image.open(io.BytesIO(grid.still_image(single_gif))) as image:
+        assert image.format == "PNG", "MaiBot 圖片記憶不收 GIF，一格的也要轉"
+    assert grid.still_image(png) is png, "靜態圖原樣送"
+
+    handler = _handler()
+    attachment = _attachment("cat.gif", "image/gif")
+
+    async def read():
+        return animated
+
+    attachment.read = read
+    segment = asyncio.run(handler._attachment_segments(attachment))[0]
+    assert segment.type == "image" and base64.b64decode(segment.data).startswith(b"\x89PNG"), "GIF 附件送進 MaiBot 前就轉好"

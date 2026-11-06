@@ -24,6 +24,25 @@ def _fit(image: Image.Image, side: int) -> Image.Image:
     return image.resize(size, Image.Resampling.LANCZOS)
 
 
+def still_image(data: bytes, frames: int = 4, tile: int = 256) -> bytes:
+    """動圖（GIF、動態 PNG／WebP）平均取幾格拼成一張靜態 PNG；靜態圖原樣回傳，只有一格的 GIF 轉成 PNG。
+
+    MaiBot 的圖片記憶只收靜態的 PNG／JPEG／WebP／BMP，送動圖會一直寫入失敗、留在佇列重試。
+    """
+    with Image.open(io.BytesIO(data)) as image:
+        count = int(getattr(image, "n_frames", 1) or 1)
+        if count <= 1 and image.format != "GIF":
+            return data
+        picks = sorted({round(index * (count - 1) / max(frames - 1, 1)) for index in range(min(frames, count))})
+        shots = []
+        for index in picks:
+            image.seek(index)
+            buffer = io.BytesIO()
+            image.convert("RGBA").save(buffer, format="PNG")
+            shots.append(buffer.getvalue())
+    return shots[0] if len(shots) == 1 else build_numbered_grid(shots, tile=tile)
+
+
 def build_numbered_grid(images: List[bytes], labels: Optional[List[str]] = None, tile: int = _TILE) -> bytes:
     """每张图缩放进白底方格，左上角标上标签（默认从 1 开始的序号），输出 PNG 字节。
 

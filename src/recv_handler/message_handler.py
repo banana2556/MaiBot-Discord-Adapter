@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import discord
 from maim_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Seg, UserInfo
 
-from ..emoji_grid import build_numbered_grid
+from ..emoji_grid import build_numbered_grid, still_image
 from ..native_emoji import NativeEmojiRegistry
 from ..utils import run_ffmpeg
 
@@ -605,7 +605,18 @@ class DiscordMessageHandler:
             return []
         if kind == "voice":
             data = await self._voice_message_to_wav(data)
-        return [Seg(type=kind, data=base64.b64encode(data).decode("utf-8"))]
+            return [Seg(type="voice", data=base64.b64encode(data).decode("utf-8"))]
+        return [await self._image_segment(base64.b64encode(data).decode("utf-8"))]
+
+    async def _image_segment(self, image_b64: str) -> Seg:
+        """圖片段；動圖（GIF、動態 PNG／WebP）先換成幾格畫面拼成的靜態 PNG，MaiBot 的圖片記憶才收得下。"""
+        try:
+            data = base64.b64decode(image_b64)
+            still = await asyncio.to_thread(still_image, data)
+        except Exception as exc:  # 讀不了或太大的圖原樣交給 MaiBot，不能讓整則訊息丟掉
+            self._logger.debug(f"動圖轉靜態圖失敗：{exc}")
+            return Seg(type="image", data=image_b64)
+        return Seg(type="image", data=image_b64 if still is data else base64.b64encode(still).decode("utf-8"))
 
     async def _video_segments(self, attachment: discord.Attachment) -> List[Seg]:
         """每隔固定秒数截一格画面，拼成一张带时间标签的图交给识图；做不到时只留文件名。
@@ -710,7 +721,7 @@ class DiscordMessageHandler:
         if embed.type in ("gifv", "image"):
             preview = embed.thumbnail.proxy_url or embed.thumbnail.url or embed.image.proxy_url or embed.image.url
             image_b64 = await self._fetch_emoji_bytes(str(preview), size=None) if preview else None
-            return [Seg(type="image", data=image_b64)] if image_b64 else []
+            return [await self._image_segment(image_b64)] if image_b64 else []
 
         segments: List[Seg] = []
         text_segment = self._embed_text_segment(embed)
@@ -719,7 +730,7 @@ class DiscordMessageHandler:
         picture = embed.image.proxy_url or embed.image.url or embed.thumbnail.proxy_url or embed.thumbnail.url
         picture_b64 = await self._fetch_emoji_bytes(str(picture), size=None) if picture else None
         if picture_b64:
-            segments.append(Seg(type="image", data=picture_b64))
+            segments.append(await self._image_segment(picture_b64))
         return segments
 
     def _embed_text_segment(self, embed: discord.Embed) -> Optional[Seg]:
