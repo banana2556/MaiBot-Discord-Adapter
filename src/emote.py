@@ -309,18 +309,17 @@ class EmoteMixin:
             + "\n\n最近的群聊（越下面越新，# 是可以表態的訊息）：\n"
             + "\n".join(lines)
         )
-        target_question = {
-            "type": "choice",
-            "instructions": TARGET_INSTRUCTIONS,
-            "criteria": {numbers[id(message)]: f"「{message['user']}」：{message['text']}" for message in targets},
-        }
+        questions: Dict[str, Any] = {"scene": SCENE_QUESTION, "emotion": EMOTION_QUESTION}
+        # 只有一則可選時不問：只有一個選項的選擇題會被決策模型當成格式錯誤（HTTP 422），連情境也拿不到。
+        # 插件只記得啟動後收到的訊息，剛重啟時常常只有一則
+        if len(targets) > 1:
+            questions["target"] = {
+                "type": "choice",
+                "instructions": TARGET_INSTRUCTIONS,
+                "criteria": {numbers[id(message)]: f"「{message['user']}」：{message['text']}" for message in targets},
+            }
         started = time.monotonic()
-        answers = await ask_decision(
-            decision,
-            state,
-            {"scene": SCENE_QUESTION, "target": target_question, "emotion": EMOTION_QUESTION},
-            self.ctx.logger,
-        )
+        answers = await ask_decision(decision, state, questions, self.ctx.logger)
         latency_ms = round((time.monotonic() - started) * 1000)
         scene_answer = (answers or {}).get("scene") or {}
         requested = str(scene_answer.get("choice") or "")
@@ -334,7 +333,9 @@ class EmoteMixin:
         }
         summary = f"「{target['user']}」：{target['text']}"
         if requested not in SCENES:
-            self.ctx.logger.warning(f"表情決策 [{session_id}]：沒拿到有效的情境，這輪 planner 自己決定")
+            self.ctx.logger.warning(
+                f"表情決策 [{session_id}]：沒拿到有效的情境（可表態 {len(targets)} 則），這輪 planner 自己決定"
+            )
             self._decision_stats.record_decision(now, session_id, summary, "failed", latency_ms)
             return None
         probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}

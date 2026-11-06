@@ -369,6 +369,21 @@ def test_planner_decides_alone_when_no_message_can_be_traced_back(monkeypatch) -
     assert "discord_emote" in names and env.asked == []
 
 
+def test_single_candidate_skips_the_target_question(monkeypatch) -> None:
+    answer = _answer("quick_reaction", 0.9, "讚同")
+    del answer["target"]  # 沒問就不會有這個答案
+    env = _env(monkeypatch, answers=[answer])
+
+    async def scenario():
+        env.plugin._remember_inbound("s1", _inbound(LATEST))  # 剛重啟：只記得啟動後收到的這一則
+        await _decide(env)
+        await _drain()
+
+    asyncio.run(scenario())
+    assert set(env.asked[0][1]) == {"scene", "emotion"}, "只有一個選項的選擇題會被決策模型回 422"
+    assert env.reactions == [(LATEST, env.emojis[1])], "表態對象就是唯一那則"
+
+
 def test_text_emote_appends_a_picture_after_her_whole_reply(monkeypatch) -> None:
     env = _env(monkeypatch, answers=[_answer("text_emote", 0.8, "心疼")])
     monkeypatch.setattr(env.module, "APPEND_DELAY_SECONDS", 0)
