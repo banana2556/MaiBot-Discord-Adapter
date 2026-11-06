@@ -50,17 +50,26 @@ def short_time(iso: Any) -> str:
         return "—"
 
 
+# MaiBot 目前人設裡描述角色的欄位；群聊／私聊提示詞是聊天規則，排生活時程用不到
+PERSONA_FIELDS = {"personality": "人格", "behavior_style": "行為風格", "reply_style": "說話風格"}
+
+
 async def persona_text(ctx: Any) -> str:
-    """当前人设的文字描述；读不到时返回空字符串，由调用方只靠配置里的生活设定。"""
+    """MaiBot 目前人設（personality.get_current）的角色描述；讀不到時記警告並回空字串，由呼叫方只靠生活設定。"""
     try:
         current = await ctx.personality.get_current()
     except Exception as exc:
-        ctx.logger.debug(f"读取当前人设失败：{exc}")
+        current = {"error": str(exc)}
+    # 成功時 SDK 直接回人設欄位，失敗時回原樣的 {"success": False, "error": ...}
+    if not isinstance(current, dict) or "error" in current or "success" in current:
+        error = current.get("error") if isinstance(current, dict) else current
+        ctx.logger.warning(f"讀取 MaiBot 目前人設失敗，日常生活時程只參考生活設定：{error}")
         return ""
-    if not isinstance(current, dict):
-        return ""
-    lines = [f"{key}: {value}" for key, value in current.items() if isinstance(value, str) and value.strip()]
-    return "\n".join(lines)
+    return "\n".join(
+        f"{label}：{current[field].strip()}"
+        for field, label in PERSONA_FIELDS.items()
+        if isinstance(current.get(field), str) and current[field].strip()
+    )
 
 
 async def generate_json(ctx: Any, prompt: str, task_name: str) -> Optional[Any]:

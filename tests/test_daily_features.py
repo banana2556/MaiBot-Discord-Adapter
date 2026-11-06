@@ -74,7 +74,17 @@ class FakeCtx:
         return {"success": True, "response": reply if isinstance(reply, str) else json.dumps(reply, ensure_ascii=False)}
 
     async def _persona(self):
-        return {"name": "麥麥", "personality": "活潑的女大學生"}
+        # MaiBot personality.get_current 經 SDK 拆開後的樣子
+        return {
+            "name": "預設人設",
+            "personality": "活潑的女大學生",
+            "behavior_style": "愛吐槽",
+            "reply_style": "簡短口語",
+            "multiple_reply_style": [],
+            "multiple_probability": 0.0,
+            "group_chat_prompt": "群聊裡不要洗版",
+            "private_chat_prompts": "",
+        }
 
     async def _stream_by_group(self, group_id, platform="qq"):
         return {"stream_id": f"s-{group_id}"} if group_id == "111" else None
@@ -224,6 +234,8 @@ def test_life_generates_injects_and_pushes_presence(tmp_path) -> None:
 
     _run(life.tick(NOW, _life_config()))
     assert life.state["date"] == "2026-11-02" and life.state["hours"][5]["activity"] == "日常4"
+    assert "人格：活潑的女大學生\n行為風格：愛吐槽\n說話風格：簡短口語" in ctx.prompts[0], "排時程要看得到 MaiBot 目前人設"
+    assert "群聊裡不要洗版" not in ctx.prompts[0] and "預設人設" not in ctx.prompts[0], "聊天規則和人設檔名不送"
     assert presence == [("✨ 日常12", "idle")]
     assert "在學餐吃午飯" in life.prompt_text(NOW) and "13 點 日常13" in life.prompt_text(NOW)
     assert ctx.tasks == ["replyer"], "日常生活默认沿用 replyer 模型任务"
@@ -680,3 +692,23 @@ def test_readable_chat_accepts_what_the_sdk_actually_returns() -> None:
     assert _run(read(" 小明：早 \n")) == "小明：早", "新版 SDK 成功時直接回文字"
     assert _run(read({"success": True, "text": "小明：早"})) == "小明：早", "舊版回 dict"
     assert _run(read({"success": False, "error": "x"})) == ""
+
+
+def test_persona_failure_is_logged_and_never_leaks_into_the_prompt() -> None:
+    common = _load_adapter_module("src.life.common")
+    warnings: list = []
+
+    def ctx_returning(result):
+        async def get_current():
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        return SimpleNamespace(
+            personality=SimpleNamespace(get_current=get_current), logger=SimpleNamespace(warning=warnings.append)
+        )
+
+    # 失敗時 SDK 回原樣的結果；error 不能被當成人設
+    assert _run(common.persona_text(ctx_returning({"success": False, "error": "沒有權限"}))) == ""
+    assert _run(common.persona_text(ctx_returning(RuntimeError("Host 沒回應")))) == ""
+    assert len(warnings) == 2 and "沒有權限" in warnings[0], "讀不到人設要看得到，不能只記 debug"

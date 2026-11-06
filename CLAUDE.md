@@ -30,7 +30,7 @@ python -m venv .venv
 
 - 語言：一律用繁體中文，包括程式碼註解、docstring、日誌、設定頁說明、給模型看的提示詞、「DC生活」頁面和 commit 訊息。現有的簡體是舊的，改到哪段就順手換成繁體，不用專門整批轉。用 OpenCC 轉時檢查用語：MaiBot 說「插件」不是「外掛」，「语音频道」別被轉成「語音訊道」。
 - 新呼叫 Host 能力（`ctx.xxx`、`call_capability`）要加進 `_manifest.json` 的 `capabilities`，有測試檢查。新 Python 依賴同時加進 `requirements.txt`、`pyproject.toml`、`_manifest.json`。
-- SDK 會把部分 capability 的成功結果拆開（`maibot_sdk.context._CAPABILITY_RESULT_KEYS`）：例如 `message.build_readable` 直接回文字、`chat.get_all_streams` 直接回清單，失敗或舊版 SDK 才回 `{"success": ..., ...}`。處理結果要兩種都接受，測試的假物件也要照拆開後的樣子回傳，不然測試會蓋掉真正的錯。
+- SDK 會把部分 capability 的成功結果拆開（`maibot_sdk.context._CAPABILITY_RESULT_KEYS`）：例如 `message.build_readable` 直接回文字、`chat.get_all_streams` 直接回清單，失敗時才回原樣的 `{"success": False, "error": ...}`。處理結果要兩種都接受，測試的假物件也要照拆開後的樣子回傳，不然測試會蓋掉真正的錯。
 - 讀設定一律用 `self._load_settings()`，它會套上頁面設定（插件資料目錄的 `daily_settings.json`）；直接讀 `self.config` 在插件設定頁存檔後會拿到沒套頁面值的設定。
 - 頁面改設定：`_setting_rows` 產生「目前的值」表格，`_save_page_fields` 只存有填的欄位並經過設定模型檢查。宣告式頁面的輸入框不能預填目前的值，所以一律是「上面看目前的值、下面只填要改的」。
 - 狀態檔案放 `ctx.paths.data_dir`，讀寫用 `src/life/common.py` 的 `load_state` / `save_state`。
@@ -38,8 +38,6 @@ python -m venv .venv
 - Hook 在 MaiBot 每輪 planner / replyer 的熱路徑上：blocking hook 要設 `timeout_ms`，出錯時放行（`{"action": "continue"}`）。
 - 改 `webui.json` 用腳本（`json.dumps(..., ensure_ascii=False, indent=2)` 會保持原格式），改完用 MaiBot 本體驗證：
   `cd ../MaiBot && .venv/Scripts/python -c "from src.plugin_runtime.webui_schema import load_webui_extension as f; print([p.id for p in f(r'../MaiBot-Discord-Adapter').pages])"`
-- 正式機是 MaiBot 1.3.15（2026-10-24，要求 SDK ≥ 2.16.0），本地 `../MaiBot` 較新。要用的 Host 功能直接對照那個版本，不要預先做保險：
-  `cd ../MaiBot && git grep -c '"<capability 或 hook 名稱>"' v1.3.15 -- src`。
-  1.3.15 沒有 `personality.get_current`（`persona_text` 會拿到空字串）和 `ctx.web`；頁面元件、hook、API 呼叫方式和 1.3.19 相同。
+- 正式機一律視為最新版 MaiBot / SDK（和本地 `../MaiBot` 一樣），不要為舊版做相容或保險；版本落後由正式機升級解決。
 - 刻意的簡化用 `# ponytail:` 註解寫明上限和升級方式。
 - Commit 訊息用繁體中文 conventional commits，例如 `fix(send): …`、`feat(webui): …`。
