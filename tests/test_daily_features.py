@@ -335,7 +335,8 @@ def test_topics_wait_for_cron_then_ask_bot_to_find_and_share(tmp_path) -> None:
     stream_id, intent, reason = ctx.triggered[0]
     assert stream_id == "s-111" and reason == "主動話題"
     assert "音遊：大家常聊" in intent and "貓咪咖啡廳" in intent and "要分享的類型：新聞\n" in intent, "影片默认关闭"
-    assert "自己決定用什麼搜尋或瀏覽工具" in intent, "不替她指定搜索工具"
+    assert "用什麼工具你自己決定" in intent and "tool_search" not in intent, "只提示上網，不指定工具"
+    assert "一定要是你這輪實際上網查到" in intent and "不要自己編工具名稱" in intent, "不能分享沒查證的內容"
     assert "Bilibili、X、Threads" in intent, "預設會去這幾個地方看熱門內容"
     assert "大家喜歡音遊和貓" in ctx.prompts[0] and set(ctx.tasks) == {"planner"}
     assert scout.next_due == datetime(2026, 11, 3, 12, 0)

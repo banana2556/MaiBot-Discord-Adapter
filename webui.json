@@ -606,7 +606,7 @@
           "children": [
             {
               "type": "text",
-              "value": "「這輪是開新話題」「reply_reference 要寫標題和連結」「找不到就 stop」這些分享規則由插件固定附上，不用寫在這裡。"
+              "value": "「這輪是開新話題」「reply_reference 要寫標題和連結」「內容要實際上網查到」「找不到就 stop」這些分享規則由插件固定附上，不用寫在這裡。"
             },
             {
               "type": "table",
