@@ -691,12 +691,16 @@ class DiscordMessageHandler:
     _EMBED_TEXT_LIMIT = 300
 
     async def _embed_segments(self, embed: discord.Embed) -> List[Seg]:
-        """动图（Tenor/Giphy）和图片链接只有预览图，当成表情/图片给模型看；
-        其余取标题、描述和字段转成文字，卡片带图（X、Pixiv、新闻缩图等）时也附上图片。"""
+        """動圖連結（Klipy、Tenor、Giphy，預覽類型 gifv）和圖片連結只有預覽圖，一律當圖片交給 MaiBot；
+        其餘取標題、描述和欄位轉成文字，卡片帶圖（X、Pixiv、新聞縮圖等）時也附上圖片。
+
+        動圖不當表情包：MaiBot 的圖片記憶只收圖片，當表情包就進不了記憶。
+        """
+        self._logger.debug(f"連結預覽 type={embed.type} provider={embed.provider.name}")
         if embed.type in ("gifv", "image"):
             preview = embed.thumbnail.proxy_url or embed.thumbnail.url or embed.image.proxy_url or embed.image.url
             image_b64 = await self._fetch_emoji_bytes(str(preview), size=None) if preview else None
-            return [Seg(type="emoji" if embed.type == "gifv" else "image", data=image_b64)] if image_b64 else []
+            return [Seg(type="image", data=image_b64)] if image_b64 else []
 
         segments: List[Seg] = []
         text_segment = self._embed_text_segment(embed)

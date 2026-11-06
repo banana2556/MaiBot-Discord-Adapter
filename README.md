@@ -26,7 +26,7 @@ MaiBot 的 Discord 平台适配器插件，让你的 MaiBot 能够在 Discord �
   - DM 私聊消息
   - Thread 子区消息
   - 提及、引用回复、图片、贴纸
-  - 图片链接与网页卡片的预览图（等 Discord 展开预览后当图片交给识图）
+  - 圖片連結、動圖連結（Klipy、Tenor、Giphy）與網頁卡片的預覽圖（等 Discord 展開預覽後當圖片交給識圖和圖片記憶）
   - 影片按固定秒数截几格画面拼成一张图交给识图（需要 FFmpeg，直接读 Discord CDN 的片段，不整个下载）
   - Raw reaction add/remove 事件
   - 可选语音转文本 STT

@@ -364,6 +364,11 @@ class DiscordClientManager:
                     and _PREVIEWABLE_LINK.search(message.content or "")
                 ):
                     await self._wait_for_link_preview(message)
+                    if not message.embeds:
+                        # 預覽太晚出現（或網站不給預覽）時只剩網址，圖片就進不了識圖和圖片記憶
+                        self._logger.debug(
+                            f"連結預覽 {LINK_PREVIEW_WAIT_SECONDS:g} 秒內沒出現，只送文字 [message_id={message.id}]"
+                        )
 
                 message_dict = await self._message_handler.handle_discord_message(message)
                 if message_dict is None:

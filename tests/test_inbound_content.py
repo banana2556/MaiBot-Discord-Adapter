@@ -109,9 +109,9 @@ def test_forward_embeds_poll_and_attachments_reach_maibot() -> None:
         "[链接预览: YouTube\n影片]",
         "[投票: 吃什么｜选项: 拉面 / 寿司，可多选]",
     ]
-    # 语音消息转成 wav 交给 MaiBot 转写；动图预览当表情，不加 size 参数
+    # 语音消息转成 wav 交给 MaiBot 转写；動圖預覽（Klipy、Tenor 的 gifv）當圖片才進得了圖片記憶，不加 size 參數
     assert {"type": "voice", "data": "", "binary_data_base64": "V0FWb2dn"} in raw
-    assert {"type": "emoji", "data": "", "binary_data_base64": "img:https://p/x.png:None"} in raw
+    assert {"type": "image", "data": "", "binary_data_base64": "img:https://p/x.png:None"} in raw
 
 
 def test_voice_conversion_falls_back_to_original_without_ffmpeg(monkeypatch) -> None:
