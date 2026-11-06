@@ -601,6 +601,55 @@
           ]
         },
         {
+          "type": "collapsible",
+          "label": "提示詞（只填要改的項目；留空不會清掉）",
+          "children": [
+            {
+              "type": "text",
+              "value": "「這輪是開新話題」「reply_reference 要寫標題和連結」「找不到就 stop」這些分享規則由插件固定附上，不用寫在這裡。"
+            },
+            {
+              "type": "table",
+              "label": "目前的值",
+              "value": {
+                "source": "topics",
+                "field": "prompts"
+              },
+              "columns": [
+                {
+                  "field": "item",
+                  "label": "項目"
+                },
+                {
+                  "field": "value",
+                  "label": "目前的值"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "pick_instructions",
+              "label": "挑話題的提示詞（請 LLM 從群記憶和最近聊天挑方向）"
+            },
+            {
+              "type": "input",
+              "name": "share_instructions",
+              "label": "分享話題的提示詞（交給麥麥的任務：去哪裡找、怎麼挑）"
+            },
+            {
+              "type": "button",
+              "label": "儲存提示詞",
+              "action": "save_prompts"
+            },
+            {
+              "type": "button",
+              "label": "提示詞恢復預設",
+              "action": "reset_prompts",
+              "variant": "danger"
+            }
+          ]
+        },
+        {
           "type": "dialog",
           "name": "channelDetails",
           "label": "頻道",
@@ -829,6 +878,27 @@
               "max_length": 40
             }
           }
+        },
+        "save_prompts": {
+          "api": "webui_topics_save",
+          "version": "1",
+          "parameters": {
+            "pick_instructions": {
+              "type": "string",
+              "required": false,
+              "max_length": 2000
+            },
+            "share_instructions": {
+              "type": "string",
+              "required": false,
+              "max_length": 2000
+            }
+          }
+        },
+        "reset_prompts": {
+          "api": "webui_topics_reset_prompts",
+          "version": "1",
+          "confirmation": "兩段主動話題提示詞都會恢復預設，其他設定不變。確定？"
         }
       }
     },

@@ -1190,6 +1190,26 @@ class TopicConfig(PluginConfigBase):
         description="挑話題與挑新聞沿用 MaiBot 哪個模型任務：replyer=回覆模型, planner=規劃模型。",
         json_schema_extra={"label": "使用模型", "order": 6},
     )
+    pick_instructions: str = Field(
+        default=(
+            "參考最近的聊天和群的記憶，挑 1 到 3 個這個群可能有興趣的方向：可以是聊天裡提過的事，"
+            "也可以是大家關注的領域裡最近的熱門話題。避開最近開過的。"
+        ),
+        description="挑話題的提示詞：插件先用它請 LLM 從群記憶和最近聊天挑幾個方向（聊天內容和輸出格式由插件自動附上）。",
+        json_schema_extra={"label": "挑話題的提示詞", "order": 7},
+    )
+    share_instructions: str = Field(
+        default=(
+            "參考下面這些方向，自己決定用什麼搜尋或瀏覽工具（需要的工具不在清單上可以先用 tool_search 找），"
+            "去找最近的熱門內容：可以到 Bilibili、X、Threads 看大家正在討論的熱門文章、新聞或影片。"
+            "跟這些方向有關的優先，沒有的話挑一則這個群應該會有興趣的熱門話題。確認內容是新的、真的值得分享。"
+        ),
+        description=(
+            "分享話題的提示詞：喚醒麥麥時交給她的任務說明，寫去哪裡找、怎麼挑。"
+            "「這輪是開新話題」「reply_reference 要寫標題和連結」「找不到就 stop」由插件自動附上，分享才發得出去。"
+        ),
+        json_schema_extra={"label": "分享話題的提示詞", "order": 8},
+    )
 
     @field_validator("channel_list", mode="before")
     @classmethod
@@ -1218,7 +1238,17 @@ PAGE_FIELDS: Dict[str, tuple[str, ...]] = {
         "wake_on_mention_chance",
         "model_task",
     ),
-    "topics": ("enabled", "channel_list", "cron", "context_hours", "news_enabled", "video_enabled", "model_task"),
+    "topics": (
+        "enabled",
+        "channel_list",
+        "cron",
+        "context_hours",
+        "news_enabled",
+        "video_enabled",
+        "model_task",
+        "pick_instructions",
+        "share_instructions",
+    ),
     "reminder": ("enabled", "drift_minutes", "max_per_chat", "followup_enabled", "followup_max_per_chat"),
     "decision": (
         "enabled",

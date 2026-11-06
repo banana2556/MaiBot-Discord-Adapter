@@ -18,6 +18,8 @@ from .common import generate_json, load_state, readable_chat, save_state
 from .cron import next_run, parse_cron
 
 HISTORY_LIMIT = 30
+# 頁面可以改的提示詞（其餘固定的部分是讓分享真的發得出去、能解析的格式）
+PROMPT_FIELDS = ("pick_instructions", "share_instructions")
 MEMORY_QUERY = "這個群大家常聊的話題、興趣和最近在關注的事"
 # 觸發後多久內沒發出分享就算沒發出去
 SHARE_TIMEOUT = timedelta(minutes=15)
@@ -121,8 +123,9 @@ class TopicScout:
             "你在幫一個聊天機器人想今天可以主動在群裡分享的話題。\n"
             f"群的長期記憶：\n{memory or '（無）'}\n\n最近的聊天：\n{chat or '（最近沒什麼人說話）'}\n\n"
             f"最近開過的話題：\n{shared}\n\n"
-            "挑 1 到 3 個這個群可能有興趣、適合去找新消息或影片的話題，避開最近開過的。"
-            '輸出 JSON：{"topics": [{"keyword": "話題關鍵字（簡短）", "why": "為什麼這個群會感興趣"}]}，只輸出 JSON。'
+            f"{config.pick_instructions.strip()}\n"
+            '輸出 JSON：{"topics": [{"keyword": "話題關鍵字（簡短）", "why": "為什麼這個群會感興趣"}]}，'
+            "最多 3 個，只輸出 JSON。"
         )
         result = await generate_json(self._ctx, prompt, config.model_task)
         raw_topics = result.get("topics") if isinstance(result, dict) else None
@@ -133,12 +136,13 @@ class TopicScout:
 
         kind_text = "或".join(kinds)
         candidates = "\n".join(f"- {t['keyword']}：{t.get('why') or '跟最近的話題有關'}" for t in topics)
+        # 開頭的任務定位和後面的分享規則固定附上：replyer 看不到主動任務，reply_reference 沒寫標題和連結就發不出分享
         intent = (
             "這輪的任務是主動在群裡開一個新話題，不是回應群裡正在聊的內容（別人的訊息之後會有自己的回合）。\n"
+            f"{config.share_instructions.strip()}\n"
             f"這個群最近可能有興趣的方向：\n{candidates}\n"
-            f"1. 挑一個最適合的方向，自己決定用什麼搜尋或瀏覽工具去找一則最近的{kind_text}"
-            "（需要的工具不在清單上可以先用 tool_search 找），確認內容是新的、真的跟話題有關。\n"
-            "2. 找到後呼叫 reply 分享：msg_id 填最新一則訊息即可；reply_reference 一定要寫清楚"
+            f"要分享的類型：{kind_text}\n"
+            "找到後呼叫 reply 分享：msg_id 填最新一則訊息即可；reply_reference 一定要寫清楚"
             f"「這是我主動分享的{kind_text}」、標題、完整連結網址、內容重點和你想說的看法——"
             "負責寫回覆的模型看不到這個任務和你搜到的內容，只看得到 reply_reference；reply_style 用「正常回复」。\n"
             f"最近開過的話題不要重複：\n{shared}\n"

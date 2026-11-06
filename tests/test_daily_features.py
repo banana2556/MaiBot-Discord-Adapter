@@ -334,8 +334,9 @@ def test_topics_wait_for_cron_then_ask_bot_to_find_and_share(tmp_path) -> None:
     assert len(ctx.triggered) == 1, "频道 222 没有会话，跳过"
     stream_id, intent, reason = ctx.triggered[0]
     assert stream_id == "s-111" and reason == "主動話題"
-    assert "音遊：大家常聊" in intent and "貓咪咖啡廳" in intent and "最近的新聞" in intent, "影片默认关闭"
+    assert "音遊：大家常聊" in intent and "貓咪咖啡廳" in intent and "要分享的類型：新聞\n" in intent, "影片默认关闭"
     assert "自己決定用什麼搜尋或瀏覽工具" in intent, "不替她指定搜索工具"
+    assert "Bilibili、X、Threads" in intent, "預設會去這幾個地方看熱門內容"
     assert "大家喜歡音遊和貓" in ctx.prompts[0] and set(ctx.tasks) == {"planner"}
     assert scout.next_due == datetime(2026, 11, 3, 12, 0)
     saved = json.loads((tmp_path / "topics.json").read_text(encoding="utf-8"))
@@ -346,7 +347,7 @@ def test_topics_kind_follows_settings_and_avoids_recent(tmp_path) -> None:
     scout, ctx = _scout(tmp_path, [{"topics": [{"keyword": "貓咪影片"}]}, {"topics": [{"keyword": "新番"}]}])
     video_only = _topic_config(news_enabled=False, video_enabled=True)
     assert _run(scout.run_channel("111", NOW, video_only)) == "貓咪影片"
-    assert "影片" in ctx.triggered[0][1] and "新聞" not in ctx.triggered[0][1]
+    assert "要分享的類型：影片\n" in ctx.triggered[0][1]
 
     _run(scout.run_channel("111", NOW, _topic_config()))
     assert "貓咪影片" in ctx.prompts[1], "挑话题时避开最近开过的"
@@ -396,6 +397,32 @@ def test_topic_share_hint_reaches_the_replyer(tmp_path) -> None:
     prompt = result["modified_kwargs"]["extra_prompt"]
     assert prompt.startswith("原本的要求\n") and "https://news.example/a" in prompt
     assert _run(plugin.add_topic_share_hint(session_id="s-999", reply_tool_args=args)) == {"action": "continue"}
+
+
+def test_topic_prompts_edited_on_the_page_are_used(tmp_path) -> None:
+    plugin, ctx = _plugin(tmp_path, {"topics": {"enabled": True, "channel_list": ["111"]}})
+    plugin._load_page_settings(tmp_path / "daily_settings.json")
+    scout, _ = _scout(tmp_path, [])
+    scout._ctx = ctx
+    ctx.llm_replies = [{"topics": [{"keyword": "新番"}]}]
+    plugin._topic_scout = scout
+
+    _run(plugin.webui_topics_save(pick_instructions=" 只挑動畫相關的 ", share_instructions="去巴哈姆特找", context_hours="  "))
+    _run(scout.run_channel("111", NOW, plugin._load_settings().topics))
+    assert "只挑動畫相關的\n" in ctx.prompts[0] and "只輸出 JSON" in ctx.prompts[0], "輸出格式由插件固定附上"
+    intent = ctx.triggered[0][1]
+    assert "去巴哈姆特找" in intent and "Bilibili" not in intent
+    assert "reply_reference 一定要寫清楚" in intent and "不是回應群裡正在聊的內容" in intent, "分享規則固定附上"
+
+    async def no_streams(platform="all_platforms"):
+        return []
+
+    ctx.chat.get_all_streams = no_streams
+    page = _run(plugin.webui_topics())
+    assert {"item": "分享話題的提示詞", "value": "去巴哈姆特找"} in page["prompts"]
+    assert all(row["item"] != "挑話題的提示詞" for row in page["settings"]), "提示詞不擠在一般設定表格裡"
+    _run(plugin.webui_topics_reset_prompts())
+    assert "Bilibili" in plugin._load_settings().topics.share_instructions
 
 
 def test_topics_skip_when_no_topic_picked(tmp_path) -> None:

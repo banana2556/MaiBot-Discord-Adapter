@@ -31,7 +31,7 @@ from .src.life.common import list_group_streams, load_state, readable_chat, save
 from .src.life.cron import describe, parse_cron
 from .src.life.daily_life import DailyLife
 from .src.life.reminders import ReminderMixin
-from .src.life.topics import STATUS_LABELS as TOPIC_STATUS_LABELS, TopicScout
+from .src.life.topics import PROMPT_FIELDS as TOPIC_PROMPT_FIELDS, STATUS_LABELS as TOPIC_STATUS_LABELS, TopicScout
 from .src.native_emoji import NativeEmojiRegistry
 from .src.recv_handler.discord_client import DiscordClientManager
 from .src.recv_handler.message_handler import DiscordMessageHandler, quote_name
@@ -325,6 +325,13 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
     async def webui_topics_save(self, **fields: Optional[str]) -> Dict[str, Any]:
         return {"saved": self._save_page_fields("topics", fields)}
 
+    @API("webui_topics_reset_prompts", description="主動話題的提示詞恢復預設", version="1")
+    async def webui_topics_reset_prompts(self) -> Dict[str, Any]:
+        defaults = type(self._load_settings().topics)()
+        for field in TOPIC_PROMPT_FIELDS:
+            self._save_page_setting("topics", field, getattr(defaults, field))
+        return {"reset": list(TOPIC_PROMPT_FIELDS)}
+
     @API("webui_topics_run_now", description="立刻為每個頻道開一次主動話題", version="1")
     async def webui_topics_run_now(self) -> Dict[str, Any]:
         """不看排程马上跑一次，不影响下次排程时间。"""
@@ -478,8 +485,10 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             "sources": "、".join(sources) or "—",
             "shared_count": f"分享 {sum(item.get('status') == 'shared' for _, _, item in history)}／觸發 {len(history)}",
             "settings": self._setting_rows(
-                "topics", [field for field in PAGE_FIELDS["topics"] if field not in ("channel_list", "cron")]
+                "topics",
+                [field for field in PAGE_FIELDS["topics"] if field not in ("channel_list", "cron", *TOPIC_PROMPT_FIELDS)],
             ),
+            "prompts": self._setting_rows("topics", TOPIC_PROMPT_FIELDS),
             "channels": channels,
             "history": [
                 {
