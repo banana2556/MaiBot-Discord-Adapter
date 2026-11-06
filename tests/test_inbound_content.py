@@ -391,3 +391,23 @@ def test_only_mentions_of_the_bot_itself_are_flagged() -> None:
     # MaiBot 直接相信 is_at / is_mentioned：@ 別人時不能標，否則她會被強制回覆
     assert flagged["is_at"] and flagged["is_mentioned"]
     assert not other["is_at"] and not other["is_mentioned"]
+
+
+def test_replying_to_her_counts_as_calling_her_name_not_an_at() -> None:
+    handler = _handler()
+    handler.set_account_id("42")
+    bot = SimpleNamespace(id=42, name="mai", display_name="麥麥", nick=None, global_name=None, bot=True, discriminator="0")
+    friend = SimpleNamespace(id=8, name="x", display_name="小明", nick=None, global_name=None, bot=False, discriminator="0")
+
+    def reply(to, mentions=(), content="真的嗎"):
+        target = _message(id=7, author=to, content="我剛吃完飯")
+        reference = SimpleNamespace(type=discord.MessageReferenceType.default, message_id=7, cached_message=target)
+        return _convert(handler, _message(content=content, reference=reference, mentions=list(mentions)))
+
+    for result in (reply(bot), reply(bot, mentions=[bot])):  # 回覆時 Discord 的提醒開或關都一樣
+        assert result["is_mentioned"] and not result["is_at"], "等同叫她的名字，照 MaiBot「被提及」的規則"
+        assert result["message_info"]["additional_config"]["discord_mentions_bot"] is True, "睡覺被吵醒、表情決策也當成在叫她"
+    to_friend = reply(friend, mentions=[friend])
+    assert not to_friend["is_mentioned"] and "discord_mentions_bot" not in to_friend["message_info"]["additional_config"]
+    typed = reply(bot, mentions=[bot], content="<@42> 真的嗎")
+    assert typed["is_at"] and typed["is_mentioned"], "回覆時又在內文 @ 她，才算 @"

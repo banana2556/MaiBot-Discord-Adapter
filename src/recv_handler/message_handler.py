@@ -43,6 +43,12 @@ def quote_name(name: Optional[str]) -> Optional[str]:
     return f"「{name.translate(_NAME_ESCAPES)}」" if name else None
 
 
+def typed_mention(message: Any, user_id: Any) -> bool:
+    """內文真的打了 <@id> 才算 @；回覆時 Discord 自動帶的提醒（ping）也會進 message.mentions，但那不是 @。"""
+    content = message.content or ""
+    return f"<@{user_id}>" in content or f"<@!{user_id}>" in content
+
+
 class DiscordMessageHandler:
     """Discord 入站消息处理器。
 
@@ -359,9 +365,21 @@ class DiscordMessageHandler:
 
             if seg.type == "reply" and traits["reply_to"] is None and isinstance(seg.data, dict):
                 traits["reply_to"] = seg.data.get("target_message_id") or None
+                # 回覆她的訊息等同叫她的名字：只算被提及、不算 @，之後照 MaiBot「被提及」的規則決定要不要回
+                if self._replies_to_bot([seg]):
+                    traits["is_mentioned"] = True
 
         walk(segment)
         return traits
+
+    def _replies_to_bot(self, segments: List[Seg]) -> bool:
+        """這幾個訊息段裡有沒有回覆她自己的訊息（被回覆訊息拉不到時不知道作者，當作不是）。"""
+        return bool(self._account_id) and any(
+            seg.type == "reply"
+            and isinstance(seg.data, dict)
+            and str(seg.data.get("target_message_sender_id") or "") == self._account_id
+            for seg in segments
+        )
 
     @staticmethod
     def _normalize_text(value: Any) -> str:
@@ -501,10 +519,6 @@ class DiscordMessageHandler:
         try:
             user_info = self._build_user_info(message.author)
             group_info, additional_config, thread_context = self._build_chat_context(message)
-            # 只有 @ 到 bot 自己才算（回复她的消息且开着提醒也算）；is_at 是有 @ 任何人都会标
-            if any(str(user.id) == self._account_id for user in message.mentions):
-                additional_config["discord_mentions_bot"] = True
-
             message_segments: List[Seg] = []
             mentions_info = self._process_mentions(message)
             if mentions_info:
@@ -526,6 +540,10 @@ class DiscordMessageHandler:
                     message.channel, reference.message_id, reference.cached_message
                 )
                 message_segments.insert(0, Seg(type="reply", data=reply_data))
+
+            # 在叫她：內文 @ 她，或回覆她的訊息；睡覺被吵醒、表情決策都用這個旗標
+            if self._account_id and (typed_mention(message, self._account_id) or self._replies_to_bot(message_segments)):
+                additional_config["discord_mentions_bot"] = True
 
             if not message_segments:
                 return None
@@ -822,9 +840,10 @@ class DiscordMessageHandler:
         """
         mentions_data: Dict[str, Any] = {}
 
-        if message.mentions:
+        typed_users = [user for user in message.mentions if typed_mention(message, user.id)]
+        if typed_users:
             users = []
-            for user in message.mentions:
+            for user in typed_users:
                 users.append({
                     "user_id": str(user.id),
                     "username": user.name,
