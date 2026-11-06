@@ -3,130 +3,155 @@
 # MaiBot Discord Adapter
 
 <p>
-  <a href="https://discord.gg/KArcrcdWVt">
-    <img src="https://img.shields.io/badge/Discord-Maiwithu-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord">
+  <a href="https://github.com/banana2556/MaiBot-Discord-Adapter/actions/workflows/tests.yml">
+    <img src="https://github.com/banana2556/MaiBot-Discord-Adapter/actions/workflows/tests.yml/badge.svg?branch=rdev" alt="Tests">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License">
   </a>
 </p>
 
-MaiBot 的 Discord 平台适配器插件，让你的 MaiBot 能够在 Discord 上运行。
+讓 [MaiBot](https://github.com/Mai-with-u/MaiBot)（麥麥）住進 Discord 的插件。
 
-> [MaiBot 原仓库](https://github.com/Mai-with-u/MaiBot)
+不只是收發訊息的橋接器：她看得懂圖片、影片、語音訊息和連結預覽，會按表情、發貼圖、改自己說錯的話，
+有自己的作息、會主動開話題、記得幫人提醒，也能進語音頻道聊天。
 
 </div>
 
 ---
 
-## 当前能力
+## 功能
 
-- 入站消息
-  - Guild 频道消息
-  - DM 私聊消息
-  - Thread 子区消息
-  - 提及、引用回复、图片、贴纸
-  - 圖片連結、動圖連結（Klipy、Tenor、Giphy）與網頁卡片的預覽圖（等 Discord 展開預覽後當圖片交給識圖和圖片記憶）
-  - 影片按固定秒数截几格画面拼成一张图交给识图（需要 FFmpeg，直接读 Discord CDN 的片段，不整个下载）
-  - Raw reaction add/remove 事件
-  - 可选语音转文本 STT
-- 出站消息
-  - 普通文本
-  - 引用回复
-  - 用户/角色提及
-  - 图片与部分附件
-  - Reaction add/remove
-  - DM / Guild / Thread 路由
-  - 可选文本转语音 TTS
-- 运行时能力
-  - WebUI / `config.toml` 配置映射
-  - 连接状态上报
-  - 断线重连与健康检查
-  - 子区上下文路由
-  - Discord 平台消息 ID 回执回写
+### 聊天
 
----
+- **收發**：伺服器頻道、私訊、子區（Thread）、引用回覆、提及、轉發的訊息；送出的訊息 ID 會回寫給 MaiBot，之後引用、按表情、修改都對得上。
+- **看得懂的內容**：都轉成 MaiBot 能理解的形式再交給她。
+  - 圖片、貼圖、伺服器自訂表情（收過的會存進 MaiBot 表情庫）
+  - 影片：按固定秒數截幾格拼成一張圖給識圖，直接讀 Discord CDN 的片段，不整個下載
+  - 語音訊息：轉成 wav 交給 MaiBot 的語音轉文字
+  - 連結：等 Discord 展開預覽；圖片與動圖（Klipy、Tenor、Giphy）當圖片，網頁卡片取標題、描述和縮圖
+  - 別人按的表情、修改和刪除訊息
+- **她能做的事**（MaiBot 的工具）：
+  - `discord_emote`：在訊息上按表情、單發一個伺服器表情，或發一張貼圖／表情包；她發的表情包如果原本是 Discord 表情或貼圖，會換回原生的送出
+  - `discord_unreact`：收回自己按的表情
+  - `discord_message_edit` / `discord_message_delete`：修改、刪除自己發過的訊息
+- **輸入中提示**：她在想怎麼回的時候顯示「正在輸入…」。
+- **輸出轉繁體**：用 OpenCC 把發到 Discord 的文字轉成繁體（`s2twp` 會一起換成台灣用語），網址不轉，MaiBot 自己的聊天紀錄不變。
+- **名單過濾**：伺服器、頻道、子區、使用者各自可設白名單或黑名單；子區可以沿用所屬頻道的權限和記憶。
 
-## 快速开始
+### 表情與決策模型
 
-1. 将插件放到 `MaiBot/plugins/maibot-discord-adapter`
-2. 启动 MaiBot，让宿主加载插件
-3. 在 WebUI 或插件配置中启用插件
-4. 填写 `connection.token`
-5. 如果要启用语音，同时打开 `voice.enabled` 和 `connection.intent_voice_states`
-6. 按场景填写 `voice.fixed_channel_id` 或 `voice.auto_channel_list`
+可以接一個只回機率的「決策模型」（[vLLM-SR Decision](https://app.vllm-sr.ai) 有免費額度，或 [Jev](https://api.typesafe.ai)，兩家都是 `POST /v1/systemone`，填位址、Key 和模型名就能切換），讓她在群聊裡像人一樣表態：
 
-详细配置见：
+- 有新訊息、第一次進 planner 時，用 planner 這輪看到的同一份聊天判斷：這輪該「只回文字」「文字加一張圖」「只按表情」還是「只發圖」，最值得表態的是哪一則（不一定是最新一則），要表達什麼情緒。
+- 只按表情／只發圖由插件直接替她做；文字加圖會等她回完再補一張。結果只用一句提示告訴 planner，不拿掉她的工具，不打亂 MaiBot 原本的回覆流程。
+- 挑哪張圖不經過 LLM：用 MaiBot 的 embedding 模型比對表情庫描述，避開這個聊天最近用過的，再從最接近的幾張裡加權抽一張，減少重複。
+- 「有沒有人在叫她」和 MaiBot 的被提及判斷一致：@ 她、回覆她、私訊，或提到 `bot.nickname` / `bot.alias_names` 裡的名字。
 
-- [安装配置指南](./docs/setup_guide.md)
+沒開決策模型時，她照樣可以自己用 `discord_emote`。
 
----
+### 日常
 
-## 当前语音提供方
+- **日常生活**：每天在設定時間生成她當天每小時在做什麼，每隔幾小時按最近的聊天調整之後的時段（可關）。目前狀態會加進對話上下文，並同步成 Discord 的狀態文字與上線狀態。
+  - 開啟「睡覺時不回覆」後，睡覺時段只靜默接收；被 @ 或收到私訊時有機率被吵醒，醒來後知道自己剛被吵醒。
+- **主動話題**：按 cron 排程，根據群的長期記憶和最近聊天挑幾個話題，喚醒她自己找相關新聞或影片分享。插件不替她搜尋，所以 MaiBot 裡要有可用的聯網搜尋工具。
+- **定時提醒**：原 [maibot-reminder-plugin](https://github.com/banana2556/maibot-reminder-plugin) 併入。
+  - 工具：`reminder_set`、`reminder_followup`（順手記下 24 小時內的安排，到時關心一下）、`reminder_list`、`reminder_cancel`
+  - 指令：`/reminders`、`/reminder_cancel <id>`
+  - 第一次啟動會把舊插件的 `reminders.json` 複製過來，**請停用舊的定時提醒插件**，不然提醒會重複觸發。
 
-TTS:
+日常生活與主動話題會呼叫 LLM，預設關閉。
 
-- `siliconflow`
-- `gptsovits`
-- `minimax`
-- `fishaudio`
+### 語音頻道
 
-STT:
+- 固定常駐一個頻道，或在允許的頻道之間跟著發話者走（`discord_voice_join` / `discord_voice_leave`），空閒一段時間自動離開。
+- 用 VAD 偵測說話段落，語音轉文字後交給 MaiBot，回覆再用 TTS 唸出來；除錯時可以讓她同時把文字發在語音頻道的文字區。
+- 語音轉文字：`siliconflow_sensevoice`、`aliyun`、`tencent`、`gemini`（Gemini Live API）
+- 文字轉語音：`siliconflow`、`gptsovits`、`minimax`、`fishaudio`
 
-- `siliconflow`
-- `aliyun`
-- `tencent`
-- `gemini`（Gemini Live API，默认 `gemini-3.5-transcribe-live`）
+細節見 [語音設定指南](./docs/voice_config_guide.md)。
 
-语音功能的最低前置条件：
+### 給其他插件用的 API
 
-- `voice.enabled = true`
-- `connection.intent_voice_states = true`
-- Bot 对目标语音频道拥有 `View Channel`、`Connect`、`Speak` 权限
-
-- [语音配置指南](./docs/voice_config_guide.md)
+- `adapter.discord.channel.send_message`：發訊息到指定的 Discord 頻道
+- `adapter.discord.presence.set`：設定 Bot 的狀態文字與上線狀態
 
 ---
 
-## 决策模型与繁体输出
+## 安裝
 
-设置页「聊天与过滤」标签里：
+需要：
 
-- **決策模型**：接 [vLLM-SR Decision](https://app.vllm-sr.ai)（有免費額度）或 [Jev](https://api.typesafe.ai) 這類只回機率的模型，兩家都是 `POST /v1/systemone`，填 API 位址、Key 和模型名就能切換。收到新訊息後第一次進 planner 時，拿 planner 這輪看到的同一份群聊（最後 8 則別人的訊息當可以表態的對象，附上別人已經按的表情），問它這輪該用「只要文字」「文字＋附圖」「只按表情」還是「只發圖」參與、最值得表態的是哪一則（不一定是最新一則）、要表達什麼情緒；發圖的對象太早時改成按在那則上；結果只用一句提示告訴 planner，不會拿掉它的工具（拿掉時 planner 會把回覆直接寫在自己的正文裡，打亂 reply / replyer 的流程）；唯一例外是 Discord 聊天裡拿掉 MaiBot 原生的 `send_emoji`，發表情包一律用 `discord_emote`（它的貼圖也從表情庫挑），免得兩套決定。只按表情／只發圖會直接替她做，並提醒 planner 沒人在問她的話這輪就不用再說話（MaiBot 不讓插件跳過 planner）；「有沒有人在叫她」和 MaiBot 的被提及判斷一致：@ 她、回覆她、私訊，或提到 `bot.nickname` / `bot.alias_names` 裡的名字；文字＋附圖會等她的回覆送完再附一張，並提醒 planner 不用自己發表情。挑哪張不經過 LLM：用 MaiBot 的 embedding 模型算表情庫描述的向量（收過的 Discord 表情與貼圖會自動換回原生的），照「情緒＋相關文字」排除這個聊天最近 10 次用過的，再從最接近的前 8 名照相似度加權抽一張；向量失敗時改用 MaiBot 照情緒標籤挑。請求失敗的那輪 planner 照舊自己決定。「DC生活 → 決策模型」頁面能看每天的判斷與送出、近 14 天走勢和最近紀錄，也能測試連線、清除統計；紀錄存在插件資料目錄的 `decision_stats.json`，向量快取在 `emote_vectors.json`。
-- **输出转繁体**：用 OpenCC 把发到 Discord 的文字（含语音播报、修改消息）转成繁体，`s2twp` 会一起换成台湾用语；网址不转，MaiBot 自己的聊天记录不变。需要 `pip install opencc`。
+- MaiBot 1.x（插件 SDK 2.x）
+- Python 依賴見 [`requirements.txt`](./requirements.txt)
+- [FFmpeg](https://ffmpeg.org/)：影片截圖、語音訊息、語音頻道播放都要用到
+- Discord Bot：在 Developer Portal 開啟 **Message Content Intent**
 
----
+步驟：
 
-## 日常功能
-
-设置页「日常」标签里有三项，共用同一个后台排程：
-
-- **定时提醒**：原 [maibot-reminder-plugin](https://github.com/banana2556/maibot-reminder-plugin) 并入，工具（`reminder_set` / `reminder_followup` / `reminder_list` / `reminder_cancel`）、`/reminders` 指令和 WebUI 页面都保持不变。第一次启动会把旧插件的 `reminders.json` 复制过来，**请停用旧的定时提醒插件**，否则提醒会重复触发。
-- **日常生活**：每天在设定时间生成麦麦当天每小时在做什么，每隔几小时（默认 3）按最近的 Discord 聊天调整之后的时段（「按聊天调整时程」可关）；当前状态会加进对话上下文，并同步成 Discord 状态文字与在线状态。开启「睡觉时不回复」后，时程上在睡觉的时段只静默接收消息、不回复也不开话题（群聊直接把回复频率调成 0，私聊每轮只留 stop），提醒到点会叫醒她 30 分钟；被 @ 或收到私讯时按「被 @ 吵醒的机率」（默认 0.3）醒来，醒着的时候对话里会知道自己刚被吵醒。
-- **主动话题**：按 cron 排程，根据群的长期记忆和最近聊天挑几个可能有兴趣的话题，唤醒麦麦自己找相关新闻或影片分享到群里。插件不替她搜索、也不指定工具，用哪个搜索或浏览工具、发不发都由她决定，所以 MaiBot 里要有可用的联网搜索。
-
-开关、模型、生成时间这类核心设置在插件设置页；生活设定、主动话题的频道与排程，以及语音的频道模式、自动加入的频道、空闲退出与 VAD，改到顶部「DC生活」工作区的页面设置（存在插件数据目录的 `daily_settings.json`，第一次启动会从原配置搬过去），页面上还有立即重新生成时程、叫醒、立刻开一次话题、离开语音频道的按钮。
-
-日常生活与主动话题会调用 LLM，默认关闭。
-
-## Todo List
-
-- [ ] 增添commands统一api接口
-- [ ] 由语音聊天推广到视频识别->直播?
-- [ ] 欢迎提[issues](https://github.com/litroenade/MaiBot-Discord-Adapter/issues)进行补充
+1. 把這個倉庫放到 `MaiBot/plugins/maibot-discord-adapter`，安裝依賴：
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. 啟動 MaiBot，在 WebUI 的插件設定裡啟用插件並填 `connection.token`。
+3. 把 Bot 邀請進伺服器。建立 Bot、拿 Token、設定權限的圖文步驟見 [安裝設定指南](./docs/setup_guide.md)。
+4. 要用語音的話，同時開啟 `voice.enabled` 和 `connection.intent_voice_states`，Bot 在語音頻道要有「檢視頻道」「連線」「說話」權限。
 
 ---
 
-## 排障建议
+## 設定
 
-由于国内Discord平台被墙，如果长时间无法连接Discord平台请尝试开启tun模式(同时推荐代理内核使用singbox)
+插件設定頁分成四個標籤：
+
+| 標籤 | 內容 |
+| --- | --- |
+| 基礎設定 | 開關、Token、Intents、重連與健康檢查、平台名稱 |
+| 聊天與過濾 | 名單過濾、子區、輸入中提示、表情機率、影片截圖間隔、輸出轉繁體、決策模型 |
+| 日常 | 定時提醒、日常生活、主動話題的開關與模型 |
+| 語音 | 語音頻道開關、STT／TTS 服務商與各家金鑰 |
+
+會常常調的東西放在 MaiBot 頂部「**DC生活**」工作區，改了不用重啟 Discord 連線：
+
+- **日常生活**：生活設定、今天的時程、立即重新生成、叫醒她
+- **主動話題**：頻道、排程、分享紀錄、立刻開一次話題
+- **語音**：頻道模式、自動加入的頻道、空閒退出、VAD、讓她離開語音頻道
+- **定時提醒**：所有聊天待觸發的提醒，可直接取消
+- **決策模型**：每天的判斷與送出統計、近 14 天走勢、最近紀錄、測試連線
+
+插件的狀態都存在 MaiBot 給插件的資料目錄：
+
+| 檔案 | 用途 |
+| --- | --- |
+| `daily_settings.json` | 「DC生活」頁面上的設定 |
+| `life_schedule.json` | 今天的時程 |
+| `topics.json` | 主動話題的分享紀錄 |
+| `reminders.json` | 定時提醒 |
+| `native_emoji.json` | 表情庫圖片對應的 Discord 原生表情／貼圖 |
+| `emote_vectors.json` | 表情庫描述的向量快取 |
+| `decision_stats.json` | 決策模型統計 |
 
 ---
-## 致谢
 
-- [@UnCLAS-Prommer](https://github.com/UnCLAS-Prommer) - MaiBot-napcat-adapter 代码参考
+## 開發
+
+```bash
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt "maibot-plugin-sdk==2.21.0" "maim-message==0.6.8" numpy pytest ruff
+.venv/Scripts/python -m pytest -q tests
+.venv/Scripts/ruff check .
+```
+
+CI 在每次推送和 PR 上跑同樣的 ruff 與 pytest。架構、慣例和踩過的坑寫在 [`CLAUDE.md`](./CLAUDE.md)。
+
+問題與建議請開 [issue](https://github.com/banana2556/MaiBot-Discord-Adapter/issues)。
+
 ---
 
-## 开源协议
+## 致謝
 
-本项目采用 [GPL-v3.0](LICENSE) 协议开源
+- 這個專案最初分支自 [@2829798842](https://github.com/2829798842)（litroenade）的 MaiBot-Discord-Adapter，之後大幅改寫。
+- [@UnCLAS-Prommer](https://github.com/UnCLAS-Prommer) 的 MaiBot-napcat-adapter：早期程式碼參考。
+
+## 授權
+
+[GPL-3.0](LICENSE)

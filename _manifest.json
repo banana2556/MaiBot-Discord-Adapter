@@ -4,15 +4,15 @@
   "name": "discord_adapter",
   "description": "Discord platform adapter for MaiBot with duplex gateway support for Guild, DM, Thread, reaction, and voice routing.",
   "author": {
-    "name": "litroenade",
-    "url": "https://github.com/2829798842"
+    "name": "banana2556",
+    "url": "https://github.com/banana2556"
   },
   "license": "GPL-v3.0",
   "urls": {
-    "repository": "https://github.com/litroenade/MaiBot-Discord-Adapter",
-    "homepage": "https://github.com/litroenade/MaiBot-Discord-Adapter",
-    "documentation": "https://github.com/litroenade/MaiBot-Discord-Adapter",
-    "issues": "https://github.com/litroenade/MaiBot-Discord-Adapter/issues"
+    "repository": "https://github.com/banana2556/MaiBot-Discord-Adapter",
+    "homepage": "https://github.com/banana2556/MaiBot-Discord-Adapter",
+    "documentation": "https://github.com/banana2556/MaiBot-Discord-Adapter#readme",
+    "issues": "https://github.com/banana2556/MaiBot-Discord-Adapter/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
