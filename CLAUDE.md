@@ -38,6 +38,8 @@ python -m venv .venv
 - Hook 在 MaiBot 每輪 planner / replyer 的熱路徑上：blocking hook 要設 `timeout_ms`，出錯時放行（`{"action": "continue"}`）。
 - 改 `webui.json` 用腳本（`json.dumps(..., ensure_ascii=False, indent=2)` 會保持原格式），改完用 MaiBot 本體驗證：
   `cd ../MaiBot && .venv/Scripts/python -c "from src.plugin_runtime.webui_schema import load_webui_extension as f; print([p.id for p in f(r'../MaiBot-Discord-Adapter').pages])"`
-- 正式機的 MaiBot / SDK 比本地舊；用到較新的 Host 功能（新 capability、新頁面元件、hook 載荷欄位）前先確認正式機有。
+- 正式機是 MaiBot 1.3.15（2026-10-24，要求 SDK ≥ 2.16.0），本地 `../MaiBot` 較新。要用的 Host 功能直接對照那個版本，不要預先做保險：
+  `cd ../MaiBot && git grep -c '"<capability 或 hook 名稱>"' v1.3.15 -- src`。
+  1.3.15 沒有 `personality.get_current`（`persona_text` 會拿到空字串）和 `ctx.web`；頁面元件、hook、API 呼叫方式和 1.3.19 相同。
 - 刻意的簡化用 `# ponytail:` 註解寫明上限和升級方式。
 - Commit 訊息用繁體中文 conventional commits，例如 `fix(send): …`、`feat(webui): …`。
