@@ -8,9 +8,10 @@
   決策結果只用一句系統提示告訴 planner 已經做了什麼、這輪該怎麼收尾。
 - 只按表情／只發圖：替她做，並提醒 planner 這輪不用再說話（MaiBot 不讓插件跳過 planner）；
   多久表態一次由 planner 的啟動頻率決定。
-- 文字＋附圖：等她的文字送出、停 APPEND_DELAY_SECONDS 秒沒再送，再附一張圖（回覆可能被拆成好幾則），
-  並提醒 planner 不用自己發表情。
-- 挑哪張用 MaiBot 表情庫描述的向量相似度（EmoteLibrary），不經過 LLM：排除這個聊天最近用過的，
+- 文字＋附圖：等她的文字送出、停 APPEND_DELAY_SECONDS 秒沒再送，再附一張圖（回覆可能被拆成好幾則）。
+- 不限制連續發圖：替她發過之後，planner 想再發也可以。
+- 只挑這個伺服器能直接發的貼圖和自訂表情（MaiBot 表情庫裡的一般圖片送出去會變成圖片附件，不挑），
+  用「名字：描述」的向量相似度挑（EmoteLibrary），不經過 LLM：排除這個聊天最近用過的，
   再從前 PICK_POOL 名照相似度加權抽一張，免得每次都發同一張。
 - 決策模型沒開時偶爾照 chat.emote_chance 提醒 planner 可以用 discord_emote；那個工具挑圖一樣用向量，不經過 LLM。
 """
@@ -44,13 +45,13 @@ EMOTE_NUDGE = (
 )
 # 決策結果用系統提示告訴 planner；不動它的工具
 QUICK_NOTE = (
-    "【表情】你已經用{what}回應了「{user}」那則訊息，也不要再發表情或貼圖。"
+    "【表情】你已經用{what}回應了「{user}」那則訊息。"
     "如果沒有人在問你或叫你，這輪就不用再說話，直接呼叫 stop() 結束。"
 )
 QUICK_ADDRESSED_NOTE = (
-    "【表情】你已經用{what}回應了「{user}」那則訊息，不要再發表情或貼圖。有人在跟你說話，需要的話照常回覆。"
+    "【表情】你已經用{what}回應了「{user}」那則訊息。有人在跟你說話，需要的話照常回覆。"
 )
-APPEND_NOTE = "【表情】這輪你回覆送出後，會自動附上一張符合情緒的表情或貼圖，你不用自己發表情或貼圖。"
+APPEND_NOTE = "【表情】這輪你回覆送出後，會自動附上一張符合情緒的表情或貼圖。"
 # 決策模型能選的情境（說明在設定裡，可在頁面改）
 SCENES = ("text", "text_emote", "quick_reaction", "quick_sticker")
 SCENE_LABELS = {
@@ -83,8 +84,6 @@ PROMPT_FIELDS = (
 )
 # 決策模型（vLLM-SR）的選擇題至少要兩個選項，少於兩個整個請求回 422
 MIN_EMOTIONS = 2
-# 發圖不能指定回覆哪一則，表態對象不是最後這幾則別人的訊息時改成按在那則上，免得群組看不懂
-STICKER_RECENT = 2
 # MaiBot 的暱稱與別名（bot.nickname / bot.alias_names）多久重讀一次，用來判斷訊息是不是在叫她
 BOT_NAMES_REFRESH_SECONDS = 600
 # 每個聊天記住最近幾則收到的訊息（planner 上下文裡只有 msg_id 別名，靠這裡換回 Discord 訊息 ID）
@@ -101,6 +100,11 @@ MIN_FRESH = 3
 
 _MESSAGE_HEAD = re.compile(r'<message ((?:[\w-]+="[^"]*"\s*)*)>\n?')
 _ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+
+
+def named(name: str, description: Optional[str]) -> str:
+    """向量比對用的文字：名字放前面，才找得到「叫名字」的貼圖或表情。"""
+    return f"{name}：{description}" if description else name
 
 
 def decision_questions(decision: Any) -> Dict[str, Dict[str, Any]]:
@@ -212,8 +216,7 @@ class EmoteMixin:
         entry = {
             "id": message_id,
             "addressed": self._is_calling_her(message),
-            # 只有真的 Discord 訊息（數字 ID）按得了表情；別人的 reaction 事件（reaction_…）、
-            # 語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
+            # 只有真的 Discord 訊息（數字 ID）按得了表情；語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
             "targetable": message_id.isdigit(),
             "at": time.monotonic(),
         }
@@ -237,7 +240,7 @@ class EmoteMixin:
         # 沒有這個工具：不是 Discord 聊天，或睡覺時段只剩 stop
         if "discord_emote" not in tool_names(kwargs):
             return {"action": "continue"}
-        # discord_emote 的貼圖也從 MaiBot 表情庫挑，兩個都留就是兩套「要不要發表情包」的決定；
+        # discord_emote 也能發貼圖，兩個都留就是兩套「要不要發表情包」的決定；
         # 只拿掉 send_emoji，planner 手上還有 discord_emote，不會因為沒工具而把表情寫進正文
         kwargs["tool_definitions"] = [
             tool for tool in kwargs["tool_definitions"] if tool_names({"tool_definitions": [tool]}) != {"send_emoji"}
@@ -324,7 +327,6 @@ class EmoteMixin:
         target = {
             **targets[index],
             "id": remembered[targets[index]["msg_id"]]["id"],
-            "recent": index >= len(targets) - STICKER_RECENT,
         }
         summary = f"「{target['user']}」：{target['text']}"
         if requested not in SCENES:
@@ -382,15 +384,12 @@ class EmoteMixin:
         """
         if requested == "text" or probability < decision.emote_threshold:
             return "text"
-        if requested == "quick_sticker" and not target["recent"]:
-            # 發圖不能指定回覆哪一則，對象是比較早的訊息時改成按在那則上
-            requested = "quick_reaction"
         if requested.startswith("quick_"):
             guild = self._guild_of(self._latest_inbound.get(session_id, {}).get("group_id"))
             usable = guild is not None and (
                 any(emoji.is_usable() for emoji in guild.emojis)
                 if requested == "quick_reaction"
-                else bool(guild.stickers or self._emote_library.entries)
+                else bool(self._sticker_items(guild) or self._emoji_items(guild))
             )
             if decision.quick_enabled and usable:
                 return requested
@@ -418,7 +417,7 @@ class EmoteMixin:
                     await message.add_reaction(emoji)
                     picked, ok = str(emoji), True
             else:
-                found_image = await self._pick_image(guild, query, emotion, session_id)
+                found_image = await self._pick_image(guild, query, session_id)
                 if found_image:
                     picked, image_b64, score = found_image
                     ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True))
@@ -454,9 +453,7 @@ class EmoteMixin:
         guild = self._guild_of(latest.get("group_id"))
         picked, score, ok = "", 0.0, False
         try:
-            found = await self._pick_image(
-                guild, f"{pending['emotion']}：{pending['reply'][-200:]}", pending["emotion"], session_id
-            )
+            found = await self._pick_image(guild, f"{pending['emotion']}：{pending['reply'][-200:]}", session_id)
             if found:
                 picked, image_b64, score = found
                 ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True))
@@ -475,19 +472,19 @@ class EmoteMixin:
     # ===== 挑表情（向量，不經過 LLM）=====
 
     def _emoji_items(self, guild: Any) -> Dict[str, Tuple[Any, str]]:
-        """伺服器能用的自訂表情：key -> (表情, 比對用文字)；收進表情庫的用描述，沒收過的只有名稱。"""
+        """伺服器能用的自訂表情：key -> (表情, 比對用文字「名字：表情庫的描述」)；沒收進表情庫的只有名字。"""
         return {
-            f"emoji:{emoji.id}": (emoji, self._emote_library.text_for(f"emoji:{emoji.id}") or emoji.name)
+            f"emoji:{emoji.id}": (emoji, named(emoji.name, self._emote_library.text_for(f"emoji:{emoji.id}")))
             for emoji in (guild.emojis if guild is not None else [])
             if emoji.is_usable()
         }
 
     def _sticker_items(self, guild: Any) -> Dict[str, Tuple[Any, str]]:
-        """伺服器能發的貼圖：key -> (貼圖, 比對用文字)；收進表情庫的用描述，沒收過的用名稱和說明。"""
+        """伺服器能發的貼圖：key -> (貼圖, 比對用文字「名字：描述」)；描述用表情庫的，沒收過的用貼圖自己的說明。"""
         return {
             f"sticker:{sticker.id}": (
                 sticker,
-                self._emote_library.text_for(f"sticker:{sticker.id}") or f"{sticker.name}：{sticker.description or ''}",
+                named(sticker.name, self._emote_library.text_for(f"sticker:{sticker.id}") or sticker.description),
             )
             for sticker in (guild.stickers if guild is not None else [])
             if sticker.available and sticker.format != discord.StickerFormatType.lottie
@@ -533,38 +530,31 @@ class EmoteMixin:
         key, score = picked
         return usable[key][0], score
 
-    async def _pick_image(
-        self, guild: Any, query: str, emotion: str, session_id: str
-    ) -> Optional[Tuple[str, str, float]]:
-        """從 MaiBot 表情庫和這個伺服器的貼圖挑一張，回傳 ``(名稱, 圖片 base64, 相似度)``。
+    async def _pick_image(self, guild: Any, query: str, session_id: str) -> Optional[Tuple[str, str, float]]:
+        """從這個伺服器能直接發的貼圖和自訂表情挑一個，回傳 ``(名字, 圖片 base64, 相似度)``。
 
-        表情庫裡的 Discord 表情與貼圖送出時會自動換回原生的；沒收過的伺服器貼圖用名稱和說明比，選中時才下載。
+        只挑 Discord 原生的：MaiBot 表情庫裡的一般圖片送出去會變成圖片附件，不挑。
+        圖片用表情庫裡那份（送出時 DiscordContentBuilder 換回原生貼圖或表情）；沒收過的選中時才下載並登記。
         """
         await self._emote_library.refresh()
-        library = {entry["key"]: entry for entry in self._emote_library.entries}
-        stickers = self._sticker_items(guild)
-        items = [(key, entry["text"]) for key, entry in library.items()]
-        items += [(key, text) for key, (_, text) in stickers.items() if key not in library]
+        items = {**self._sticker_items(guild), **self._emoji_items(guild)}
         if not items:
             return None
-        picked = await self._rank_fresh(session_id, query, items)
+        picked = await self._rank_fresh(session_id, query, [(key, text) for key, (_, text) in items.items()])
         if picked is None:
-            # embedding 失敗：改用 MaiBot 自己照情緒標籤挑的方式
-            self.ctx.logger.warning("表情向量排序失敗，改用 MaiBot 表情庫照情緒挑")
-            found = await self.ctx.emoji.get_by_description(emotion)  # 找不到是 None，失敗是沒有 base64 的 dict
-            return (emotion, str(found["base64"]), 0.0) if isinstance(found, dict) and found.get("base64") else None
+            self.ctx.logger.warning("表情向量排序失敗，改成隨機挑一個伺服器貼圖或表情")
+            picked = (random.choice(list(items)), 0.0)
         key, score = picked
-        if key in library:
-            entry = library[key]
-            sticker = stickers.get(key, (None, ""))[0]
-            return (sticker.name if sticker is not None else entry["text"][:20]), entry["b64"], score
-        sticker = stickers[key][0]
-        image_b64 = await self._message_handler._fetch_emoji_bytes(str(sticker.url), size=256)
+        item = items[key][0]
+        image_b64 = self._emote_library.image_for(key)
         if not image_b64:
-            return None
-        # 發送鏈路只收圖片：先登記這張圖，出站時 DiscordContentBuilder 會換回原生貼圖
-        self._native_emoji.remember(image_b64, "sticker", sticker.id)
-        return sticker.name, image_b64, score
+            kind = key.split(":", 1)[0]
+            image_b64 = await self._message_handler._fetch_emoji_bytes(str(item.url), size=256 if kind == "sticker" else 96)
+            if not image_b64:
+                return None
+            # 發送鏈路只收圖片：先登記這張圖，出站時 DiscordContentBuilder 會換回原生的
+            self._native_emoji.remember(image_b64, kind, item.id)
+        return item.name, image_b64, score
 
     async def _refresh_bot_names(self) -> None:
         """讀 MaiBot 的 bot.nickname 和 bot.alias_names；讀不到就沿用上次的。"""
@@ -601,11 +591,11 @@ class EmoteMixin:
     @Tool(
         "discord_emote",
         description=(
-            "用表情回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張貼圖或表情包（sticker，"
-            "從伺服器貼圖和 MaiBot 表情庫挑；要發表情包也用這個）。"
+            "用表情回應：按在訊息上（reaction／react）、單發一個伺服器表情，或發一張貼圖（sticker，"
+            "從這個伺服器的貼圖和自訂表情挑；要發表情包也用這個）。"
             "可以和 reply 在同一輪一起呼叫（邊回話邊按表情），也可以只按表情不說話。"
             "適合好笑、好消息、附和、按讚、表示收到、驚訝、無語、心疼的時候，像真人聊天一樣偶爾用。"
-            "只傳目標訊息、想表達的情緒與形式，工具會照情緒從表情庫挑，不使用普通 Unicode emoji。"
+            "只傳目標訊息、想表達的情緒與形式，工具會照情緒挑伺服器的貼圖或表情，不使用普通 Unicode emoji。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -620,7 +610,7 @@ class EmoteMixin:
             ToolParameterInfo(
                 name="form",
                 param_type=ToolParamType.STRING,
-                description="送出形式：reaction 按在該訊息上（最輕），emoji 單獨發一個表情，sticker 發一張貼圖或表情包。預設 reaction。",
+                description="送出形式：reaction 按在該訊息上（最輕），emoji 單獨發一個表情，sticker 發一張貼圖。預設 reaction。",
                 required=False,
                 enum_values=list(_EMOTE_FORMS),
             ),
@@ -656,7 +646,7 @@ class EmoteMixin:
         label = self._EMOTE_FORMS[form]
         query = f"{str(feeling or '').strip() or '開心'}：{(target.content or '')[:200]}"
         if form == "sticker":
-            found_image = await self._pick_image(target.guild, query, str(feeling or "開心"), stream_id)
+            found_image = await self._pick_image(target.guild, query, stream_id)
             if not found_image:
                 return {"success": False, "error": f"沒有可用的{label}，沒有送出"}
             picked, image_b64, score = found_image

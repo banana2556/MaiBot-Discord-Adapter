@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 import asyncio
 
-import discord
 from maim_message import Seg
 
 from test_native_emoji import _load_adapter_module
@@ -45,24 +44,3 @@ def test_reply_goes_into_reply_segment_not_text() -> None:
 
     channel = SimpleNamespace(fetch_message=fetch_fail)
     assert asyncio.run(handler._get_reply_context(channel, 42)) == {"target_message_id": "42"}
-
-
-def test_reaction_points_at_reacted_message_with_usable_emoji() -> None:
-    handler = _handler()
-    user = SimpleNamespace(id=7, display_name="Daemi", name="daemi")
-
-    async def resolve_user(_payload, _client):
-        return user, None
-
-    handler._resolve_reaction_user = resolve_user
-    client = SimpleNamespace(cached_messages=[_referenced()], get_partial_messageable=lambda _id: None)
-
-    for emoji, expected in [
-        (discord.PartialEmoji(name="koronekekw", id=123, animated=True), "<a:koronekekw:123>"),
-        (discord.PartialEmoji(name="😂"), "😂（笑哭了）"),
-    ]:
-        payload = SimpleNamespace(user_id=7, message_id=42, channel_id=9, guild_id=None, emoji=emoji)
-        result = handler.build_host_message_dict(asyncio.run(handler._convert_reaction_to_maim("reaction_add", payload, client)))
-        assert result["reply_to"] == "42"
-        assert result["raw_message"][0]["data"]["target_message_content"] == "原文"
-        assert result["processed_plain_text"] == f"用户「Daemi」添加了表情回应 {expected}"

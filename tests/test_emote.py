@@ -29,7 +29,7 @@ def _b64(data: bytes) -> str:
 
 class _Emoji:
     def __init__(self, emoji_id: int, name: str) -> None:
-        self.id, self.name = emoji_id, name
+        self.id, self.name, self.url = emoji_id, name, f"https://e/{emoji_id}.png"
 
     def is_usable(self) -> bool:
         return True
@@ -39,12 +39,16 @@ class _Emoji:
 
 
 class FakeCtx:
-    """MaiBot Host 的假上下文：表情庫兩張、embedding 照關鍵字給向量、送出記下來。"""
+    """MaiBot Host 的假上下文：表情庫三張、embedding 照關鍵字給向量、送出記下來。
+
+    前兩張是收過的 Discord 表情與貼圖（kekw、hug），第三張是聊天裡收來的一般圖片，送出去會變成圖片附件。
+    """
 
     def __init__(self) -> None:
         self.library = [
             {"base64": _b64(b"laugh-cat"), "description": "笑到翻過去的貓", "emotion": "好笑"},
             {"base64": _b64(b"hug"), "description": "抱抱安慰", "emotion": "心疼"},
+            {"base64": _b64(b"stray-dog"), "description": "心疼心疼的狗狗", "emotion": "心疼"},
         ]
         self.embedded: list = []
         self.embed_fail = False
@@ -88,7 +92,7 @@ class FakeCtx:
 
 
 def _env(monkeypatch, answers=None, decision=None, chat=None):
-    """搭一個能跑表情功能的插件：伺服器有兩個自訂表情、一張貼圖；ask_decision 依序回 answers。"""
+    """搭一個能跑表情功能的插件：伺服器有兩個自訂表情、兩張貼圖；ask_decision 依序回 answers。"""
     emote_module = _load_adapter_module("src.emote")
     native_module = _load_adapter_module("src.native_emoji")
     library_module = _load_adapter_module("src.emote_library")
@@ -103,10 +107,13 @@ def _env(monkeypatch, answers=None, decision=None, chat=None):
     ctx = FakeCtx()
     plugin._ctx = ctx
     emojis = [_Emoji(1, "kekw"), _Emoji(2, "thumbsup")]
-    sticker = SimpleNamespace(
-        id=70, name="wave", description="揮手打招呼", available=True, format=discord.StickerFormatType.png, url="https://s/70.png"
-    )
-    guild = SimpleNamespace(emojis=emojis, stickers=[sticker])
+    stickers = [
+        SimpleNamespace(
+            id=70, name="wave", description="揮手打招呼", available=True, format=discord.StickerFormatType.png, url="https://s/70.png"
+        ),
+        SimpleNamespace(id=71, name="hug", description="", available=True, format=discord.StickerFormatType.png, url="https://s/71.png"),
+    ]
+    guild = SimpleNamespace(emojis=emojis, stickers=stickers)
     reactions: list = []
     messages = {}
     for message_id, text in ((FUNNY, "我剛剛跌倒了哈哈哈"), (LAUGH, "笑死"), (LATEST, "真的假的")):
@@ -124,6 +131,7 @@ def _env(monkeypatch, answers=None, decision=None, chat=None):
 
     plugin._native_emoji = native_module.NativeEmojiRegistry()
     plugin._native_emoji.remember(ctx.library[0]["base64"], "emoji", 1)  # 表情庫第一張就是伺服器的 kekw
+    plugin._native_emoji.remember(ctx.library[1]["base64"], "sticker", 71)  # 第二張是貼圖 hug
     plugin._emote_library = library_module.EmoteLibrary(ctx, None, lambda: plugin._native_emoji)
     cached = [SimpleNamespace(id=int(FUNNY), reactions=[SimpleNamespace(emoji="😂", count=3, me=False)])]
     plugin._client_manager = SimpleNamespace(
@@ -148,7 +156,9 @@ def _env(monkeypatch, answers=None, decision=None, chat=None):
     # 抽籤固定取第一名（最接近的），結果才穩定
     monkeypatch.setattr(emote_module.random, "choice", lambda items: items[0])
     monkeypatch.setattr(emote_module.random, "choices", lambda population, weights=None, k=1: [population[0]])
-    return SimpleNamespace(plugin=plugin, ctx=ctx, module=emote_module, reactions=reactions, asked=asked, emojis=emojis)
+    return SimpleNamespace(
+        plugin=plugin, ctx=ctx, module=emote_module, reactions=reactions, asked=asked, emojis=emojis, guild=guild
+    )
 
 
 def _answer(scene, probability=0.9, emotion="好笑", target="1"):
@@ -233,24 +243,26 @@ def test_message_ids_match_maibot_aliases_and_planner_items_are_parsed() -> None
 # ===== 向量表情庫 =====
 
 
-def test_library_maps_discord_emotes_and_ranks_by_similarity() -> None:
+def test_library_keeps_only_discord_emotes_and_ranks_by_similarity() -> None:
     library_module = _load_adapter_module("src.emote_library")
     native_module = _load_adapter_module("src.native_emoji")
     ctx = FakeCtx()
     registry = native_module.NativeEmojiRegistry()
     registry.remember(ctx.library[0]["base64"], "emoji", 1)
+    registry.remember(ctx.library[1]["base64"], "sticker", 71)
     library = library_module.EmoteLibrary(ctx, None, lambda: registry)
 
     async def run():
         await library.refresh(force=True)
-        keys = [entry["key"] for entry in library.entries]
-        assert keys[0] == "emoji:1" and keys[1].startswith("img:"), "能對回 Discord 的用 emoji:<id>，其餘用圖片雜湊"
-        assert library.text_for("emoji:1") == "笑到翻過去的貓，好笑"
+        assert [entry["key"] for entry in library.entries] == ["emoji:1", "sticker:71"], "一般圖片送出去會變成附件，不留"
+        assert library.text_for("emoji:1") == "笑到翻過去的貓，好笑" and library.image_for("sticker:71") == ctx.library[1]["base64"]
+        assert ctx.embedded == [], "向量照「名字：描述」在挑圖時算，重抓表情庫不算"
+        items = [("emoji:1", "kekw：笑到翻過去的貓，好笑"), ("sticker:71", "hug：抱抱安慰，心疼")]
+        ranked = await library.rank("心疼：好可憐", items, top=1)
+        assert ranked[0][0] == "sticker:71"
         embedded = len(ctx.embedded)
-        await library.refresh(force=True)
-        assert len(ctx.embedded) == embedded, "表情庫沒變、描述沒變就不重算"
-        ranked = await library.rank("心疼：好可憐", [(entry["key"], entry["text"]) for entry in library.entries], top=1)
-        assert ranked[0][0] == keys[1]
+        await library.rank("心疼：好可憐", items, top=1)
+        assert len(ctx.embedded) == embedded + 1, "文字沒變就不重算，只算查詢"
         ctx.embed_fail = True
         assert await library.rank("好笑", [("x", "新的描述")]) is None, "embedding 掛了回 None，呼叫端改用別的方法"
 
@@ -262,7 +274,10 @@ def test_background_warm_up_embeds_server_emotes_before_the_first_pick(monkeypat
 
     async def run():
         await env.plugin.warm_emote_vectors()
-        assert {"thumbsup", "wave：揮手打招呼", "笑到翻過去的貓，好笑"} <= set(env.ctx.embedded)
+        assert {"thumbsup", "wave：揮手打招呼", "kekw：笑到翻過去的貓，好笑", "hug：抱抱安慰，心疼"} <= set(env.ctx.embedded), (
+            "名字放在描述前面，叫名字也找得到"
+        )
+        assert not any("狗狗" in text for text in env.ctx.embedded), "一般圖片不算向量"
         before = len(env.ctx.embedded)
         await env.plugin._pick_custom_emoji(SimpleNamespace(emojis=env.emojis, stickers=[]), "讚同：好", "s1")
         assert env.ctx.embedded[before:] == ["讚同：好"], "挑的時候只算這次的查詢"
@@ -316,30 +331,23 @@ def test_quick_reaction_goes_to_the_funny_message_not_the_latest(monkeypatch) ->
 
     names, prompt = asyncio.run(scenario())
     assert names == KEPT_TOOLS and "回應了「「小明」」那則訊息" in prompt and "直接呼叫 stop() 結束" in prompt
+    assert "不要再發" not in prompt, "不限制她接著再發圖"
     assert env.reactions == [(FUNNY, env.emojis[0])], "按在被大家笑的那則，kekw 的描述是好笑"
     stats = env.plugin._decision_stats.state
     assert stats["decisions"][0]["scene"] == "quick_reaction" and "跌倒" in stats["decisions"][0]["message"]
 
 
-def test_sticker_for_an_older_message_becomes_a_reaction_on_it(monkeypatch) -> None:
-    env = _env(
-        monkeypatch,
-        answers=[_answer("quick_sticker", 0.9, "好笑", target="1"), _answer("quick_sticker", 0.9, "揮手", target="3")],
-    )
+def test_sticker_is_sent_even_when_the_target_is_an_older_message(monkeypatch) -> None:
+    env = _env(monkeypatch, answers=[_answer("quick_sticker", 0.9, "好笑", target="1")])
 
     async def scenario():
         _receive_all(env.plugin)
-        older, _ = await _decide(env)
+        names, _ = await _decide(env)
         await _drain()
-        _receive_all(env.plugin)
-        recent, _ = await _decide(env)
-        await _drain()
-        return older, recent
+        return names
 
-    older, recent = asyncio.run(scenario())
-    assert older == recent == KEPT_TOOLS
-    assert env.reactions == [(FUNNY, env.emojis[0])], "發圖不能指定回哪一則，對象太早就改按表情"
-    assert len(env.ctx.sent) == 1 and env.ctx.sent[0][0] == "emoji", "對象是最近的，直接發圖"
+    assert asyncio.run(scenario()) == KEPT_TOOLS
+    assert env.reactions == [] and len(env.ctx.sent) == 1 and env.ctx.sent[0][0] == "emoji", "對象較早也照樣發圖，不改成按表情"
 
 
 def test_asked_to_react_she_reacts_and_can_still_talk(monkeypatch) -> None:
@@ -403,7 +411,9 @@ def test_text_emote_appends_a_picture_after_her_whole_reply(monkeypatch) -> None
         await _drain()
 
     asyncio.run(scenario())
-    assert env.ctx.sent == [("emoji", env.ctx.library[1]["base64"], "s1")], "照「心疼＋她的回覆」挑到抱抱那張"
+    assert env.ctx.sent == [("emoji", env.ctx.library[1]["base64"], "s1")], (
+        "照「心疼＋她的回覆」挑到 hug 貼圖（送出時換回原生）；描述更像的一般圖片會變成附件，不挑"
+    )
     assert env.plugin._decision_stats.state["sends"][0]["kind"] == "append"
     assert "s1" not in env.plugin._pending_append
 
@@ -429,7 +439,7 @@ def test_tool_picks_by_vector_without_any_llm_and_falls_back_when_embedding_fail
     wave = env.ctx.sent[0]
     assert wave[0] == "emoji" and base64.b64decode(wave[1]).startswith(b"sticker-https://s/70.png"), "沒進表情庫的貼圖照說明比，選中才下載"
     assert env.plugin._native_emoji.lookup(wave[1]) == ("sticker", 70), "下載後登記，送出時換回原生貼圖"
-    assert env.ctx.sent[1][1] == env.ctx.library[1]["base64"], "embedding 掛了改用 MaiBot 照情緒標籤挑"
+    assert env.plugin._native_emoji.lookup(env.ctx.sent[1][1]) is not None, "embedding 掛了隨機挑一個原生的，不挑一般圖片"
 
 
 # ===== 「DC生活 → 決策模型」頁面 =====
@@ -522,14 +532,22 @@ def test_decision_test_button_reports_the_failure_reason(monkeypatch) -> None:
 
 def test_recent_picks_are_skipped_so_stickers_do_not_repeat(monkeypatch) -> None:
     env = _env(monkeypatch, decision={"enabled": False})
-    env.ctx.library = [
-        {"base64": _b64(f"funny-{index}".encode()), "description": f"好笑的圖 {index}", "emotion": "好笑"} for index in range(5)
+    funny = [
+        SimpleNamespace(
+            id=80 + index,
+            name=f"funny{index}",
+            description=f"好笑的貼圖 {index}",
+            available=True,
+            format=discord.StickerFormatType.png,
+            url=f"https://s/{80 + index}.png",
+        )
+        for index in range(5)
     ]
+    guild = SimpleNamespace(emojis=[], stickers=funny)
 
     async def run():
-        await env.plugin._emote_library.refresh(force=True)
-        picks = [await env.plugin._pick_image(None, "好笑：哈哈", "好笑", "s1") for _ in range(3)]
-        other_chat = await env.plugin._pick_image(None, "好笑：哈哈", "好笑", "s2")
+        picks = [await env.plugin._pick_image(guild, "好笑：哈哈", "s1") for _ in range(3)]
+        other_chat = await env.plugin._pick_image(guild, "好笑：哈哈", "s2")
         return [image for _, image, _ in picks], other_chat[1]
 
     images, other_chat = asyncio.run(run())
@@ -558,19 +576,19 @@ def test_calling_her_by_alias_counts_like_maibots_own_mention_check(monkeypatch)
 
 def test_only_real_discord_messages_can_be_reaction_targets(monkeypatch) -> None:
     env = _env(monkeypatch, answers=[_answer("quick_reaction", target="1")])
-    reaction_event = "reaction_1567798613130739872_42_reaction_add_1730000000000"
+    voice = "voice-1730000000000-42"
 
     async def scenario():
         _receive_all(env.plugin)
-        env.plugin._remember_inbound("s1", _inbound(reaction_event))  # 別人按表情也會變成一則進 MaiBot
+        env.plugin._remember_inbound("s1", _inbound(voice))  # 語音轉文字也會變成一則進 MaiBot
         kwargs = _planner(env.module)
-        kwargs["items"].append(_message_item(env.module.display_message_id(reaction_event), "阿華", "添加了 😂 表情"))
+        kwargs["items"].append(_message_item(env.module.display_message_id(voice), "阿華", "（語音）早安"))
         await env.plugin.decide_emote_in_planner(**kwargs)
         await _drain()
 
     asyncio.run(scenario())
     criteria = env.asked[0][1]["target"]["criteria"]
-    assert len(criteria) == 3 and all("添加了" not in text for text in criteria.values()), "reaction 事件不是訊息，按不了表情"
+    assert len(criteria) == 3 and all("早安" not in text for text in criteria.values()), "語音轉文字不是訊息，按不了表情"
 
 
 def test_send_emoji_is_hidden_wherever_discord_emote_exists(monkeypatch) -> None:

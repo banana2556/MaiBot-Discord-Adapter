@@ -163,7 +163,7 @@ def test_edit_and_delete_become_notices() -> None:
     assert edited["message_info"]["group_info"]["group_id"] == "10"
 
     deleted = asyncio.run(handler.handle_message_change(_message(stickers=[SimpleNamespace(name="wave")])))
-    assert deleted["processed_plain_text"] == "[事件-消息撤回] 「Daemi」撤回了消息：[贴纸: wave]"
+    assert deleted["processed_plain_text"] == "[事件-消息撤回] 「Daemi」撤回了消息：[貼圖：wave]"
     assert deleted["message_id"].startswith("message_delete_99_")
 
     # 一般消息不是通知
@@ -411,3 +411,35 @@ def test_replying_to_her_counts_as_calling_her_name_not_an_at() -> None:
     assert not to_friend["is_mentioned"] and "discord_mentions_bot" not in to_friend["message_info"]["additional_config"]
     typed = reply(bot, mentions=[bot], content="<@42> 真的嗎")
     assert typed["is_at"] and typed["is_mentioned"], "回覆時又在內文 @ 她，才算 @"
+
+
+def test_stickers_are_read_at_a_size_the_model_can_see_and_keep_their_name() -> None:
+    handler = _handler()
+    warnings: list = []
+    handler._logger = SimpleNamespace(warning=warnings.append, error=print, debug=print)
+    guild_sticker = SimpleNamespace(id=70, name="wave", description="揮手打招呼")
+
+    def sticker(sticker_id, name, fmt, url):
+        async def fetch():
+            return SimpleNamespace(description="Wumpus 揮手")
+
+        return SimpleNamespace(id=sticker_id, name=name, format=fmt, url=url, fetch=fetch)
+
+    wave = sticker(70, "wave", discord.StickerFormatType.png, "https://cdn.discordapp.com/stickers/70.png")
+    wumpus = sticker(9, "Wumpus", discord.StickerFormatType.lottie, "https://cdn.discordapp.com/stickers/9.json")
+    message = _message(guild=SimpleNamespace(id=5, name="伺服器", stickers=[guild_sticker]))
+
+    segments = asyncio.run(handler._sticker_segments(wave, message))
+    assert [(seg.type, seg.data) for seg in segments] == [
+        ("text", "[貼圖：wave（揮手打招呼）]"),
+        ("emoji", "img:https://cdn.discordapp.com/stickers/70.png:128"),
+    ], "貼圖用 128px 讀，48px 視覺模型看不清；名字和說明當文字"
+    lottie = asyncio.run(handler._sticker_segments(wumpus, message))
+    assert [(seg.type, seg.data) for seg in lottie] == [("text", "[貼圖：Wumpus（Wumpus 揮手）]")], "Lottie 沒有圖片，只給名字和說明"
+
+    async def broken(url, size=48):
+        return None
+
+    handler._fetch_emoji_bytes = broken
+    assert len(asyncio.run(handler._sticker_segments(wave, message))) == 1
+    assert warnings and "讀不到貼圖「wave」" in warnings[0], "讀不到要看得到原因"

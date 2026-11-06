@@ -1,12 +1,11 @@
 """表情向量檢索：用 MaiBot 表情庫的描述算向量，照「想表達的情緒＋相關文字」找最接近的幾個，不經過 LLM。
 
 表情庫裡的 Discord 表情與貼圖是收訊時原樣存進去的，用圖片 sha256 就能經 ``NativeEmojiRegistry`` 對回 Discord id；
-描述是 MaiBot 收錄時用視覺模型寫的。沒進過表情庫的伺服器表情只有名稱可比。
-向量快取在插件資料目錄的 ``emote_vectors.json``：``{key: {"text": 描述, "vector": [...]}}``，描述變了才重算。
+描述是 MaiBot 收錄時用視覺模型寫的。這裡只留對得回 Discord 的項目（其他圖片送出去會變成圖片附件），
+挑的時候用「名字：描述」比對（名字來自伺服器的貼圖和表情，見 EmoteMixin._sticker_items / _emoji_items）。
+向量快取在插件資料目錄的 ``emote_vectors.json``：``{key: {"text": 比對文字, "vector": [...]}}``，文字變了才重算。
 """
 
-import base64
-import hashlib
 import math
 import time
 from pathlib import Path
@@ -22,8 +21,7 @@ REFRESH_SECONDS = 300
 class EmoteLibrary:
     """MaiBot 表情庫的快取與向量排序。
 
-    ``entries`` 每項 ``{"key", "b64", "text", "native": (kind, id) 或 None}``；
-    key 在能對回 Discord 時是 ``emoji:<id>`` / ``sticker:<id>``，否則是 ``img:<sha256>``。
+    ``entries`` 每項 ``{"key", "b64", "text", "native": (kind, id)}``，key 是 ``emoji:<id>`` / ``sticker:<id>``。
     """
 
     def __init__(self, ctx: Any, path: Optional[Path], native: Callable[[], Any]) -> None:
@@ -38,40 +36,36 @@ class EmoteLibrary:
 
     def text_for(self, key: str) -> str:
         """表情庫裡這個 Discord 表情或貼圖的描述；沒收錄過時回傳空字串。"""
-        for entry in self.entries:
-            if entry["key"] == key:
-                return entry["text"]
-        return ""
+        return next((entry["text"] for entry in self.entries if entry["key"] == key), "")
+
+    def image_for(self, key: str) -> str:
+        """表情庫裡這個 Discord 表情或貼圖的圖片 base64；沒收錄過時回傳空字串。"""
+        return next((entry["b64"] for entry in self.entries if entry["key"] == key), "")
 
     async def refresh(self, force: bool = False) -> None:
-        """表情庫數量變了才重抓；新的描述在背景算好向量，免得第一次挑圖等很久。"""
+        """表情庫數量變了才重抓（向量在挑圖或背景預熱時照「名字：描述」算）。"""
         if not force and time.monotonic() - self._checked_at < REFRESH_SECONDS:
             return
         self._checked_at = time.monotonic()
-        count = await self._ctx.call_capability("emoji.get_count")
-        count = count.get("count") if isinstance(count, dict) else count
+        count = await self._ctx.call_capability("emoji.get_count")  # 成功時 SDK 拆成數字，失敗是 dict
         if count == self._count and self.entries:
             return
         emojis = await self._ctx.call_capability("emoji.get_all")
-        emojis = emojis.get("emojis") if isinstance(emojis, dict) else emojis
         if not isinstance(emojis, list):
             self._ctx.logger.warning(f"讀取 MaiBot 表情庫失敗：{emojis}")
             return
         entries: Dict[str, Dict[str, Any]] = {}
         for emoji in emojis:
             b64 = str((emoji or {}).get("base64") or "")
-            try:
-                sha = hashlib.sha256(base64.b64decode(b64)).hexdigest()
-            except (ValueError, TypeError):
-                continue
             registry = self._native()
             native = registry.lookup(b64) if registry is not None else None
-            key = f"{native[0]}:{native[1]}" if native else f"img:{sha}"
+            if not native:  # 不是 Discord 的表情或貼圖
+                continue
+            key = f"{native[0]}:{native[1]}"
             text = "，".join(part for part in (str(emoji.get("description") or ""), str(emoji.get("emotion") or "")) if part)
-            entries[key] = {"key": key, "b64": b64, "text": text or "表情", "native": native}
+            entries[key] = {"key": key, "b64": b64, "text": text, "native": native}
         self.entries = list(entries.values())
         self._count = count
-        await self.ensure_vectors([(entry["key"], entry["text"]) for entry in self.entries])
 
     async def ensure_vectors(self, items: Sequence[Tuple[str, str]]) -> None:
         """補算沒有向量（或描述變了）的項目；一批 EMBED_BATCH 則。"""

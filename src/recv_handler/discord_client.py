@@ -128,7 +128,6 @@ class DiscordClientManager:
         self._monitor_task: Optional[asyncio.Task[None]] = None
         self._reconnect_task: Optional[asyncio.Task[None]] = None
 
-        self._registered_reaction_client_id: Optional[int] = None
         self._last_health_check: float = 0
         self._health_check_interval: float = 60
         self._health_check_failures: int = 0
@@ -166,6 +165,8 @@ class DiscordClientManager:
         intents.guilds = self._intents_config.get("guilds", True)
         intents.dm_messages = self._intents_config.get("dm_messages", True)
         intents.message_content = self._intents_config.get("message_content", True)
+        # 別人按的表情不送進 MaiBot（不是對話內容，送進去會讓 planner 對著「誰按了什麼」回應）；
+        # 仍要開這個 intent，discord.py 才會更新快取訊息的 reactions，決策模型拿它當「已經有人按了什麼」的線索
         intents.reactions = self._intents_config.get("reactions", True)
         intents.voice_states = self._intents_config.get("voice_states", False)
 
@@ -239,8 +240,6 @@ class DiscordClientManager:
             return
         self._logger.info(f"Discord 客户端已连接: {client.user}")
         self._logger.info(f"Bot 已加入 {len(client.guilds)} 个服务器")
-
-        self._register_reaction_events()
 
         if self._on_connected_callback:
             try:
@@ -558,93 +557,6 @@ class DiscordClientManager:
             self._typing_indicator_stop_events.pop(channel_id, None)
 
 
-    def _register_reaction_events(self) -> None:
-        """为当前客户端实例注册 raw reaction 事件（去重，避免重复绑定）。"""
-        client = self.client
-        if client is None:
-            return
-
-        current_client_id = id(client)
-        if self._registered_reaction_client_id == current_client_id:
-            return
-
-        @client.event
-        async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
-            await self._process_reaction_event("reaction_add", payload)
-
-        @client.event
-        async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> None:
-            await self._process_reaction_event("reaction_remove", payload)
-
-        self._registered_reaction_client_id = current_client_id
-        self._logger.info("Reaction 事件处理器已注册到 Discord 客户端")
-
-    async def _process_reaction_event(
-        self, event_type: str, payload: discord.RawReactionActionEvent
-    ) -> None:
-        """解析 Reaction 事件、按频道规则过滤后转换为 Host 消息并路由。
-
-        Args:
-            event_type: 事件类型标识（如 reaction_add / reaction_remove）。
-            payload: Discord 提供的 `RawReactionActionEvent` 载荷。
-        """
-        try:
-            if not self.client or not self.client.user:
-                return
-            if payload.user_id == self.client.user.id:
-                return
-
-            guild_id = str(payload.guild_id) if payload.guild_id else None
-            channel_id = str(payload.channel_id)
-
-            channel = self.client.get_channel(payload.channel_id)
-            if not channel:
-                try:
-                    channel = await self.client.fetch_channel(payload.channel_id)
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    return
-
-            is_thread = isinstance(channel, discord.Thread)
-            thread_id = channel_id if is_thread else None
-
-            check_channel_id = channel_id
-            if is_thread:
-                inherit_perms = getattr(
-                    self._chat_filter._config, "inherit_channel_permissions", True
-                ) if self._chat_filter._config else True
-                if inherit_perms:
-                    parent = getattr(channel, "parent", None)
-                    if parent:
-                        check_channel_id = str(parent.id)
-
-            if not self._chat_filter.is_allowed(
-                user_id=str(payload.user_id),
-                guild_id=guild_id,
-                channel_id=check_channel_id,
-                thread_id=thread_id,
-                is_thread=is_thread,
-            ):
-                return
-
-            message_dict = await self._message_handler.handle_reaction_event(
-                event_type, payload, self.client
-            )
-            if message_dict is None:
-                return
-
-            unique_id = f"reaction_{payload.message_id}_{payload.user_id}_{event_type}"
-            await self._gateway_capability.route_message(
-                self._gateway_name,
-                message_dict,
-                external_message_id=unique_id,
-                dedupe_key=unique_id,
-            )
-
-        except Exception as exc:
-            self._logger.error(f"处理 {event_type} 事件时发生错误: {exc}")
-            self._logger.debug(traceback.format_exc())
-
-
     async def start(self) -> None:
         """在关闭标志未置位时循环尝试启动客户端，使用 `client.start` 阻塞直至断开或致命错误。"""
         self._logger.info(f"正在启动 Discord 客户端... (重试间隔: {self._retry_delay}s)")
@@ -697,7 +609,6 @@ class DiscordClientManager:
             except Exception:
                 pass
 
-        self._registered_reaction_client_id = None
         self._setup_client()
         self.is_connected = False
 
@@ -820,7 +731,6 @@ class DiscordClientManager:
                 if not self.is_connected:
                     self._logger.info("Discord 连接已恢复")
                     self.is_connected = True
-                    self._register_reaction_events()
                     if self._on_connected_callback:
                         try:
                             await self._on_connected_callback()

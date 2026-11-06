@@ -18,8 +18,8 @@ from maim_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Se
 from ..emoji_grid import build_numbered_grid
 from ..native_emoji import NativeEmojiRegistry
 from ..utils import run_ffmpeg
-from .emoji_mapping import format_reaction_for_ai, get_emoji_meaning
 
+STICKER_FETCH_SIZE = 128  # 收到的貼圖下載多大（Discord CDN 的 size 用 2 的冪）
 VIDEO_MAX_FRAMES = 9  # 3x3，再多每格就太小，识图看不清
 VIDEO_FRAME_TILE = 320
 VIDEO_FFMPEG_TIMEOUT_SECONDS = 8.0
@@ -107,32 +107,6 @@ class DiscordMessageHandler:
             return self.build_host_message_dict(maim_message)
         except Exception as exc:
             self._logger.error(f"处理 Discord 消息时发生错误: {exc}")
-            self._logger.debug(traceback.format_exc())
-            return None
-
-    async def handle_reaction_event(
-        self,
-        event_type: str,
-        payload: discord.RawReactionActionEvent,
-        client: discord.Client,
-    ) -> Optional[Dict[str, Any]]:
-        """将 Reaction 原始事件转换为 Host 侧 `message_dict`。
-
-        Args:
-            event_type: 事件类型（如 reaction_add / reaction_remove）。
-            payload: Discord `RawReactionActionEvent` 载荷。
-            client: 当前 Bot 客户端，用于拉取用户与频道信息。
-
-        Returns:
-            转换成功返回字典；异常或无法构建时返回 None。
-        """
-        try:
-            maim_message = await self._convert_reaction_to_maim(event_type, payload, client)
-            if maim_message is None:
-                return None
-            return self.build_host_message_dict(maim_message)
-        except Exception as exc:
-            self._logger.error(f"转换 {event_type} 事件时发生错误: {exc}")
             self._logger.debug(traceback.format_exc())
             return None
 
@@ -599,14 +573,7 @@ class DiscordMessageHandler:
             segments.extend(await self._attachment_segments(attachment))
 
         for sticker in source.stickers:
-            # 图片在 MaiBot 里只显示为「[表情包: 描述]」，附上名称让模型分得清是贴纸
-            segments.append(Seg(type="text", data=f"[贴纸: {sticker.name}]"))
-            sticker_url = getattr(sticker, "url", None)
-            sticker_b64 = await self._fetch_emoji_bytes(str(sticker_url)) if sticker_url else None
-            if sticker_b64:
-                if self._native_emoji is not None:
-                    self._native_emoji.remember(sticker_b64, "sticker", sticker.id)
-                segments.append(Seg(type="emoji", data=sticker_b64))
+            segments.extend(await self._sticker_segments(sticker, message))
 
         for embed in source.embeds:
             segments.extend(await self._embed_segments(embed))
@@ -707,6 +674,32 @@ class DiscordMessageHandler:
 
     _EMBED_TEXT_LIMIT = 300
 
+    async def _sticker_segments(self, sticker: Any, message: Optional[discord.Message]) -> List[Seg]:
+        """貼圖：名字和說明當文字（圖片在 MaiBot 裡只顯示成「[表情包: 描述]」，分不出是貼圖），圖片當表情包。
+
+        Lottie 動畫貼圖（Discord 內建的大多是）只有 JSON 沒有圖片，只給名字和說明。
+        """
+        lottie = sticker.format == discord.StickerFormatType.lottie
+        guild = getattr(message, "guild", None)
+        full = next((item for item in getattr(guild, "stickers", None) or [] if item.id == sticker.id), None)
+        if full is None and lottie:
+            try:  # 內建貼圖不在伺服器清單裡，說明要另外抓
+                full = await sticker.fetch()
+            except (discord.HTTPException, AttributeError) as exc:
+                self._logger.debug(f"讀取貼圖說明失敗：{exc}")
+        description = str(getattr(full, "description", "") or "").strip()
+        segments = [Seg(type="text", data=f"[貼圖：{sticker.name}{f'（{description}）' if description else ''}]")]
+        if lottie:
+            return segments
+        # 貼圖原本 320px，用 48px 的話視覺模型看不清；表情維持 48px（見 _fetch_emoji_bytes）
+        image_b64 = await self._fetch_emoji_bytes(str(sticker.url), size=STICKER_FETCH_SIZE)
+        if not image_b64:
+            self._logger.warning(f"讀不到貼圖「{sticker.name}」的圖片（{sticker.format.name}，{sticker.url}），只給模型名字")
+            return segments
+        if self._native_emoji is not None:
+            self._native_emoji.remember(image_b64, "sticker", sticker.id)
+        return [*segments, Seg(type="emoji", data=image_b64)]
+
     async def _embed_segments(self, embed: discord.Embed) -> List[Seg]:
         """動圖連結（Klipy、Tenor、Giphy，預覽類型 gifv）和圖片連結只有預覽圖，一律當圖片交給 MaiBot；
         其餘取標題、描述和欄位轉成文字，卡片帶圖（X、Pixiv、新聞縮圖等）時也附上圖片。
@@ -759,7 +752,7 @@ class DiscordMessageHandler:
             if snapshots:
                 text = f"[转发的消息] {snapshots[0].content}".strip()
             elif stickers:
-                text = f"[贴纸: {stickers[0].name}]"
+                text = f"[貼圖：{stickers[0].name}]"
             elif poll is not None:
                 text = f"[投票: {poll.question}]"
             elif embeds and (embeds[0].title or embeds[0].description):
@@ -1014,213 +1007,3 @@ class DiscordMessageHandler:
             target_message_sender_cardname=quote_name(getattr(author, "nick", None)),
         )
         return reply_data
-
-    async def _convert_reaction_to_maim(
-        self,
-        event_type: str,
-        payload: discord.RawReactionActionEvent,
-        client: discord.Client,
-    ) -> Optional[MessageBase]:
-        """将 Reaction 事件装配为含文本描述与 `reaction_event` 分段的 `MessageBase`。
-
-        Args:
-            event_type: reaction_add 或 reaction_remove 等。
-            payload: 原始 Reaction 事件载荷。
-            client: Bot 客户端，用于解析用户与频道/线程信息。
-
-        Returns:
-            成功返回 `MessageBase`；无法解析用户或异常时返回 None。
-        """
-        try:
-            user, member = await self._resolve_reaction_user(payload, client)
-            if not user:
-                self._logger.error(f"无法获取用户 {payload.user_id} 的信息")
-                return None
-
-            user_display_name = getattr(user, "display_name", None) or user.name
-            server_nickname = getattr(member, "nick", None) if member else None
-
-            user_info = UserInfo(
-                platform=self._platform_name,
-                user_id=str(user.id),
-                user_nickname=quote_name(user_display_name),
-                user_cardname=quote_name(server_nickname),
-            )
-
-            group_info = None
-            is_thread = False
-            thread_name = None
-
-            if payload.guild_id:
-                group_info, is_thread, thread_name = await self._build_reaction_group_info(
-                    payload, client
-                )
-
-            emoji = payload.emoji
-            # str() 给出可直接用于 discord_react 的写法：Unicode 字符或 <:名称:id> / <a:名称:id>
-            emoji_str = str(emoji)
-            emoji_name = None if emoji.is_unicode_emoji() else emoji.name
-
-            emoji_meaning, emoji_display = get_emoji_meaning(emoji_str, emoji_name or "")
-            action_text = "添加了" if event_type == "reaction_add" else "移除了"
-            description = format_reaction_for_ai(emoji_str, emoji_name or "", quote_name(user_display_name), action_text)
-
-            # 被回应的消息挂成 reply 片段，模型能看到「[引用消息]msg_id」，可直接拿去 discord_react
-            reacted_message = discord.utils.get(client.cached_messages, id=payload.message_id)
-            reply_data = await self._get_reply_context(
-                client.get_partial_messageable(payload.channel_id), payload.message_id, reacted_message
-            )
-            message_segments: List[Seg] = [Seg(type="reply", data=reply_data), Seg(type="text", data=description)]
-
-            reaction_metadata = {
-                "event_type": event_type,
-                "action": "add" if event_type == "reaction_add" else "remove",
-                "user_id": str(payload.user_id),
-                "user_name": user_display_name,
-                "message_id": str(payload.message_id),
-                "channel_id": str(payload.channel_id),
-                "guild_id": str(payload.guild_id) if payload.guild_id else None,
-                "emoji": emoji_str,
-                "emoji_name": emoji_name,
-                "emoji_display": emoji_display,
-                "emoji_meaning": emoji_meaning,
-                "is_thread": is_thread,
-                "thread_name": thread_name if is_thread else None,
-            }
-            message_segments.append(Seg(type="reaction_event", data=reaction_metadata))
-
-            format_info = FormatInfo(
-                content_format=["reply", "text", "reaction_event"],
-                accept_format=["text", "image", "emoji", "reply", "voice", "command", "file", "video", "reaction"],
-            )
-
-            timestamp = int(time.time() * 1000)
-            unique_id = f"reaction_{payload.message_id}_{payload.user_id}_{event_type}_{timestamp}"
-
-            message_info = BaseMessageInfo(
-                platform=self._platform_name,
-                message_id=unique_id,
-                time=time.time(),
-                user_info=user_info,
-                group_info=group_info,
-                format_info=format_info,
-            )
-
-            if len(message_segments) == 1:
-                message_segment = message_segments[0]
-            else:
-                message_segment = Seg(type="seglist", data=message_segments)
-
-            return MessageBase(
-                message_info=message_info,
-                message_segment=message_segment,
-                raw_message=description,
-            )
-
-        except Exception as exc:
-            self._logger.error(f"转换 reaction 事件时发生错误: {exc}")
-            self._logger.debug(traceback.format_exc())
-            return None
-
-    async def _resolve_reaction_user(
-        self, payload: discord.RawReactionActionEvent, client: discord.Client
-    ) -> tuple[Optional[discord.User], Optional[discord.Member]]:
-        """从载荷与缓存中解析操作 Reaction 的用户及公会内 `Member`（若存在）。
-
-        Args:
-            payload: 原始 Reaction 事件。
-            client: 用于 `get_guild` / `fetch_member` / `fetch_user` 的客户端。
-
-        Returns:
-            `(User 或 None, Member 或 None)`；公会场景下优先填充 Member。
-        """
-        user: Optional[discord.User] = None
-        member: Optional[discord.Member] = None
-
-        if payload.member:
-            member = payload.member
-            user = payload.member
-        else:
-            guild = client.get_guild(payload.guild_id) if payload.guild_id else None
-            if guild:
-                member = guild.get_member(payload.user_id)
-                if not member:
-                    try:
-                        member = await guild.fetch_member(payload.user_id)
-                    except (discord.NotFound, discord.HTTPException):
-                        pass
-                if member:
-                    user = member
-
-            if not user:
-                user = client.get_user(payload.user_id)
-                if not user:
-                    try:
-                        user = await client.fetch_user(payload.user_id)
-                    except (discord.NotFound, discord.HTTPException):
-                        pass
-
-        return user, member
-
-    async def _build_reaction_group_info(
-        self, payload: discord.RawReactionActionEvent, client: discord.Client
-    ) -> tuple[Optional[GroupInfo], bool, Optional[str]]:
-        """根据频道 ID 解析 `GroupInfo`，并判断是否在子区及子区名称。
-
-        Args:
-            payload: 含 `channel_id` / `guild_id` 的 Reaction 载荷。
-            client: 用于 `get_channel` / `fetch_channel` / `get_guild` 的客户端。
-
-        Returns:
-            `(GroupInfo, 是否为子区, 子区名称或 None)`；频道不可见时仍返回基于 ID 构造的 `GroupInfo`。
-        """
-        is_thread = False
-        thread_name = None
-
-        channel = client.get_channel(payload.channel_id)
-        if not channel:
-            try:
-                channel = await client.fetch_channel(payload.channel_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                channel = None
-
-        guild = client.get_guild(payload.guild_id) if payload.guild_id else None
-        guild_name = guild.name if guild else None
-
-        if channel and isinstance(channel, discord.Thread):
-            is_thread = True
-            thread_name = channel.name
-            parent_channel = getattr(channel, "parent", None)
-            inherit = getattr(self._chat_config, "inherit_channel_memory", True)
-
-            if parent_channel and inherit:
-                channel_name = parent_channel.name
-                group_id = str(parent_channel.id)
-                group_name = f"[当前子区: {thread_name}] {channel_name}"
-                if guild_name:
-                    group_name += f" @ {guild_name}"
-            else:
-                group_id = str(channel.id)
-                group_name = thread_name or ""
-                if parent_channel:
-                    group_name += f" [{parent_channel.name}]"
-                if guild_name:
-                    group_name += f" @ {guild_name}"
-        elif channel:
-            channel_name = channel.name if hasattr(channel, "name") else f"频道{channel.id}"
-            group_id = str(channel.id)
-            group_name = channel_name
-            if guild_name:
-                group_name += f" @ {guild_name}"
-        else:
-            group_id = str(payload.channel_id)
-            group_name = f"频道{payload.channel_id}"
-            if guild_name:
-                group_name += f" @ {guild_name}"
-
-        group_info = GroupInfo(
-            platform=self._platform_name,
-            group_id=group_id,
-            group_name=group_name,
-        )
-        return group_info, is_thread, thread_name
