@@ -35,7 +35,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import ask as ask_decision
-from .life.common import short_time
+from .life.common import sent_text, short_time
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
@@ -435,15 +435,7 @@ class EmoteMixin:
         if datetime.now() > pending["expires"]:
             self._pending_append.pop(session_id, None)
             return
-        raw = message.get("raw_message")
-        segments = raw if isinstance(raw, list) else [raw] if isinstance(raw, Mapping) else []
-        if isinstance(raw, Mapping) and raw.get("type") == "seglist":
-            segments = raw.get("data") if isinstance(raw.get("data"), list) else []
-        text = "".join(
-            str(segment.get("data") or "")
-            for segment in segments
-            if isinstance(segment, Mapping) and segment.get("type") == "text"
-        )
+        text = sent_text(message)
         if not text:
             return
         pending["reply"] += text

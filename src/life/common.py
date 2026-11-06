@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import json
 import re
@@ -37,6 +37,19 @@ async def readable_chat(ctx: Any, stream_id: str, since: datetime, until: dateti
         return result.strip()
     ctx.logger.warning(f"讀取聊天紀錄失敗：{result.get('error') if isinstance(result, dict) else result}")
     return ""
+
+
+def sent_text(message: Mapping[str, Any]) -> str:
+    """send_service hook 的出站訊息裡所有文字段接起來（圖片、表情等不算）。"""
+    raw = message.get("raw_message")
+    segments = raw if isinstance(raw, list) else [raw] if isinstance(raw, Mapping) else []
+    if isinstance(raw, Mapping) and raw.get("type") == "seglist":
+        segments = raw.get("data") if isinstance(raw.get("data"), list) else []
+    return "".join(
+        str(segment.get("data") or "")
+        for segment in segments
+        if isinstance(segment, Mapping) and segment.get("type") == "text"
+    )
 
 
 def short_time(iso: Any) -> str:

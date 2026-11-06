@@ -27,11 +27,11 @@ from .runtime_state import DiscordRuntimeStateManager
 from .src.decision import DecisionStats
 from .src.emote import EmoteMixin, tool_names
 from .src.emote_library import EmoteLibrary
-from .src.life.common import list_group_streams, load_state, readable_chat, save_state, short_time
+from .src.life.common import list_group_streams, load_state, readable_chat, save_state, sent_text, short_time
 from .src.life.cron import describe, parse_cron
 from .src.life.daily_life import DailyLife
 from .src.life.reminders import ReminderMixin
-from .src.life.topics import TopicScout
+from .src.life.topics import STATUS_LABELS as TOPIC_STATUS_LABELS, TopicScout
 from .src.native_emoji import NativeEmojiRegistry
 from .src.recv_handler.discord_client import DiscordClientManager
 from .src.recv_handler.message_handler import DiscordMessageHandler, quote_name
@@ -445,6 +445,8 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
     async def webui_topics(self) -> Dict[str, Any]:
         """WebUI 主动话题页：下次时间、各频道是否认得、分享过的内容（新的在前）。"""
         config = self._load_settings().topics
+        if self._topic_scout is not None:
+            self._topic_scout.expire(datetime.now())
         state = self._topic_scout.state if self._topic_scout is not None else {}
         names = await self._webui_chat_names()
         channels = []
@@ -474,7 +476,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             "next_due": describe(datetime.fromisoformat(next_due)) if next_due else "—",
             "cron": config.cron,
             "sources": "、".join(sources) or "—",
-            "shared_count": len(history),
+            "shared_count": f"分享 {sum(item.get('status') == 'shared' for _, _, item in history)}／觸發 {len(history)}",
             "settings": self._setting_rows(
                 "topics", [field for field in PAGE_FIELDS["topics"] if field not in ("channel_list", "cron")]
             ),
@@ -485,6 +487,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
                     "chat": names.get(stream_id, stream_id),
                     "kind": TOPIC_SOURCE_LABELS.get(item.get("source"), item.get("source") or "—"),
                     "topic": item.get("topic") or "—",
+                    "result": TOPIC_STATUS_LABELS.get(item.get("status"), "—"),
                     "title": item.get("title") or "—",
                     "url": item.get("url") or "—",
                 }
@@ -1226,7 +1229,27 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         self._stop_discord_typing_for_hook_message(message)
         if kwargs.get("sent") and isinstance(message, Mapping):
             self._schedule_append(message)
+            if self._topic_scout is not None:
+                self._topic_scout.on_sent(str(message.get("session_id") or ""), sent_text(message))
         return {"action": "continue"}
+
+    @HookHandler(
+        "maisaka.replyer.before_request",
+        name="topic_share_reply_hint",
+        mode="blocking",
+        order="late",
+        timeout_ms=1000,
+    )
+    async def add_topic_share_hint(self, **kwargs: Any) -> Dict[str, Any]:
+        """主動話題的分享回覆：replyer 看不到主動任務和她搜到的內容，提醒它這是主動分享、要附上連結。"""
+        args = kwargs.get("reply_tool_args")
+        if self._topic_scout is None or not isinstance(args, Mapping):
+            return {"action": "continue"}
+        hint = self._topic_scout.reply_hint(str(kwargs.get("session_id") or ""), args)
+        if not hint:
+            return {"action": "continue"}
+        kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{hint}".strip()
+        return {"action": "continue", "modified_kwargs": kwargs}
 
     def _stop_discord_typing_for_hook_message(self, message: Mapping[str, Any] | None) -> None:
         if self._client_manager is None or not isinstance(message, Mapping):

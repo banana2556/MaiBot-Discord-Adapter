@@ -53,6 +53,12 @@ class FakeCtx:
         self.chat = SimpleNamespace(get_stream_by_group_id=self._stream_by_group)
         self.frequency = SimpleNamespace(set_adjust=self._set_adjust)
         self.adjusts: list = []
+        self.sent: list = []
+        self.send = SimpleNamespace(text=self._send_text)
+
+    async def _send_text(self, text, stream_id, **kwargs):
+        self.sent.append((stream_id, text))
+        return True
 
     async def _trigger(self, stream_id, intent, **kwargs):
         self.triggered.append((stream_id, intent, kwargs.get("reason")))
@@ -346,6 +352,52 @@ def test_topics_kind_follows_settings_and_avoids_recent(tmp_path) -> None:
     assert "貓咪影片" in ctx.prompts[1], "挑话题时避开最近开过的"
 
 
+def test_topic_counts_as_shared_only_when_her_link_is_actually_sent(tmp_path, monkeypatch) -> None:
+    topics_module = _load_adapter_module("src.life.topics")
+    monkeypatch.setattr(topics_module, "FOLLOWUP_DELAY_SECONDS", 0)
+    picks = [{"topics": [{"keyword": keyword}]} for keyword in ("新番", "音遊", "貓咪", "拉麵")]
+    scout, ctx = _scout(tmp_path, picks)
+    config = _topic_config()
+    share = {"reply_reference": "這是我主動分享的新聞：《新番定檔》https://news.example/a?id=1。重點是…"}
+
+    async def scenario():
+        # 1. 她發的回覆裡有連結：記成已分享
+        await scout.run_channel("111", NOW, config)
+        assert "不是回應群裡正在聊的內容" in ctx.triggered[0][1] and "reply_reference 一定要寫清楚" in ctx.triggered[0][1]
+        assert scout.reply_hint("s-111", {"reply_reference": "小明在問晚餐"}) == "", "沒有連結的是一般聊天回覆，不動"
+        hint = scout.reply_hint("s-111", share)
+        assert "主動在群裡開新話題" in hint and "https://news.example/a?id=1" in hint
+        scout.on_sent("s-111", "這個超扯 https://news.example/a?id=1 大家看了嗎")
+        # 2. replyer 漏了連結：送完等一下還沒看到就補發
+        await scout.run_channel("111", NOW, config)
+        scout.reply_hint("s-111", share)
+        scout.on_sent("s-111", "新番定檔了！")
+        await asyncio.sleep(0.01)
+        # 3. 一直沒發：過了期限記成沒發出去，之後挑話題不算開過
+        await scout.run_channel("111", NOW, config)
+        scout.expire(NOW + topics_module.SHARE_TIMEOUT)
+        await scout.run_channel("111", NOW, config)
+
+    _run(scenario())
+    history = scout.state["history"]["s-111"]
+    assert [item["status"] for item in history] == ["shared", "shared", "missed", "waiting"]
+    assert history[0]["url"] == "https://news.example/a?id=1" and history[0]["title"].startswith("這個超扯")
+    assert ctx.sent == [("s-111", "https://news.example/a?id=1")], "只有漏掉連結的那次補發"
+    assert "- 新番" in ctx.prompts[3] and "- 貓咪" not in ctx.prompts[3], "沒發出去的話題下次還能挑"
+
+
+def test_topic_share_hint_reaches_the_replyer(tmp_path) -> None:
+    plugin, _ = _plugin(tmp_path)
+    scout, _ = _scout(tmp_path, [{"topics": [{"keyword": "新番"}]}])
+    plugin._topic_scout = scout
+    _run(scout.run_channel("111", NOW, _topic_config()))
+    args = {"reply_reference": "主動分享 https://news.example/a"}
+    result = _run(plugin.add_topic_share_hint(session_id="s-111", reply_tool_args=args, extra_prompt="原本的要求"))
+    prompt = result["modified_kwargs"]["extra_prompt"]
+    assert prompt.startswith("原本的要求\n") and "https://news.example/a" in prompt
+    assert _run(plugin.add_topic_share_hint(session_id="s-999", reply_tool_args=args)) == {"action": "continue"}
+
+
 def test_topics_skip_when_no_topic_picked(tmp_path) -> None:
     scout, ctx = _scout(tmp_path, [{"topics": []}])
     assert _run(scout.run_channel("111", NOW, _topic_config())) is None
@@ -401,7 +453,7 @@ def test_webui_pages_show_life_schedule_and_topic_history(tmp_path) -> None:
     }
     plugin._topic_scout = _load_adapter_module("src.life.topics").TopicScout(ctx, tmp_path / "topics.json", None)
     old = {"time": "2026-11-01T12:00:00", "source": "news", "topic": "音遊", "title": "舊的", "url": "https://a"}
-    new = {"time": "2026-11-02T12:00:00", "source": "video", "topic": "貓", "title": "影片：貓", "url": ""}
+    new = {"time": "2026-11-02T12:00:00", "source": "video", "topic": "貓", "title": "影片：貓", "url": "", "status": "shared"}
     plugin._topic_scout._state = {"history": {"s-111": [old, new]}}
 
     life = _run(plugin.webui_life())
@@ -413,7 +465,8 @@ def test_webui_pages_show_life_schedule_and_topic_history(tmp_path) -> None:
     assert [row["title"] for row in topics["history"]] == ["影片：貓", "舊的"], "新的在前"
     assert topics["history"][0]["chat"] == "聊天大廳" and topics["history"][0]["kind"] == "影片"
     assert topics["channels"][0]["chat"] == "聊天大廳" and "不認得" in topics["channels"][1]["chat"]
-    assert topics["next_due"] == "—" and topics["shared_count"] == 2
+    assert topics["next_due"] == "—" and topics["shared_count"] == "分享 1／觸發 2"
+    assert [row["result"] for row in topics["history"]] == ["已分享", "—"], "舊紀錄沒有結果"
 
     plugin.set_plugin_config(_cfg({}))
     assert "未啟用" in _run(plugin.webui_life())["notice"]
