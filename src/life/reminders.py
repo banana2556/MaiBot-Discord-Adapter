@@ -18,6 +18,7 @@ import json
 
 from maibot_sdk import API, Command, Tool
 
+from ...config import PAGE_FIELDS
 from .common import save_state
 from .cron import describe, next_run, parse_at, parse_cron
 
@@ -100,7 +101,7 @@ class ReminderMixin:
 
     async def _apply_reminder_switches(self) -> None:
         # 关闭时直接禁用工具，麦麦在 Planner 里就看不到它，不会白白调用一次再被拒绝
-        reminder_config = self.config.reminder
+        reminder_config = self._load_settings().reminder
         switches = {name: reminder_config.enabled for name in REMINDER_TOOLS}
         switches[FOLLOWUP_TOOL] = reminder_config.enabled and reminder_config.followup_enabled
         component = self.ctx.component
@@ -148,7 +149,7 @@ class ReminderMixin:
 
         提前 drift_minutes 分钟唤醒，抵消麦麦思考和回复的耗时。
         """
-        drift = timedelta(minutes=self.config.reminder.drift_minutes)
+        drift = timedelta(minutes=self._load_settings().reminder.drift_minutes)
         due = [reminder for reminder in self._reminders if datetime.fromisoformat(reminder["due"]) - drift <= now]
         for reminder in due:
             scheduled = datetime.fromisoformat(reminder["due"])
@@ -258,9 +259,9 @@ class ReminderMixin:
         """设置被要求的提醒；参数错误或超过每个聊天的上限时作为失败结果交给模型改正。"""
         del kwargs
         now = datetime.now()
-        limit = self.config.reminder.max_per_chat
+        limit = self._load_settings().reminder.max_per_chat
         try:
-            if not self.config.reminder.enabled:
+            if not self._load_settings().reminder.enabled:
                 raise ValueError("定時提醒已在設定中關閉")
             if sum(not r["auto"] and r["stream_id"] == stream_id for r in self._reminders) >= limit:
                 raise ValueError(f"這個聊天已經有 {limit} 則提醒，先取消一些再設")
@@ -298,7 +299,7 @@ class ReminderMixin:
         """顺手记下一件事；超过每个聊天的上限或不在 24 小时内时拒绝。"""
         del kwargs
         now = datetime.now()
-        reminder_config = self.config.reminder
+        reminder_config = self._load_settings().reminder
         limit = reminder_config.followup_max_per_chat
         try:
             if not (reminder_config.enabled and reminder_config.followup_enabled):
@@ -391,7 +392,10 @@ class ReminderMixin:
         """WebUI 显示真实聊天名称：群名，私聊显示「某某的私聊」。"""
         names = await self._webui_chat_names()
         rows = [{**row, "chat": names.get(row["stream_id"], row["stream_id"])} for row in self._reminder_rows()]
+        enabled = self._load_settings().reminder.enabled
         return {
+            "notice": "" if enabled else "定時提醒未啟用：麥麥看不到提醒工具，已設的提醒也暫停觸發；在下方「設定」開啟。",
+            "settings": self._setting_rows("reminder", PAGE_FIELDS["reminder"]),
             "now": describe(datetime.now()),
             "total": len(rows),
             "followup_count": sum(row["kind"] == FOLLOWUP for row in rows),
@@ -400,6 +404,13 @@ class ReminderMixin:
             "commands": COMMANDS,
             "tools": TOOLS,
         }
+
+    @API("webui_reminders_save", description="儲存定時提醒的設定", version="1")
+    async def webui_reminders_save(self, **fields: Optional[str]) -> Dict[str, Any]:
+        """只改有填的項目；開關改了要馬上讓麥麥看得到或看不到提醒工具。"""
+        saved = self._save_page_fields("reminder", fields)
+        await self._apply_reminder_switches()
+        return {"saved": saved}
 
     @API("webui_cancel", description="取消任意聊天的一則提醒", version="1")
     async def webui_cancel(self, reminder_id: str) -> Dict[str, Any]:

@@ -894,103 +894,98 @@ class GeminiSTTConfig(PluginConfigBase):
 
 
 class ReminderConfig(PluginConfigBase):
-    """定时提醒（原 luca.reminder 插件）。启用前请停用旧的定时提醒插件，提醒会自动搬过来。"""
+    """定時提醒（原 luca.reminder 插件）。設定都在「DC生活 → 定時提醒」頁面。"""
 
-    __ui_label__: ClassVar[str] = "定时提醒"
+    __ui_label__: ClassVar[str] = "定時提醒"
     __ui_order__: ClassVar[int] = 20
 
     enabled: bool = Field(
         default=True,
-        description="允许麦麦设定、查看、取消提醒；关闭后麦麦看不到提醒工具，已设的提醒也暂停触发。",
-        json_schema_extra={"label": "启用定时提醒", "order": 0},
+        description="允許麥麥設定、查看、取消提醒；關閉後麥麥看不到提醒工具，已設的提醒也暫停觸發。",
+        json_schema_extra={"label": "啟用定時提醒", "order": 0},
     )
     drift_minutes: int = Field(
         default=1,
         ge=0,
-        description="提醒飘移（分钟）：麦麦思考和回复需要时间，提前这么多分钟开始对话。",
-        json_schema_extra={"label": "提前唤醒（分钟）", "order": 1, "step": 1},
+        description="麥麥思考和回覆需要時間，提前這麼多分鐘開始對話。",
+        json_schema_extra={"label": "提前喚醒（分鐘）", "order": 1, "step": 1},
     )
     max_per_chat: int = Field(
         default=10,
         ge=0,
-        description="每个聊天同时待触发、有人请麦麦设的提醒数上限。",
-        json_schema_extra={"label": "每个聊天提醒上限", "order": 2, "step": 1},
+        description="每個聊天同時待觸發、有人請麥麥設的提醒數上限。",
+        json_schema_extra={"label": "每個聊天提醒上限", "order": 2, "step": 1},
     )
     followup_enabled: bool = Field(
         default=True,
-        description="允许麦麦顺手记下群友 24 小时内的安排，到时关心一下；关闭后麦麦看不到这个工具。",
-        json_schema_extra={"label": "顺手记下", "order": 3},
+        description="允許麥麥順手記下群友 24 小時內的安排，到時關心一下；關閉後麥麥看不到這個工具。",
+        json_schema_extra={"label": "順手記下", "order": 3},
     )
     followup_max_per_chat: int = Field(
         default=3,
         ge=0,
-        description="每个聊天同时待触发的顺手记下数上限。",
-        json_schema_extra={"label": "每个聊天顺手记下上限", "order": 4, "step": 1},
+        description="每個聊天同時待觸發的順手記下數上限。",
+        json_schema_extra={"label": "每個聊天順手記下上限", "order": 4, "step": 1},
     )
 
 
 class LifeConfig(PluginConfigBase):
-    """日常生活：每天生成麦麦每小时的生活时程，定期按聊天调整，当前状态会注入对话并同步到 Discord 状态。生活设定在「DC生活 → 日常生活」页面填写。"""
+    """日常生活：每天生成麥麥每小時的生活時程，定期按聊天調整，目前狀態會加進對話並同步到 Discord 狀態。設定都在「DC生活 → 日常生活」頁面。"""
 
     __ui_label__: ClassVar[str] = "日常生活"
     __ui_order__: ClassVar[int] = 21
 
     enabled: bool = Field(
         default=False,
-        description="是否启用日常生活时程。",
-        json_schema_extra={"label": "启用日常生活", "order": 0, "hint": "会用到 LLM：每天生成一次，之后每隔一段时间调整一次。"},
+        description="是否啟用日常生活時程；會用到 LLM：每天生成一次，之後每隔一段時間調整一次。",
+        json_schema_extra={"label": "啟用日常生活", "order": 0},
     )
     life_setting: str = Field(
         default="",
-        description="补充人设里没写的生活背景，例如身分、住哪、作息、爱好。",
-        json_schema_extra={
-            "label": "生活设定",
-            "order": 1,
-            "x-widget": "textarea",
-            "placeholder": "例如：住台北的大学生，晚睡晚起，喜欢打音游和逛超商",
-        },
+        description="補充人設裡沒寫的生活背景，例如身分、住哪、作息、愛好。",
+        json_schema_extra={"label": "生活設定", "order": 1},
     )
     generate_time: str = Field(
         default="00:00",
-        description="每天生成当天时程的时间（HH:MM）；生成前沿用前一天同一时段。",
-        json_schema_extra={"label": "每日生成时间", "order": 2, "placeholder": "00:00"},
+        description="每天生成當天時程的時間（HH:MM）；生成前沿用前一天同一時段。",
+        json_schema_extra={"label": "每日生成時間", "order": 2},
     )
     adjust_enabled: bool = Field(
         default=True,
-        description="每隔一段时间把最近的聊天交给 LLM，看有没有答应别人、约好的事要改之后的行程；关掉就整天照早上生成的时程走。",
-        json_schema_extra={"label": "按聊天调整时程", "order": 3, "hint": "每次调整会用一次 LLM。"},
+        description="每隔一段時間把最近的聊天交給 LLM，看有沒有答應別人、約好的事要改之後的行程；關掉就整天照早上生成的時程走。",
+        json_schema_extra={"label": "按聊天調整時程", "order": 3},
     )
     adjust_interval_hours: int = Field(
         default=3,
         ge=0,
-        description="开启「按聊天调整时程」时，每隔几小时调整一次；0 也等于不调整。",
-        json_schema_extra={"label": "调整间隔（小时）", "order": 4, "step": 1},
+        description="開啟「按聊天調整時程」時，每隔幾小時調整一次；0 也等於不調整。",
+        json_schema_extra={"label": "調整間隔（小時）", "order": 4, "step": 1},
     )
     sync_presence: bool = Field(
         default=True,
-        description="换时段时把当前活动同步成 Discord 状态文字与在线状态。",
-        json_schema_extra={"label": "同步 Discord 状态", "order": 5},
+        description="換時段時把目前活動同步成 Discord 狀態文字與上線狀態。",
+        json_schema_extra={"label": "同步 Discord 狀態", "order": 5},
     )
     inject_prompt: bool = Field(
         default=True,
-        description="把当前生活状态加进麦麦的对话上下文，让她聊天时知道自己正在做什么。",
-        json_schema_extra={"label": "注入对话上下文", "order": 6},
+        description="把目前生活狀態加進麥麥的對話上下文，讓她聊天時知道自己正在做什麼。",
+        json_schema_extra={"label": "加進對話上下文", "order": 6},
     )
     sleep_silence: bool = Field(
         default=True,
-        description="时程上在睡觉的时段，Discord 群聊与私聊只静默接收消息、不回复，也不主动开话题；有提醒到点会叫醒她 30 分钟。",
-        json_schema_extra={"label": "睡觉时不回复", "order": 7},
+        description="時程上在睡覺的時段，Discord 群聊與私聊只靜默接收訊息、不回覆，也不主動開話題；有提醒到點會叫醒她 30 分鐘。",
+        json_schema_extra={"label": "睡覺時不回覆", "order": 7},
     )
     wake_on_mention_chance: float = Field(
         default=0.3,
         ge=0,
         le=1,
-        description="睡觉时被 @ 或收到私讯，每次有这个机率被吵醒，醒着 30 分钟；0 表示怎么叫都不醒。",
-        json_schema_extra={"label": "被 @ 吵醒的机率", "order": 8, "step": 0.05},
+        description="睡覺時被 @ 或收到私訊，每次有這個機率被吵醒，醒著 30 分鐘；0 表示怎麼叫都不醒。",
+        json_schema_extra={"label": "被 @ 吵醒的機率", "order": 8, "step": 0.05},
     )
     model_task: Literal["replyer", "planner"] = Field(
         default="replyer",
-        description="生成与调整时程沿用 MaiBot 哪个模型任务：replyer=回复模型, planner=规划模型。",
+        description="生成與調整時程沿用 MaiBot 哪個模型任務：replyer=回覆模型, planner=規劃模型。",
         json_schema_extra={"label": "使用模型", "order": 9},
     )
 
@@ -998,6 +993,23 @@ class LifeConfig(PluginConfigBase):
     @classmethod
     def _normalize_generate_time(cls, value: Any) -> str:
         return _normalize_string(value) or "00:00"
+
+
+# 決策模型的情緒選項預設值，每項「標籤：說明」
+DEFAULT_EMOTIONS = (
+    "好笑：覺得好笑、笑翻",
+    "開心：開心、興奮",
+    "讚同：認同、按讚、說得對",
+    "恭喜：恭喜、替對方高興",
+    "驚訝：驚訝、不敢相信",
+    "無語：無言、傻眼、尷尬",
+    "疑惑：疑問、聽不懂",
+    "心疼：安慰、抱抱、心疼",
+    "害羞：害羞、不好意思",
+    "生氣：不滿、生氣、抗議",
+    "難過：難過、哭哭",
+    "收到：知道了、收到、OK",
+)
 
 
 class DecisionConfig(PluginConfigBase):
@@ -1012,7 +1024,7 @@ class DecisionConfig(PluginConfigBase):
             "收到新訊息後第一次進 planner 時，先問決策模型這輪該怎麼參與：只要文字、文字＋附圖、只按表情或只發圖。"
             "結果只用一句提示告訴 planner，不會拿掉它的工具；請求失敗的那輪 planner 照舊自己決定。"
         ),
-        json_schema_extra={"label": "啟用決策模型", "order": 0, "hint": "最近幾則聊天會送到決策模型的服務商；只送文字。"},
+        json_schema_extra={"label": "啟用決策模型", "order": 0},
     )
     base_url: str = Field(
         default="https://app.vllm-sr.ai",
@@ -1026,7 +1038,12 @@ class DecisionConfig(PluginConfigBase):
     api_key: str = Field(
         default="",
         description="決策模型服務商的 API Key。",
-        json_schema_extra={"label": "API Key", "input_type": "password", "order": 2},
+        json_schema_extra={
+            "label": "API Key",
+            "input_type": "password",
+            "order": 2,
+            "hint": "決策模型的其他設定、提示詞和情緒選項在「DC生活 → 決策模型」頁面。",
+        },
     )
     model: str = Field(
         default="vllm-sr/d3-flash",
@@ -1057,52 +1074,120 @@ class DecisionConfig(PluginConfigBase):
         description="決策模型選的情境機率要高過這個值才照做，否則當成只要文字回覆；越高越少用表情。",
         json_schema_extra={"label": "表情情境門檻", "order": 6, "step": 0.05},
     )
+    context_messages: int = Field(
+        default=15,
+        ge=3,
+        le=30,
+        description="送給決策模型看的聊天則數：planner 這輪上下文的最後幾則。",
+        json_schema_extra={"label": "送出的聊天則數", "order": 7, "step": 1},
+    )
+    target_candidates: int = Field(
+        default=8,
+        ge=1,
+        le=15,
+        description="其中最後幾則別人的訊息可以當表態對象（按表情、發圖的對象）。",
+        json_schema_extra={"label": "可表態的訊息數", "order": 8, "step": 1},
+    )
+    scene_instructions: str = Field(
+        default="看最近的群聊，你這輪要怎麼參與最自然？快速表態可以針對前面任何一則 # 訊息，不一定是最新的。",
+        description="問「這輪怎麼參與」的提示詞。",
+        json_schema_extra={"label": "情境題提示詞", "order": 10},
+    )
+    scene_text: str = Field(
+        default="用文字參與：在聊話題、有人在問問題或在跟你說話、要給意見或資訊",
+        description="情境「只要文字」的說明。",
+        json_schema_extra={"label": "情境說明：只要文字", "order": 11},
+    )
+    scene_text_emote: str = Field(
+        default="用文字參與，說完再附一張表情或貼圖讓語氣更生動",
+        description="情境「文字＋附圖」的說明。",
+        json_schema_extra={"label": "情境說明：文字＋附圖", "order": 12},
+    )
+    scene_quick_reaction: str = Field(
+        default="不用說話，在某則訊息上按個表情就好：附和、按讚、跟著大家笑、小小的驚訝",
+        description="情境「只按表情」的說明。",
+        json_schema_extra={"label": "情境說明：只按表情", "order": 13},
+    )
+    scene_quick_sticker: str = Field(
+        default="不用說話，回一張表情或貼圖就好：現在的話題很好笑或情緒很強烈，用圖比打字自然",
+        description="情境「只發圖」的說明。",
+        json_schema_extra={"label": "情境說明：只發圖", "order": 14},
+    )
+    target_instructions: str = Field(
+        default="如果要按表情或發圖表態，最值得回應的是哪一則 # 訊息？真正好笑或有梗的那則，常常已經被別人接了幾句。",
+        description="問「對哪一則表態」的提示詞。",
+        json_schema_extra={"label": "對象題提示詞", "order": 15},
+    )
+    emotion_instructions: str = Field(
+        default="表態或回應時，你最想表達的情緒是哪一個？",
+        description="問「要表達什麼情緒」的提示詞。",
+        json_schema_extra={"label": "情緒題提示詞", "order": 16},
+    )
+    emotions: List[str] = Field(
+        default_factory=lambda: list(DEFAULT_EMOTIONS),
+        description="情緒選項，每項「標籤：說明」；挑表情時用「標籤＋那則訊息」比對表情庫描述。",
+        json_schema_extra={"label": "情緒選項", "order": 17},
+    )
+
+    def scene_criteria(self) -> Dict[str, str]:
+        """情境題的選項 {情境: 說明}；情境本身固定，說明可以改。"""
+        return {
+            "text": self.scene_text,
+            "text_emote": self.scene_text_emote,
+            "quick_reaction": self.scene_quick_reaction,
+            "quick_sticker": self.scene_quick_sticker,
+        }
+
+    def emotion_options(self) -> Dict[str, str]:
+        """情緒選項 {標籤: 說明}，照設定的順序。"""
+        options: Dict[str, str] = {}
+        for item in self.emotions:
+            name, _, description = str(item).partition("：")
+            if name.strip():
+                options[name.strip()] = description.strip() or name.strip()
+        return options
 
 
 class TopicConfig(PluginConfigBase):
-    """主动话题：按排程根据群的记忆和最近聊天找相关新闻或影片，唤醒麦麦分享到群里。频道和排程在「DC生活 → 主動話題」页面设置。"""
+    """主動話題：按排程根據群的記憶和最近聊天找相關新聞或影片，喚醒麥麥分享到群裡。設定都在「DC生活 → 主動話題」頁面。"""
 
-    __ui_label__: ClassVar[str] = "主动话题"
+    __ui_label__: ClassVar[str] = "主動話題"
     __ui_order__: ClassVar[int] = 22
 
     enabled: bool = Field(
         default=False,
-        description="是否启用主动话题。",
-        json_schema_extra={"label": "启用主动话题", "order": 0},
+        description="是否啟用主動話題。",
+        json_schema_extra={"label": "啟用主動話題", "order": 0},
     )
     channel_list: List[str] = Field(
         default_factory=list,
-        description="要主动开话题的 Discord 频道 ID；频道里要先有人说过话，MaiBot 才认得这个聊天。",
-        json_schema_extra={"label": "频道列表", "order": 1, "placeholder": "请输入频道 ID"},
+        description="要主動開話題的 Discord 頻道 ID；頻道裡要先有人說過話，MaiBot 才認得這個聊天。",
+        json_schema_extra={"label": "頻道列表", "order": 1},
     )
     cron: str = Field(
         default="0 12,20 * * *",
-        description="什么时候开话题，5 段 cron（分 时 日 月 星期），服务器本地时间。",
-        json_schema_extra={"label": "排程（cron）", "order": 2, "hint": "例：0 12,20 * * * 为每天 12 点和 20 点。", "placeholder": "0 12,20 * * *"},
+        description="什麼時候開話題，5 段 cron（分 時 日 月 星期），伺服器本地時間。",
+        json_schema_extra={"label": "排程（cron）", "order": 2},
     )
     context_hours: int = Field(
         default=24,
         ge=1,
-        description="参考最近几小时的聊天来挑话题。",
-        json_schema_extra={"label": "参考聊天（小时）", "order": 3, "step": 1},
+        description="參考最近幾小時的聊天來挑話題。",
+        json_schema_extra={"label": "參考聊天（小時）", "order": 3, "step": 1},
     )
     news_enabled: bool = Field(
         default=True,
-        description="请麦麦找相关新闻分享；用哪个搜索工具由她自己决定，需要 MaiBot 里有可用的联网搜索。",
-        json_schema_extra={"label": "分享新闻", "order": 4},
+        description="請麥麥找相關新聞分享；用哪個搜尋工具由她自己決定，需要 MaiBot 裡有可用的聯網搜尋。",
+        json_schema_extra={"label": "分享新聞", "order": 4},
     )
     video_enabled: bool = Field(
         default=False,
-        description="请麦麦找相关影片分享；用哪个搜索或浏览工具由她自己决定。",
-        json_schema_extra={
-            "label": "分享影片",
-            "order": 5,
-            "hint": "她手上没有能找影片的工具时会放弃，不会硬发。",
-        },
+        description="請麥麥找相關影片分享；用哪個搜尋或瀏覽工具由她自己決定，手上沒有能找影片的工具時會放棄。",
+        json_schema_extra={"label": "分享影片", "order": 5},
     )
     model_task: Literal["replyer", "planner"] = Field(
         default="planner",
-        description="挑话题与挑新闻沿用 MaiBot 哪个模型任务：replyer=回复模型, planner=规划模型。",
+        description="挑話題與挑新聞沿用 MaiBot 哪個模型任務：replyer=回覆模型, planner=規劃模型。",
         json_schema_extra={"label": "使用模型", "order": 6},
     )
 
@@ -1117,25 +1202,55 @@ class TopicConfig(PluginConfigBase):
         return " ".join(_normalize_string(value).split()) or "0 12,20 * * *"
 
 
-# 改到「DC生活」工作区页面设置、不在插件配置页显示的字段：(配置节, 字段)。值存在插件数据目录的 daily_settings.json，
-# 运行时覆盖配置里的同名字段；第一次启动时从原配置搬过去
-PAGE_MANAGED_FIELDS: tuple[tuple[str, str], ...] = (
-    ("life", "life_setting"),
-    ("topics", "channel_list"),
-    ("topics", "cron"),
-    *(
-        ("voice", field)
-        for field in (
-            "voice_mode",
-            "fixed_channel_id",
-            "auto_channel_list",
-            "idle_timeout_sec",
-            "enable_vad",
-            "vad_threshold_db",
-            "vad_deactivation_delay_ms",
-            "send_text_in_voice",
-        )
+# 改到「DC生活」工作區頁面設定、不在插件設定頁顯示的欄位 {配置節: 欄位}；順序也是頁面「目前設定」表格的順序。
+# 值存在插件資料目錄的 daily_settings.json，執行時覆蓋設定裡的同名欄位；第一次啟動時從原設定搬過去。
+# 決策模型的 API Key 留在設定頁：頁面輸入框沒有密碼遮罩
+PAGE_FIELDS: Dict[str, tuple[str, ...]] = {
+    "life": (
+        "enabled",
+        "life_setting",
+        "generate_time",
+        "adjust_enabled",
+        "adjust_interval_hours",
+        "sync_presence",
+        "inject_prompt",
+        "sleep_silence",
+        "wake_on_mention_chance",
+        "model_task",
     ),
+    "topics": ("enabled", "channel_list", "cron", "context_hours", "news_enabled", "video_enabled", "model_task"),
+    "reminder": ("enabled", "drift_minutes", "max_per_chat", "followup_enabled", "followup_max_per_chat"),
+    "decision": (
+        "enabled",
+        "base_url",
+        "model",
+        "quick_enabled",
+        "append_enabled",
+        "emote_threshold",
+        "context_messages",
+        "target_candidates",
+        "scene_instructions",
+        "scene_text",
+        "scene_text_emote",
+        "scene_quick_reaction",
+        "scene_quick_sticker",
+        "target_instructions",
+        "emotion_instructions",
+        "emotions",
+    ),
+    "voice": (
+        "voice_mode",
+        "fixed_channel_id",
+        "auto_channel_list",
+        "idle_timeout_sec",
+        "enable_vad",
+        "vad_threshold_db",
+        "vad_deactivation_delay_ms",
+        "send_text_in_voice",
+    ),
+}
+PAGE_MANAGED_FIELDS: tuple[tuple[str, str], ...] = tuple(
+    (section, field) for section, fields in PAGE_FIELDS.items() for field in fields
 )
 
 # WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。

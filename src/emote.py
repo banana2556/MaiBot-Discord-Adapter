@@ -1,7 +1,8 @@
 """表情：planner 啟動時判斷這輪要用文字、文字＋附圖、只按表情還是只發圖參與群聊，並挑表情送出。
 
 - 收到新的 Discord 訊息後第一次進 planner 時，拿 planner 這輪看到的同一份上下文（hook 的 items），
-  取最後 TARGET_CANDIDATES 則別人的訊息當可以表態的對象，一次問決策模型：情境、最值得表態的是哪一則、什麼情緒。
+  取最後幾則別人的訊息當可以表態的對象，一次問決策模型：情境、最值得表態的是哪一則、什麼情緒。
+  送幾則、提示詞、情境說明和情緒選項都在「DC生活 → 決策模型」頁面調整（DecisionConfig）。
   群聊裡真正好笑的那則常常已經被別人接了幾句，所以表態對象不一定是最新一則。
 - 不動 planner 的工具：拿掉工具時 planner 會把回覆或表情直接寫在自己的正文裡，打亂 reply / replyer 的流程。
   決策結果只用一句系統提示告訴 planner 已經做了什麼、這輪該怎麼收尾。
@@ -31,6 +32,7 @@ import discord
 from maibot_sdk import API, HookHandler, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
+from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import ask as ask_decision
 from .life.common import short_time
@@ -49,12 +51,8 @@ QUICK_ADDRESSED_NOTE = (
     "【表情】你已經用{what}回應了「{user}」那則訊息，不要再發表情或貼圖。有人在跟你說話，需要的話照常回覆。"
 )
 APPEND_NOTE = "【表情】這輪你回覆送出後，會自動附上一張符合情緒的表情或貼圖，你不用自己發表情或貼圖。"
-SCENES = {
-    "text": "用文字參與：在聊話題、有人在問問題或在跟你說話、要給意見或資訊",
-    "text_emote": "用文字參與，說完再附一張表情或貼圖讓語氣更生動",
-    "quick_reaction": "不用說話，在某則訊息上按個表情就好：附和、按讚、跟著大家笑、小小的驚訝",
-    "quick_sticker": "不用說話，回一張表情或貼圖就好：現在的話題很好笑或情緒很強烈，用圖比打字自然",
-}
+# 決策模型能選的情境（說明在設定裡，可在頁面改）
+SCENES = ("text", "text_emote", "quick_reaction", "quick_sticker")
 SCENE_LABELS = {
     "text": "只要文字",
     "text_emote": "文字＋附圖",
@@ -62,40 +60,29 @@ SCENE_LABELS = {
     "quick_sticker": "只發圖",
     "failed": "請求失敗（planner 自己決定）",
 }
-EMOTIONS = {
-    "好笑": "覺得好笑、笑翻",
-    "開心": "開心、興奮",
-    "讚同": "認同、按讚、說得對",
-    "恭喜": "恭喜、替對方高興",
-    "驚訝": "驚訝、不敢相信",
-    "無語": "無言、傻眼、尷尬",
-    "疑惑": "疑問、聽不懂",
-    "心疼": "安慰、抱抱、心疼",
-    "害羞": "害羞、不好意思",
-    "生氣": "不滿、生氣、抗議",
-    "難過": "難過、哭哭",
-    "收到": "知道了、收到、OK",
-}
-SCENE_QUESTION = {
-    "type": "choice",
-    "instructions": "看最近的群聊，你這輪要怎麼參與最自然？快速表態可以針對前面任何一則 # 訊息，不一定是最新的。",
-    "criteria": SCENES,
-}
-TARGET_INSTRUCTIONS = "如果要按表情或發圖表態，最值得回應的是哪一則 # 訊息？真正好笑或有梗的那則，常常已經被別人接了幾句。"
-EMOTION_QUESTION = {
-    "type": "choice",
-    "instructions": "表態或回應時，你最想表達的情緒是哪一個？",
-    "criteria": EMOTIONS,
-}
 SEND_KIND_LABELS = {"reaction": "按表情", "sticker": "只發圖", "append": "回覆後附圖", "tool": "planner 工具"}
 # 頁面「測試連線」送的範例聊天
 DECISION_TEST_TARGETS = {"1": "「小明」：我終於抽到限定角色了！！！", "2": "「阿華」：笑死 歐皇", "3": "「小美」：羨慕"}
 DECISION_TEST_STATE = "你是「麥麥」，在 Discord 群組聊天。上次之後沒有人 @ 你。\n\n最近的群聊（越下面越新，# 是可以表態的訊息）：\n" + "\n".join(
     f"#{number} {text}" for number, text in DECISION_TEST_TARGETS.items()
 )
-# 給決策模型看的群聊：planner 上下文的最後幾則；其中最後幾則別人的訊息可以當表態對象
-CONTEXT_MESSAGES = 15
-TARGET_CANDIDATES = 8
+# 頁面只列最近幾筆判斷與送出，全部的紀錄還是照 decision.py 的上限保存
+PAGE_RECENT = 10
+# 頁面「恢復預設」會重設的欄位：提示詞、情境說明、情緒選項、送出的則數
+PROMPT_FIELDS = (
+    "context_messages",
+    "target_candidates",
+    "scene_instructions",
+    "scene_text",
+    "scene_text_emote",
+    "scene_quick_reaction",
+    "scene_quick_sticker",
+    "target_instructions",
+    "emotion_instructions",
+    "emotions",
+)
+# 決策模型（vLLM-SR）的選擇題至少要兩個選項，少於兩個整個請求回 422
+MIN_EMOTIONS = 2
 # 發圖不能指定回覆哪一則，表態對象不是最後這幾則別人的訊息時改成按在那則上，免得群組看不懂
 STICKER_RECENT = 2
 # MaiBot 的暱稱與別名（bot.nickname / bot.alias_names）多久重讀一次，用來判斷訊息是不是在叫她
@@ -114,6 +101,14 @@ MIN_FRESH = 3
 
 _MESSAGE_HEAD = re.compile(r'<message ((?:[\w-]+="[^"]*"\s*)*)>\n?')
 _ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+
+
+def decision_questions(decision: Any) -> Dict[str, Dict[str, Any]]:
+    """情境題和情緒題，提示詞和選項照設定；對象題的選項是每輪的訊息，另外組。"""
+    return {
+        "scene": {"type": "choice", "instructions": decision.scene_instructions, "criteria": decision.scene_criteria()},
+        "emotion": {"type": "choice", "instructions": decision.emotion_instructions, "criteria": decision.emotion_options()},
+    }
 
 
 def display_message_id(message_id: str) -> str:
@@ -280,13 +275,13 @@ class EmoteMixin:
         """
         now = datetime.now()
         remembered = self._inbound.get(session_id, {})
-        window = list(messages)[-CONTEXT_MESSAGES:]
+        window = list(messages)[-decision.context_messages :]
         # 能表態的：別人說的、換得回真的 Discord 訊息；取最後幾則
         targets = [
             message
             for message in window
             if not message["self"] and message["msg_id"] in remembered and remembered[message["msg_id"]]["targetable"]
-        ][-TARGET_CANDIDATES:]
+        ][-decision.target_candidates :]
         if not targets:
             self.ctx.logger.info(f"表情決策 [{session_id}]：planner 上下文裡沒有可以表態的訊息，這輪 planner 自己決定")
             return None
@@ -309,13 +304,13 @@ class EmoteMixin:
             + "\n\n最近的群聊（越下面越新，# 是可以表態的訊息）：\n"
             + "\n".join(lines)
         )
-        questions: Dict[str, Any] = {"scene": SCENE_QUESTION, "emotion": EMOTION_QUESTION}
-        # 只有一則可選時不問：只有一個選項的選擇題會被決策模型當成格式錯誤（HTTP 422），連情境也拿不到。
-        # 插件只記得啟動後收到的訊息，剛重啟時常常只有一則
+        questions = decision_questions(decision)
+        # 只有一則可選時不問：vLLM-SR 的選擇題至少要兩個選項，一個選項會回 422（question_malformed），
+        # 整個請求失敗、連情境也拿不到。插件只記得啟動後收到的訊息，剛重啟時常常只有一則
         if len(targets) > 1:
             questions["target"] = {
                 "type": "choice",
-                "instructions": TARGET_INSTRUCTIONS,
+                "instructions": decision.target_instructions,
                 "criteria": {numbers[id(message)]: f"「{message['user']}」：{message['text']}" for message in targets},
             }
         started = time.monotonic()
@@ -341,7 +336,8 @@ class EmoteMixin:
         probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}
         probability = float(probabilities.get(requested) or 0)
         emotion = str(((answers or {}).get("emotion") or {}).get("choice") or "")
-        emotion = emotion if emotion in EMOTIONS else "開心"
+        emotions = decision.emotion_options()
+        emotion = emotion if emotion in emotions else next(iter(emotions), "開心")
         scene = self._guard_scene(decision, requested, probability, target, session_id)
         self.ctx.logger.info(
             f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{index + 1}/{len(targets)} {summary[:40]}"
@@ -704,14 +700,14 @@ class EmoteMixin:
         days = state.get("days") or {}
         today = days.get(datetime.now().date().isoformat()) or {}
         if not config.enabled:
-            notice = "決策模型未啟用，到插件設定「聊天與過濾 → 決策模型」開啟；沒開時表情由 planner 自己用 discord_emote 決定。"
+            notice = "決策模型未啟用，在下方「設定」開啟；沒開時表情由 planner 自己用 discord_emote 決定。"
         elif not config.api_key:
-            notice = "還沒填 API Key，現在表情由 planner 自己決定。"
+            notice = "還沒填 API Key（在插件設定「聊天與過濾 → 決策模型」），現在表情由 planner 自己決定。"
         else:
             notice = ""
         last_test = state.get("last_test")
-        decisions = state.get("decisions") or []
-        sends = state.get("sends") or []
+        decisions = (state.get("decisions") or [])[:PAGE_RECENT]
+        sends = (state.get("sends") or [])[:PAGE_RECENT]
         names = await self._webui_chat_names() if decisions or sends else {}
 
         def judged(counts: Mapping[str, int]) -> int:
@@ -721,6 +717,11 @@ class EmoteMixin:
             "notice": notice,
             "provider": config.base_url,
             "model": config.model,
+            "settings": self._setting_rows(
+                "decision", [field for field in PAGE_FIELDS["decision"] if field not in PROMPT_FIELDS[2:]]
+            ),
+            "prompts": self._setting_rows("decision", PROMPT_FIELDS[2:-1]),
+            "emotions": [{"name": name, "description": text} for name, text in config.emotion_options().items()],
             "threshold": f"{config.emote_threshold:.2f}",
             "last_test": (
                 f"{short_time(last_test['time'])} {'✅' if last_test['ok'] else '❌'} {last_test['detail']}"
@@ -785,16 +786,13 @@ class EmoteMixin:
             raise ValueError("還沒填 API Key")
         errors: List[str] = []
         started = time.monotonic()
-        answers = await ask_decision(
-            config,
-            DECISION_TEST_STATE,
-            {
-                "scene": SCENE_QUESTION,
-                "target": {"type": "choice", "instructions": TARGET_INSTRUCTIONS, "criteria": DECISION_TEST_TARGETS},
-                "emotion": EMOTION_QUESTION,
-            },
-            SimpleNamespace(warning=errors.append),
-        )
+        questions = decision_questions(config)
+        questions["target"] = {
+            "type": "choice",
+            "instructions": config.target_instructions,
+            "criteria": DECISION_TEST_TARGETS,
+        }
+        answers = await ask_decision(config, DECISION_TEST_STATE, questions, SimpleNamespace(warning=errors.append))
         latency_ms = round((time.monotonic() - started) * 1000)
         scene = str(((answers or {}).get("scene") or {}).get("choice") or "")
         if scene in SCENES:
@@ -806,6 +804,43 @@ class EmoteMixin:
         detail = errors[-1] if errors else "回應裡沒有判斷結果，檢查模型名稱"
         self._decision_stats.set_last_test(datetime.now(), False, detail)
         raise ValueError(f"決策模型測試失敗：{detail}")
+
+    @API("webui_decision_save", description="儲存決策模型的設定與提示詞", version="1")
+    async def webui_decision_save(self, **fields: Optional[str]) -> Dict[str, Any]:
+        """只改有填的項目；留空不改，免得把提示詞或情境說明清空（空的選項說明會讓決策模型回 422）。"""
+        fields.pop("emotions", None)  # 情緒選項用下面的新增／刪除
+        return {"saved": self._save_page_fields("decision", fields)}
+
+    @API("webui_decision_save_emotion", description="新增或修改一個情緒選項", version="1")
+    async def webui_decision_save_emotion(
+        self, emotion_name: str = "", emotion_description: str = ""
+    ) -> Dict[str, Any]:
+        """標籤已經有就改說明，沒有就加在最後；說明沒填就用標籤本身。"""
+        name = emotion_name.strip()
+        if not name or "：" in name:
+            raise ValueError("要填情緒標籤（不能含全形冒號「：」），例如：傻眼")
+        options = self._load_settings().decision.emotion_options()
+        options[name] = emotion_description.strip() or options.get(name) or name
+        self._save_page_setting("decision", "emotions", [f"{key}：{text}" for key, text in options.items()])
+        return {"saved": name}
+
+    @API("webui_decision_remove_emotion", description="刪除一個情緒選項", version="1")
+    async def webui_decision_remove_emotion(self, emotion_name: str = "") -> Dict[str, Any]:
+        options = self._load_settings().decision.emotion_options()
+        if emotion_name not in options:
+            raise ValueError("找不到這個情緒，請重新整理頁面")
+        if len(options) <= MIN_EMOTIONS:
+            raise ValueError(f"至少要留 {MIN_EMOTIONS} 個情緒：選項少於兩個時決策模型會拒絕整個請求")
+        del options[emotion_name]
+        self._save_page_setting("decision", "emotions", [f"{key}：{text}" for key, text in options.items()])
+        return {"removed": emotion_name}
+
+    @API("webui_decision_reset_prompts", description="提示詞、情境說明、情緒選項與送出的則數恢復預設", version="1")
+    async def webui_decision_reset_prompts(self) -> Dict[str, Any]:
+        defaults = type(self._load_settings().decision)()
+        for field in PROMPT_FIELDS:
+            self._save_page_setting("decision", field, getattr(defaults, field))
+        return {"reset": list(PROMPT_FIELDS)}
 
     @API("webui_decision_reset", description="清除決策模型的判斷統計", version="1")
     async def webui_decision_reset(self) -> Dict[str, Any]:

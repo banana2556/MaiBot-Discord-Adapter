@@ -109,6 +109,140 @@
           ]
         },
         {
+          "type": "collapsible",
+          "label": "設定（只填要改的項目，沒動的不會變）",
+          "children": [
+            {
+              "type": "table",
+              "label": "目前的值",
+              "value": {
+                "source": "life",
+                "field": "settings"
+              },
+              "columns": [
+                {
+                  "field": "item",
+                  "label": "項目"
+                },
+                {
+                  "field": "value",
+                  "label": "目前的值"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "enabled",
+              "label": "啟用日常生活（會用到 LLM：每天生成一次，之後定期調整）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "generate_time",
+              "label": "每日生成時間（HH:MM，例：06:30）"
+            },
+            {
+              "type": "select",
+              "name": "adjust_enabled",
+              "label": "按聊天調整時程（每次調整會用一次 LLM）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "adjust_interval_hours",
+              "label": "調整間隔（小時；0 也等於不調整）"
+            },
+            {
+              "type": "select",
+              "name": "sync_presence",
+              "label": "同步 Discord 狀態",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "inject_prompt",
+              "label": "把目前狀態加進對話上下文",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "sleep_silence",
+              "label": "睡覺時不回覆（群聊、私聊只靜默接收）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "wake_on_mention_chance",
+              "label": "被 @ 吵醒的機率（0～1，例：0.3；0 表示怎麼叫都不醒）"
+            },
+            {
+              "type": "select",
+              "name": "model_task",
+              "label": "生成與調整時程用的模型",
+              "options": [
+                {
+                  "label": "回覆模型（replyer）",
+                  "value": "replyer"
+                },
+                {
+                  "label": "規劃模型（planner）",
+                  "value": "planner"
+                }
+              ]
+            },
+            {
+              "type": "button",
+              "label": "儲存設定",
+              "action": "save"
+            }
+          ]
+        },
+        {
           "type": "table",
           "label": "今天的時程（▶ 是目前時段）",
           "value": {
@@ -195,6 +329,57 @@
         "wake": {
           "api": "webui_life_wake",
           "version": "1"
+        },
+        "save": {
+          "api": "webui_life_save",
+          "version": "1",
+          "parameters": {
+            "enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "generate_time": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "adjust_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "adjust_interval_hours": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "sync_presence": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "inject_prompt": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "sleep_silence": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "wake_on_mention_chance": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "model_task": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            }
+          }
         }
       }
     },
@@ -318,6 +503,100 @@
               "label": "立刻開一次話題",
               "action": "run_now",
               "variant": "muted"
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "設定（只填要改的項目，沒動的不會變）",
+          "children": [
+            {
+              "type": "table",
+              "label": "目前的值",
+              "value": {
+                "source": "topics",
+                "field": "settings"
+              },
+              "columns": [
+                {
+                  "field": "item",
+                  "label": "項目"
+                },
+                {
+                  "field": "value",
+                  "label": "目前的值"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "enabled",
+              "label": "啟用主動話題",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "context_hours",
+              "label": "參考最近幾小時的聊天挑話題"
+            },
+            {
+              "type": "select",
+              "name": "news_enabled",
+              "label": "分享新聞（需要 MaiBot 裡有聯網搜尋）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "video_enabled",
+              "label": "分享影片（她沒有能找影片的工具時會放棄）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "model_task",
+              "label": "挑話題用的模型",
+              "options": [
+                {
+                  "label": "回覆模型（replyer）",
+                  "value": "replyer"
+                },
+                {
+                  "label": "規劃模型（planner）",
+                  "value": "planner"
+                }
+              ]
+            },
+            {
+              "type": "button",
+              "label": "儲存設定",
+              "action": "save"
             }
           ]
         },
@@ -506,6 +785,37 @@
           "api": "webui_topics_run_now",
           "version": "1",
           "confirmation": "現在就為每個頻道各開一次話題（會用模型和聯網搜尋）。確定？"
+        },
+        "save": {
+          "api": "webui_topics_save",
+          "version": "1",
+          "parameters": {
+            "enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "context_hours": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "news_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "video_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "model_task": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            }
+          }
         }
       }
     },
@@ -868,9 +1178,54 @@
             }
           },
           "confirmation": "確定取消這則提醒？"
+        },
+        "save": {
+          "api": "webui_reminders_save",
+          "version": "1",
+          "parameters": {
+            "enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "drift_minutes": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "max_per_chat": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "followup_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "followup_max_per_chat": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            }
+          }
         }
       },
       "content": [
+        {
+          "type": "text",
+          "value": {
+            "source": "summary",
+            "field": "notice"
+          },
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "notice"
+            },
+            "operator": "not_empty"
+          }
+        },
         {
           "type": "grid",
           "columns": 4,
@@ -906,6 +1261,80 @@
                 "source": "summary",
                 "field": "now"
               }
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "設定（只填要改的項目，沒動的不會變）",
+          "children": [
+            {
+              "type": "table",
+              "label": "目前的值",
+              "value": {
+                "source": "summary",
+                "field": "settings"
+              },
+              "columns": [
+                {
+                  "field": "item",
+                  "label": "項目"
+                },
+                {
+                  "field": "value",
+                  "label": "目前的值"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "enabled",
+              "label": "啟用定時提醒（關閉後麥麥看不到提醒工具，已設的提醒暫停觸發）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "drift_minutes",
+              "label": "提前喚醒（分鐘；她思考和回覆需要時間）"
+            },
+            {
+              "type": "input",
+              "name": "max_per_chat",
+              "label": "每個聊天提醒上限"
+            },
+            {
+              "type": "select",
+              "name": "followup_enabled",
+              "label": "順手記下（群友 24 小時內的安排，到時關心一下）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "followup_max_per_chat",
+              "label": "每個聊天順手記下上限"
+            },
+            {
+              "type": "button",
+              "label": "儲存設定",
+              "action": "save"
             }
           ]
         },
@@ -1220,6 +1649,219 @@
           ]
         },
         {
+          "type": "collapsible",
+          "label": "設定（只填要改的項目，沒動的不會變）",
+          "children": [
+            {
+              "type": "table",
+              "label": "目前的值",
+              "value": {
+                "source": "decision",
+                "field": "settings"
+              },
+              "columns": [
+                {
+                  "field": "item",
+                  "label": "項目"
+                },
+                {
+                  "field": "value",
+                  "label": "目前的值"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "enabled",
+              "label": "啟用決策模型（API Key 在插件設定「聊天與過濾 → 決策模型」填）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "base_url",
+              "label": "API 位址（vLLM-SR：https://app.vllm-sr.ai；Jev：https://api.typesafe.ai）"
+            },
+            {
+              "type": "input",
+              "name": "model",
+              "label": "模型（vLLM-SR：vllm-sr/d3-flash 或 vllm-sr/d3-ultra；Jev：jev-latest）"
+            },
+            {
+              "type": "select",
+              "name": "quick_enabled",
+              "label": "純快速反應：判斷成只按表情／只發圖時直接替她做",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "append_enabled",
+              "label": "回覆後附圖：判斷成文字＋附圖時，她回完自動附一張",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "emote_threshold",
+              "label": "表情情境門檻（0～1；模型選的情境機率要高過這個值才照做，越高越少用表情）"
+            },
+            {
+              "type": "input",
+              "name": "context_messages",
+              "label": "送出的聊天則數（3～30；planner 這輪上下文的最後幾則）"
+            },
+            {
+              "type": "input",
+              "name": "target_candidates",
+              "label": "可表態的訊息數（1～15；其中最後幾則別人的訊息可以當表態對象）"
+            },
+            {
+              "type": "button",
+              "label": "儲存設定",
+              "action": "save"
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "提示詞與情境說明（只填要改的項目；留空不會清掉）",
+          "children": [
+            {
+              "type": "table",
+              "label": "目前的值",
+              "value": {
+                "source": "decision",
+                "field": "prompts"
+              },
+              "columns": [
+                {
+                  "field": "item",
+                  "label": "項目"
+                },
+                {
+                  "field": "value",
+                  "label": "目前的值"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "scene_instructions",
+              "label": "情境題提示詞（問這輪怎麼參與）"
+            },
+            {
+              "type": "input",
+              "name": "scene_text",
+              "label": "情境說明：只要文字"
+            },
+            {
+              "type": "input",
+              "name": "scene_text_emote",
+              "label": "情境說明：文字＋附圖"
+            },
+            {
+              "type": "input",
+              "name": "scene_quick_reaction",
+              "label": "情境說明：只按表情"
+            },
+            {
+              "type": "input",
+              "name": "scene_quick_sticker",
+              "label": "情境說明：只發圖"
+            },
+            {
+              "type": "input",
+              "name": "target_instructions",
+              "label": "對象題提示詞（問對哪一則 # 訊息表態）"
+            },
+            {
+              "type": "input",
+              "name": "emotion_instructions",
+              "label": "情緒題提示詞（問要表達什麼情緒）"
+            },
+            {
+              "type": "button",
+              "label": "儲存提示詞",
+              "action": "save_prompts"
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "情緒選項",
+          "children": [
+            {
+              "type": "text",
+              "value": "決策模型從這些情緒挑一個；挑表情時用「標籤：那則訊息」比對表情庫描述。至少要留兩個。點一列可刪除。"
+            },
+            {
+              "type": "table",
+              "value": {
+                "source": "decision",
+                "field": "emotions"
+              },
+              "selection": "emotionRow",
+              "detail": "emotionDetails",
+              "columns": [
+                {
+                  "field": "name",
+                  "label": "標籤"
+                },
+                {
+                  "field": "description",
+                  "label": "說明"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "emotion_name",
+              "label": "情緒標籤（已經有的會改說明，沒有的加在最後）"
+            },
+            {
+              "type": "input",
+              "name": "emotion_description",
+              "label": "說明（例：無言、傻眼、尷尬）"
+            },
+            {
+              "type": "button",
+              "label": "新增或修改情緒",
+              "action": "save_emotion"
+            },
+            {
+              "type": "button",
+              "label": "提示詞、情境說明、情緒選項和則數全部恢復預設",
+              "action": "reset_prompts",
+              "variant": "danger"
+            }
+          ]
+        },
+        {
           "type": "text",
           "value": "還沒有判斷紀錄。",
           "when": {
@@ -1304,7 +1946,7 @@
         },
         {
           "type": "table",
-          "label": "最近的判斷（新的在前；點一列看那則訊息）",
+          "label": "最近 10 筆判斷（新的在前；點一列看那則訊息）",
           "value": {
             "source": "decision",
             "field": "decisions"
@@ -1430,7 +2072,7 @@
         },
         {
           "type": "table",
-          "label": "最近送出的表情（新的在前）",
+          "label": "最近 10 筆送出的表情（新的在前）",
           "value": {
             "source": "decision",
             "field": "sends"
@@ -1472,6 +2114,37 @@
               "label": "結果"
             }
           ]
+        },
+        {
+          "type": "dialog",
+          "name": "emotionDetails",
+          "label": "情緒選項",
+          "children": [
+            {
+              "type": "text",
+              "label": "標籤",
+              "value": {
+                "scope": "selection",
+                "source": "emotionRow",
+                "field": "name"
+              }
+            },
+            {
+              "type": "text",
+              "label": "說明",
+              "value": {
+                "scope": "selection",
+                "source": "emotionRow",
+                "field": "description"
+              }
+            },
+            {
+              "type": "button",
+              "label": "刪除這個情緒",
+              "action": "remove_emotion",
+              "variant": "danger"
+            }
+          ]
         }
       ],
       "actions": {
@@ -1483,6 +2156,133 @@
           "api": "webui_decision_reset",
           "version": "1",
           "confirmation": "會清掉所有判斷紀錄和每日統計，不影響設定。確定？"
+        },
+        "save": {
+          "api": "webui_decision_save",
+          "version": "1",
+          "parameters": {
+            "enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "base_url": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "model": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "quick_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "append_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "emote_threshold": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "context_messages": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "target_candidates": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            }
+          }
+        },
+        "save_prompts": {
+          "api": "webui_decision_save",
+          "version": "1",
+          "parameters": {
+            "scene_instructions": {
+              "type": "string",
+              "required": false,
+              "max_length": 1000
+            },
+            "scene_text": {
+              "type": "string",
+              "required": false,
+              "max_length": 1000
+            },
+            "scene_text_emote": {
+              "type": "string",
+              "required": false,
+              "max_length": 1000
+            },
+            "scene_quick_reaction": {
+              "type": "string",
+              "required": false,
+              "max_length": 1000
+            },
+            "scene_quick_sticker": {
+              "type": "string",
+              "required": false,
+              "max_length": 1000
+            },
+            "target_instructions": {
+              "type": "string",
+              "required": false,
+              "max_length": 1000
+            },
+            "emotion_instructions": {
+              "type": "string",
+              "required": false,
+              "max_length": 1000
+            }
+          }
+        },
+        "save_emotion": {
+          "api": "webui_decision_save_emotion",
+          "version": "1",
+          "parameters": {
+            "emotion_name": {
+              "type": "string",
+              "required": false,
+              "max_length": 20
+            },
+            "emotion_description": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            }
+          }
+        },
+        "remove_emotion": {
+          "api": "webui_decision_remove_emotion",
+          "version": "1",
+          "parameters": {
+            "emotion_name": {
+              "type": "string",
+              "required": true,
+              "max_length": 20
+            }
+          },
+          "arguments": {
+            "emotion_name": {
+              "scope": "selection",
+              "source": "emotionRow",
+              "field": "name"
+            }
+          },
+          "confirmation": "刪除這個情緒選項？"
+        },
+        "reset_prompts": {
+          "api": "webui_decision_reset_prompts",
+          "version": "1",
+          "confirmation": "提示詞、情境說明、情緒選項和送出的則數都會恢復預設，其他設定不變。確定？"
         }
       }
     }

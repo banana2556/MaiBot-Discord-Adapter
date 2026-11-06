@@ -20,7 +20,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from maim_message import FormatInfo, GroupInfo, UserInfo
 
-from .config import PAGE_MANAGED_FIELDS, WEBUI_CONFIG_TABS, DiscordPluginSettings, is_section_visible
+from .config import PAGE_FIELDS, PAGE_MANAGED_FIELDS, WEBUI_CONFIG_TABS, DiscordPluginSettings, is_section_visible
 from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
@@ -65,6 +65,8 @@ VOICE_FIELD_LABELS = {
     "send_text_in_voice": "語音頻道同步發文字",
 }
 ON_OFF = {True: "開", False: "關"}
+# 頁面「目前設定」表格裡選項值的顯示名稱
+VALUE_LABELS = {"replyer": "回覆模型（replyer）", "planner": "規劃模型（planner）"}
 
 
 class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
@@ -212,7 +214,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         hours = state.get("hours") if isinstance(state.get("hours"), list) and len(state["hours"]) == 24 else []
         entry = hours[now.hour] if hours else None
         if not config.enabled:
-            notice = "日常生活未啟用，到插件設定的「日常」分頁開啟。"
+            notice = "日常生活未啟用，在下方「設定」開啟。"
         elif entry is None:
             notice = f"還沒有時程，啟用後過了每日生成時間（{config.generate_time}）就會自動生成。"
         elif state.get("date") != now.date().isoformat():
@@ -234,6 +236,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             "sleeping": sleeping,
             "sleep_state": sleep_state,
             "life_setting": config.life_setting or "（未填寫，按人設推想）",
+            "settings": self._setting_rows("life", [field for field in PAGE_FIELDS["life"] if field != "life_setting"]),
             "current": (f"{entry['activity']}（{entry['mood']}）" if entry["mood"] else entry["activity"]) if entry else "—",
             "presence": f"{entry['status_text']}｜{ONLINE_STATUS_LABELS.get(entry['online_status'], entry['online_status'])}"
             if entry
@@ -265,6 +268,17 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         """整段取代生活设定；下次生成时程时生效。"""
         self._save_page_setting("life", "life_setting", life_setting.strip())
         return {"saved": True}
+
+    @API("webui_life_save", description="儲存日常生活的設定", version="1")
+    async def webui_life_save(self, **fields: Optional[str]) -> Dict[str, Any]:
+        """只改有填的項目；生成時間要是 HH:MM，不然每輪排程都會失敗。"""
+        generate_time = (fields.get("generate_time") or "").strip()
+        if generate_time:
+            try:
+                datetime.strptime(generate_time, "%H:%M")
+            except ValueError:
+                raise ValueError("每日生成時間要是 HH:MM，例如 06:30") from None
+        return {"saved": self._save_page_fields("life", fields)}
 
     @API("webui_life_regenerate", description="立即重新生成今天的日常生活時程", version="1")
     async def webui_life_regenerate(self) -> Dict[str, Any]:
@@ -307,6 +321,10 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         self._save_page_setting("topics", "cron", cron)
         return {"saved": True}
 
+    @API("webui_topics_save", description="儲存主動話題的設定", version="1")
+    async def webui_topics_save(self, **fields: Optional[str]) -> Dict[str, Any]:
+        return {"saved": self._save_page_fields("topics", fields)}
+
     @API("webui_topics_run_now", description="立刻為每個頻道開一次主動話題", version="1")
     async def webui_topics_run_now(self) -> Dict[str, Any]:
         """不看排程马上跑一次，不影响下次排程时间。"""
@@ -314,7 +332,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         if self._topic_scout is None or not config.channel_list:
             raise ValueError("還沒設定頻道")
         if not (config.news_enabled or config.video_enabled):
-            raise ValueError("新聞和影片都關了，到插件設定的「日常」分頁開啟")
+            raise ValueError("新聞和影片都關了，在下方「設定」開啟")
         self._ensure_daily_job_idle("topics")
         self._spawn_daily_job("topics", partial(self._topic_scout.run_all, datetime.now(), config))
         return {"started": True}
@@ -365,15 +383,8 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         }
 
     async def _save_voice_settings(self, updates: Dict[str, Any]) -> None:
-        """先把所有改动一起交给配置模型校验和转换，全部通过才存，然后重连让语音管理器套用。"""
-        voice = self._load_settings().voice
-        try:
-            checked = type(voice).model_validate({**voice.model_dump(), **updates})
-        except ValidationError as exc:
-            fields = "、".join(VOICE_FIELD_LABELS.get(str(error["loc"][0]), str(error["loc"][0])) for error in exc.errors())
-            raise ValueError(f"格式不對：{fields}") from exc
-        for field in updates:
-            self._save_page_setting("voice", field, getattr(checked, field))
+        """全部通過檢查才存，然後重連讓語音管理器套用。"""
+        self._validate_and_save("voice", updates, VOICE_FIELD_LABELS)
         await self._restart_if_needed()
 
     @API("webui_voice_save", description="儲存語音的頻道模式、空閒退出與 VAD 設定", version="1")
@@ -449,7 +460,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         history.sort(key=lambda row: row[0], reverse=True)
         sources = [label for enabled, label in ((config.news_enabled, "新聞"), (config.video_enabled, "影片")) if enabled]
         if not config.enabled:
-            notice = "主動話題未啟用，到插件設定的「日常」分頁開啟。"
+            notice = "主動話題未啟用，在下方「設定」開啟。"
         elif not config.channel_list:
             notice = "還沒設定頻道，主動話題不會發。"
         elif not sources:
@@ -464,6 +475,9 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             "cron": config.cron,
             "sources": "、".join(sources) or "—",
             "shared_count": len(history),
+            "settings": self._setting_rows(
+                "topics", [field for field in PAGE_FIELDS["topics"] if field not in ("channel_list", "cron")]
+            ),
             "channels": channels,
             "history": [
                 {
@@ -665,10 +679,13 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             plugin_description=plugin_description,
             plugin_author=plugin_author,
         )
+        sections = schema.get("sections") or {}
         for section, field in PAGE_MANAGED_FIELDS:
-            fields = (schema.get("sections") or {}).get(section, {}).get("fields")
+            fields = sections.get(section, {}).get("fields")
             if isinstance(fields, dict):
                 fields.pop(field, None)
+                if not fields:  # 整節都在「DC生活」頁面設定（日常生活、主動話題、定時提醒）
+                    sections.pop(section)
         try:
             self._prune_inactive_config_sections(schema)
         except Exception as exc:
@@ -2230,6 +2247,47 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             self._page_settings.setdefault(section, {})[field] = getattr(getattr(settings, section), field)
         if missing:
             save_state(path, self._page_settings)
+
+    def _field_label(self, section: str, field: str) -> str:
+        """設定欄位在頁面上的名稱：config.py 裡的 label。"""
+        extra = type(getattr(self._load_settings(), section)).model_fields[field].json_schema_extra
+        return str(extra.get("label") or field) if isinstance(extra, dict) else field
+
+    def _setting_rows(self, section: str, fields: Sequence[str]) -> List[Dict[str, str]]:
+        """頁面「目前設定」表格：每個欄位的名稱和目前的值。"""
+        config = getattr(self._load_settings(), section)
+        rows = []
+        for field in fields:
+            value = getattr(config, field)
+            shown = ON_OFF[value] if isinstance(value, bool) else VALUE_LABELS.get(str(value), str(value))
+            rows.append({"item": self._field_label(section, field), "value": shown or "—"})
+        return rows
+
+    def _validate_and_save(self, section: str, updates: Mapping[str, Any], labels: Mapping[str, str] = {}) -> None:
+        """所有改動一起交給設定模型檢查和轉換（例如 "true" 轉成開關），全部通過才存。"""
+        config = getattr(self._load_settings(), section)
+        try:
+            checked = type(config).model_validate({**config.model_dump(), **updates})
+        except ValidationError as exc:
+            names = "、".join(
+                labels.get(str(error["loc"][0])) or self._field_label(section, str(error["loc"][0]))
+                for error in exc.errors()
+            )
+            raise ValueError(f"格式不對：{names}") from exc
+        for field in updates:
+            self._save_page_setting(section, field, getattr(checked, field))
+
+    def _save_page_fields(self, section: str, submitted: Mapping[str, Optional[str]]) -> List[str]:
+        """頁面「修改設定」：只改這頁管的、有填的項目；沒動或清空的欄位不改。"""
+        updates = {
+            field: value.strip()
+            for field, value in submitted.items()
+            if field in PAGE_FIELDS[section] and isinstance(value, str) and value.strip()
+        }
+        if not updates:
+            raise ValueError("沒有填任何要改的項目")
+        self._validate_and_save(section, updates)
+        return sorted(updates)
 
     def _save_page_setting(self, section: str, field: str, value: Any) -> None:
         """页面改设置：先赋给配置模型做校验和规范化，再存进 daily_settings.json。"""

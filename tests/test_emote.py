@@ -1,5 +1,6 @@
 """表情：planner 啟動時決策模型判斷情境與表態對象，向量挑表情送出，不經過 LLM。"""
 
+from datetime import datetime
 from types import SimpleNamespace
 import asyncio
 import base64
@@ -449,6 +450,59 @@ def test_decision_page_shows_scenes_and_sends(monkeypatch) -> None:
     assert page["decisions"][0]["chat"] == "聊天大廳" and page["decisions"][0]["emotion"] == "好笑"
     assert page["sends"][0]["kind"] == "按表情" and page["sends"][0]["result"] == "送出"
     assert page["daily"][0]["emotes"] == 1 and page["daily"][0]["sends"] == 1
+
+
+def test_decision_page_lists_only_recent_records(monkeypatch) -> None:
+    env = _env(monkeypatch)
+    for index in range(15):
+        env.plugin._decision_stats.record_decision(datetime.now(), "s1", f"第 {index} 則", "text", 100)
+    page = asyncio.run(env.plugin.webui_decision())
+    assert len(page["decisions"]) == 10 and page["decisions"][0]["message"] == "第 14 則", "只列最近 10 筆，新的在前"
+    assert page["today_calls"] == 15, "統計照算全部"
+
+
+def test_prompts_and_emotions_edited_on_the_page_go_to_the_decision_model(monkeypatch) -> None:
+    env = _env(monkeypatch, answers=[_answer("text", emotion="傻眼")])
+    plugin = env.plugin
+    plugin._page_settings = {}
+    plugin._page_settings_path = None
+
+    asyncio.run(plugin.webui_decision_save(scene_instructions=" 你要怎麼回？ ", scene_text="   ", context_messages="3"))
+    asyncio.run(plugin.webui_decision_save_emotion("傻眼", "傻眼、無言"))
+    asyncio.run(plugin.webui_decision_save_emotion("好笑", "笑到流淚"))
+    asyncio.run(plugin.webui_decision_remove_emotion("開心"))
+
+    async def scenario():
+        _receive_all(plugin)
+        await _decide(env)
+        await _drain()
+
+    asyncio.run(scenario())
+    state, questions = env.asked[0]
+    assert questions["scene"]["instructions"] == "你要怎麼回？"
+    assert questions["scene"]["criteria"]["text"].startswith("用文字參與"), "留空的不會清掉選項說明"
+    emotions = questions["emotion"]["criteria"]
+    assert emotions["好笑"] == "笑到流淚" and emotions["傻眼"] == "傻眼、無言" and "開心" not in emotions
+    assert list(emotions)[-1] == "傻眼", "新的加在最後"
+    assert "大家在幹嘛" not in state and "#3" in state, "只送最後 3 則，她自己說的那句被擠掉"
+    assert plugin._decision_stats.state["decisions"][0]["emotion"] == "傻眼"
+
+    page = asyncio.run(plugin.webui_decision())
+    assert {"item": "情境題提示詞", "value": "你要怎麼回？"} in page["prompts"]
+    assert {"item": "送出的聊天則數", "value": "3"} in page["settings"]
+    assert {"name": "傻眼", "description": "傻眼、無言"} in page["emotions"]
+
+    for name in list(plugin._load_settings().decision.emotion_options())[:-2]:
+        asyncio.run(plugin.webui_decision_remove_emotion(name))
+    with pytest.raises(ValueError, match="至少要留 2 個"):
+        asyncio.run(plugin.webui_decision_remove_emotion("傻眼"))
+    with pytest.raises(ValueError):
+        asyncio.run(plugin.webui_decision_save_emotion("好：笑"))
+
+    asyncio.run(plugin.webui_decision_reset_prompts())
+    decision = plugin._load_settings().decision
+    assert len(decision.emotion_options()) == 12 and decision.context_messages == 15
+    assert decision.scene_instructions.startswith("看最近的群聊")
 
 
 def test_decision_test_button_reports_the_failure_reason(monkeypatch) -> None:

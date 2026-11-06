@@ -544,9 +544,10 @@ def test_page_settings_migrate_from_config_then_override_it(tmp_path) -> None:
     path = tmp_path / "daily_settings.json"
     plugin._load_page_settings(path)
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["life"] == {"life_setting": "住台北"}
-    assert saved["topics"] == {"channel_list": ["111"], "cron": "0 9 * * *"}
+    assert saved["life"]["life_setting"] == "住台北" and saved["life"]["enabled"] is False
+    assert saved["topics"]["channel_list"] == ["111"] and saved["topics"]["cron"] == "0 9 * * *"
     assert saved["voice"]["idle_timeout_sec"] == 300, "语音页面管的字段也一起搬过去"
+    assert saved["reminder"]["max_per_chat"] == 10 and "api_key" not in saved["decision"], "API Key 留在插件設定頁"
 
     _run(plugin.webui_life_save_setting("  住高雄  "))
     _run(plugin.webui_topics_add_channel("222"))
@@ -564,8 +565,48 @@ def test_page_settings_migrate_from_config_then_override_it(tmp_path) -> None:
             _run(bad())
 
     schema = plugin.get_webui_config_schema()
-    assert "life_setting" not in schema["sections"]["life"]["fields"]
-    assert not {"channel_list", "cron"} & set(schema["sections"]["topics"]["fields"])
+    assert not {"life", "topics", "reminder"} & set(schema["sections"]), "整節都在頁面設定，設定頁不留空殼"
+    assert set(schema["sections"]["decision"]["fields"]) == {"api_key"}
+    assert "daily" not in [tab["id"] for tab in schema["layout"]["tabs"]]
+
+
+def test_life_topic_and_reminder_pages_save_only_filled_fields(tmp_path) -> None:
+    plugin, ctx = _plugin(tmp_path, {"life": {"enabled": False}})
+    plugin._load_page_settings(tmp_path / "daily_settings.json")
+
+    _run(plugin.webui_life_save(enabled="true", generate_time=" 06:30 ", wake_on_mention_chance="0.5", model_task=None))
+    life = plugin._load_settings().life
+    assert (life.enabled, life.generate_time, life.wake_on_mention_chance) == (True, "06:30", 0.5)
+    assert life.model_task == "replyer" and life.adjust_interval_hours == 3, "沒填的不動"
+    rows = _run(plugin.webui_life())["settings"]
+    assert {"item": "啟用日常生活", "value": "開"} in rows and {"item": "使用模型", "value": "回覆模型（replyer）"} in rows
+    for bad in (
+        lambda: plugin.webui_life_save(generate_time="早上六點"),
+        lambda: plugin.webui_life_save(wake_on_mention_chance="2"),
+        lambda: plugin.webui_life_save(enabled="  "),
+    ):
+        with pytest.raises(ValueError):
+            _run(bad())
+    assert plugin._load_settings().life.wake_on_mention_chance == 0.5, "格式不對時不存"
+
+    _run(plugin.webui_topics_save(video_enabled="true", context_hours="12"))
+    topics = plugin._load_settings().topics
+    assert topics.video_enabled and topics.context_hours == 12 and topics.news_enabled
+
+    async def no_streams(platform="all_platforms"):
+        return []
+
+    ctx.chat.get_all_streams = no_streams
+    ctx.toggles.clear()
+    _run(plugin.webui_reminders_save(followup_enabled="false"))
+    assert ("maibot-discord-adapter.reminder_followup", False) in ctx.toggles, "存了馬上讓工具消失"
+    # 在插件設定頁存檔（設定整份重載）後，提醒工具開關照頁面的值
+    plugin.set_plugin_config(_cfg({}))
+    ctx.toggles.clear()
+    _run(plugin._apply_reminder_switches())
+    assert ("maibot-discord-adapter.reminder_followup", False) in ctx.toggles
+    summary = _run(plugin.webui_summary())
+    assert summary["notice"] == "" and {"item": "順手記下", "value": "關"} in summary["settings"]
 
 
 # ===== 语音页面 =====
