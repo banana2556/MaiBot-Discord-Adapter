@@ -218,11 +218,11 @@ class EmoteMixin:
             "at": time.monotonic(),
         }
         remembered = self._inbound.setdefault(session_id, OrderedDict())
-        # 新版 MaiBot 顯示別名，舊版顯示原始 ID，兩個都記
-        for key in {display_message_id(message_id), message_id}:
-            remembered[key] = entry
-            remembered.move_to_end(key)
-        while len(remembered) > INBOUND_REMEMBERED * 2:
+        # 用 planner 上下文顯示的 msg_id（長 ID 是別名）當鍵
+        key = display_message_id(message_id)
+        remembered[key] = entry
+        remembered.move_to_end(key)
+        while len(remembered) > INBOUND_REMEMBERED:
             remembered.popitem(last=False)
 
     @HookHandler(
@@ -559,8 +559,7 @@ class EmoteMixin:
         if picked is None:
             # embedding 失敗：改用 MaiBot 自己照情緒標籤挑的方式
             self.ctx.logger.warning("表情向量排序失敗，改用 MaiBot 表情庫照情緒挑")
-            found = await self.ctx.emoji.get_by_description(emotion)
-            found = found.get("emoji") if isinstance(found, dict) and "success" in found else found
+            found = await self.ctx.emoji.get_by_description(emotion)  # 找不到是 None，失敗是沒有 base64 的 dict
             return (emotion, str(found["base64"]), 0.0) if isinstance(found, dict) and found.get("base64") else None
         key, score = picked
         if key in library:

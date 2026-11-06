@@ -197,8 +197,7 @@ class DiscordMessageHandler:
             "message_id": message_id,
             "timestamp": timestamp,
             "platform": str(getattr(message_info, "platform", "") or self._platform_name),
-            # 新版路由归属：顶层 account_id 是正式字段，scope 可选。
-            # 旧版把归属塞在 additional_config，MaiBot 会警告并在下个版本移除。
+            # 路由歸屬：頂層 account_id，scope 可選
             "account_id": self._account_id or None,
             "message_info": message_info_dict,
             "raw_message": raw_message,

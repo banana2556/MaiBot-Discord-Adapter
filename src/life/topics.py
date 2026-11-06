@@ -120,15 +120,17 @@ class TopicScout:
         return keywords
 
     async def _group_memory(self, stream_id: str) -> str:
-        # SDK 的 knowledge.search 不转发 chat_id，直接调能力把检索限定在这个群
+        # SDK 的 ctx.knowledge.search 不轉發 chat_id，直接呼叫能力把檢索限定在這個群；
+        # 成功時 SDK 把結果拆成純文字，失敗時回原樣的 {"success": False, "error": ...}
         try:
             result = await self._ctx.call_capability("knowledge.search", query=MEMORY_QUERY, limit=5, chat_id=stream_id)
         except Exception as exc:
-            self._ctx.logger.debug(f"读取群记忆失败：{exc}")
-            return ""
-        if isinstance(result, dict):
-            return str(result.get("content") or "") if result.get("success", True) else ""
-        return str(result or "")
+            result = {"error": str(exc)}
+        if isinstance(result, str):
+            return result
+        error = result.get("error") if isinstance(result, dict) else result
+        self._ctx.logger.warning(f"讀取群記憶失敗，這次只參考最近聊天挑話題：{error}")
+        return ""
 
     async def _trigger(self, stream_id: str, intent: str, reason: str) -> bool:
         result = await self._ctx.maisaka.proactive.trigger(stream_id, intent, reason=reason)

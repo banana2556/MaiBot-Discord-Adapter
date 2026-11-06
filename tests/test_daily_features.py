@@ -51,6 +51,7 @@ class FakeCtx:
         self.personality = SimpleNamespace(get_current=self._persona)
         self.component = SimpleNamespace(enable_component=self._toggle(True), disable_component=self._toggle(False))
         self.chat = SimpleNamespace(get_stream_by_group_id=self._stream_by_group)
+        self.frequency = SimpleNamespace(set_adjust=self._set_adjust)
         self.adjusts: list = []
 
     async def _trigger(self, stream_id, intent, **kwargs):
@@ -89,13 +90,14 @@ class FakeCtx:
     async def _stream_by_group(self, group_id, platform="qq"):
         return {"stream_id": f"s-{group_id}"} if group_id == "111" else None
 
+    async def _set_adjust(self, chat_id, value):
+        self.adjusts.append((chat_id, value))
+        return {"success": True}
+
     async def call_capability(self, capability, **kwargs):
-        # 部署环境的旧版 SDK 没有 ctx.web / ctx.frequency，这个假上下文也不提供，只能经 call_capability 调
-        if capability == "frequency.set_adjust":
-            self.adjusts.append((kwargs["chat_id"], kwargs["value"]))
-            return {"success": True}
+        # 只有 knowledge.search 要直接呼叫能力（SDK 的包裝不轉發 chat_id）；成功時 SDK 拆成純文字
         assert capability == "knowledge.search" and kwargs["chat_id"] == "s-111"
-        return {"success": True, "content": "你知道這些知識: 大家喜歡音遊和貓"}
+        return "你知道這些知識: 大家喜歡音遊和貓"
 
     def _toggle(self, enabled):
         async def run(name, component_type):
@@ -477,15 +479,15 @@ def test_daily_loop_survives_a_failed_call_and_restores_after_regenerate(tmp_pat
     plugin, ctx = _sleeping_plugin(tmp_path, asleep=False)
     plugin.set_plugin_config(_cfg({"life": {"enabled": True, "adjust_interval_hours": 0, "sync_presence": False}}))
     plugin._silenced_sessions.add("s1")
-    real_call, calls = ctx.call_capability, []
+    real_set_adjust, calls = ctx.frequency.set_adjust, []
 
-    async def flaky(capability, **kwargs):
-        calls.append(capability)
+    async def flaky(chat_id, value):
+        calls.append(chat_id)
         if len(calls) == 1:
             raise TimeoutError("RPC 超时")
-        return await real_call(capability, **kwargs)
+        return await real_set_adjust(chat_id, value)
 
-    ctx.call_capability = flaky
+    ctx.frequency.set_adjust = flaky
 
     async def scenario():
         plugin._daily_task = asyncio.create_task(plugin._run_daily_loop())
@@ -678,20 +680,23 @@ def test_state_save_retries_when_windows_briefly_locks_the_file(tmp_path, monkey
 
 def test_readable_chat_accepts_what_the_sdk_actually_returns() -> None:
     common = _load_adapter_module("src.life.common")
+    warnings: list = []
 
     def ctx_returning(value):
         async def build_readable(messages, **kwargs):
             assert messages is None and kwargs["chat_id"] == "s1"
             return value
 
-        return SimpleNamespace(message=SimpleNamespace(build_readable=build_readable))
+        return SimpleNamespace(
+            message=SimpleNamespace(build_readable=build_readable), logger=SimpleNamespace(warning=warnings.append)
+        )
 
     async def read(value):
         return await common.readable_chat(ctx_returning(value), "s1", NOW - timedelta(hours=1), NOW, 8)
 
-    assert _run(read(" 小明：早 \n")) == "小明：早", "新版 SDK 成功時直接回文字"
-    assert _run(read({"success": True, "text": "小明：早"})) == "小明：早", "舊版回 dict"
-    assert _run(read({"success": False, "error": "x"})) == ""
+    assert _run(read(" 小明：早 \n")) == "小明：早", "SDK 成功時直接回文字"
+    assert _run(read({"success": False, "error": "資料庫忙碌"})) == ""
+    assert warnings and "資料庫忙碌" in warnings[0], "讀不到聊天紀錄要看得到"
 
 
 def test_persona_failure_is_logged_and_never_leaks_into_the_prompt() -> None:

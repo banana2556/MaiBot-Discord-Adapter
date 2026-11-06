@@ -162,12 +162,7 @@ class DiscordClientManager:
     def _setup_client(self) -> None:
         """根据配置创建 `discord.Client`、绑定路由并注册各类事件处理器。"""
         intents = discord.Intents.default()
-        guild_messages = self._intents_config.get("guild_messages")
-        if guild_messages is None:
-            # 兼容旧映射键，避免历史配置或旧调用方直接传入 messages 时失效。
-            guild_messages = self._intents_config.get("messages", True)
-
-        intents.guild_messages = bool(guild_messages)
+        intents.guild_messages = self._intents_config.get("guild_messages", True)
         intents.guilds = self._intents_config.get("guilds", True)
         intents.dm_messages = self._intents_config.get("dm_messages", True)
         intents.message_content = self._intents_config.get("message_content", True)

@@ -14,10 +14,9 @@ _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 async def list_group_streams(ctx: Any, platform: str) -> List[Dict[str, Any]]:
     """返回该平台的群聊会话（Discord 频道 / 子区）；读取失败时记日志并返回空列表。"""
     streams = await ctx.chat.get_group_streams(platform=platform)
-    if isinstance(streams, dict):
-        streams = streams.get("streams") if streams.get("success") else None
-    if not isinstance(streams, list):
-        ctx.logger.warning(f"读取 {platform} 群聊会话失败，日常功能这次跳过聊天记录")
+    if not isinstance(streams, list):  # 成功時 SDK 直接回清單，失敗時回 {"success": False, "error": ...}
+        error = streams.get("error") if isinstance(streams, dict) else streams
+        ctx.logger.warning(f"讀取 {platform} 群聊會話失敗，日常功能這次跳過聊天紀錄：{error}")
         return []
     return [stream for stream in streams if isinstance(stream, dict) and stream.get("stream_id")]
 
@@ -33,12 +32,10 @@ async def readable_chat(ctx: Any, stream_id: str, since: datetime, until: dateti
         timestamp_mode="normal",
         truncate=True,
     )
-    # SDK 成功時會把 {"success", "text"} 拆成純文字（maibot_sdk.context._CAPABILITY_RESULT_KEYS），
-    # 失敗或舊版才回 dict；只認 dict 的話成功時永遠拿到空字串
+    # 成功時 SDK 把 {"success", "text"} 拆成純文字（maibot_sdk.context._CAPABILITY_RESULT_KEYS），失敗時回原樣的 dict
     if isinstance(result, str):
         return result.strip()
-    if isinstance(result, dict) and result.get("success"):
-        return str(result.get("text") or "").strip()
+    ctx.logger.warning(f"讀取聊天紀錄失敗：{result.get('error') if isinstance(result, dict) else result}")
     return ""
 
 

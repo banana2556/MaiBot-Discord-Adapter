@@ -527,7 +527,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
     async def _restore_silenced(self) -> None:
         """醒来、关掉睡觉静默或插件卸载时，把调成 0 的回复频率还原。"""
         for session_id in list(self._silenced_sessions):
-            result = await self.ctx.call_capability("frequency.set_adjust", chat_id=session_id, value=1.0)
+            result = await self.ctx.frequency.set_adjust(session_id, 1.0)
             if isinstance(result, dict) and not result.get("success", True):
                 self.ctx.logger.warning(f"还原聊天 {session_id} 的回复频率失败：{result.get('error')}")
             self._silenced_sessions.discard(session_id)
@@ -582,8 +582,7 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             return {"action": "continue"}
         session_id = str(kwargs.get("session_id") or "")
         if session_id:
-            # 旧版 SDK 没有 ctx.frequency，直接调能力
-            await self.ctx.call_capability("frequency.set_adjust", chat_id=session_id, value=0)
+            await self.ctx.frequency.set_adjust(session_id, 0)
             self._silenced_sessions.add(session_id)
         kwargs["tool_definitions"] = [
             tool for tool in kwargs["tool_definitions"] if tool_names({"tool_definitions": [tool]}) & SLEEP_ALLOWED_TOOLS
@@ -1354,15 +1353,10 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
         return await self._handle_outbound_message(maim_message)
 
     def _deserialize_outbound_message(self, message: Dict[str, Any]) -> MessageBase:
-        """兼容解析 Host MessageDict 与旧版 maim_message 字典。"""
-        if isinstance(message.get("message_segment"), dict):
-            return MessageBase.from_dict(message)
-
-        raw_message = message.get("raw_message")
-        if isinstance(raw_message, list):
-            return self._build_message_from_host_dict(message)
-
-        raise ValueError("消息字典既不是 maim_message 格式，也不是 Host MessageDict 格式")
+        """解析 Host 送來的 MessageDict（raw_message 是訊息段清單）。"""
+        if not isinstance(message.get("raw_message"), list):
+            raise ValueError("訊息不是 Host MessageDict 格式（缺少 raw_message 清單）")
+        return self._build_message_from_host_dict(message)
 
     def _build_message_from_host_dict(self, message: Dict[str, Any]) -> MessageBase:
         """将 Host 运行时的 `MessageDict` 转换为插件内部使用的 `MessageBase`。"""
@@ -2343,11 +2337,8 @@ class DiscordAdapterPlugin(EmoteMixin, ReminderMixin, MaiBotPlugin):
             )
 
         if self._native_emoji is None:
-            # 旧版 SDK 没有 ctx.paths，此时映射只保存在内存中
-            paths = getattr(self.ctx, "paths", None)
             self._native_emoji = NativeEmojiRegistry(
-                path=paths.data_dir / "native_emoji.json" if paths is not None else None,
-                logger=self.ctx.logger,
+                path=self.ctx.paths.data_dir / "native_emoji.json", logger=self.ctx.logger
             )
 
         if self._message_handler is None:
