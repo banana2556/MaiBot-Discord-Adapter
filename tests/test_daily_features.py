@@ -354,9 +354,8 @@ def test_topics_kind_follows_settings_and_avoids_recent(tmp_path) -> None:
     assert "貓咪影片" in ctx.prompts[1], "挑话题时避开最近开过的"
 
 
-def test_topic_counts_as_shared_only_when_her_link_is_actually_sent(tmp_path, monkeypatch) -> None:
+def test_topic_counts_as_shared_only_when_her_link_is_actually_sent(tmp_path) -> None:
     topics_module = _load_adapter_module("src.life.topics")
-    monkeypatch.setattr(topics_module, "FOLLOWUP_DELAY_SECONDS", 0)
     picks = [{"topics": [{"keyword": keyword}]} for keyword in ("新番", "音遊", "貓咪", "拉麵")]
     scout, ctx = _scout(tmp_path, picks)
     config = _topic_config()
@@ -370,11 +369,13 @@ def test_topic_counts_as_shared_only_when_her_link_is_actually_sent(tmp_path, mo
         hint = scout.reply_hint("s-111", share)
         assert "主動在群裡開新話題" in hint and "https://news.example/a?id=1" in hint
         scout.on_sent("s-111", "這個超扯 https://news.example/a?id=1 大家看了嗎")
-        # 2. replyer 漏了連結：送完等一下還沒看到就補發
+        # 2. 回覆分段送出：前段沒連結，不得搶先補發；後段的原生連結只出現一次
         await scout.run_channel("111", NOW, config)
         scout.reply_hint("s-111", share)
         scout.on_sent("s-111", "新番定檔了！")
         await asyncio.sleep(0.01)
+        assert not ctx.sent
+        scout.on_sent("s-111", "這裡有介紹 https://news.example/a?id=1")
         # 3. 一直沒發：過了期限記成沒發出去，之後挑話題不算開過
         await scout.run_channel("111", NOW, config)
         scout.expire(NOW + topics_module.SHARE_TIMEOUT)
@@ -384,7 +385,8 @@ def test_topic_counts_as_shared_only_when_her_link_is_actually_sent(tmp_path, mo
     history = scout.state["history"]["s-111"]
     assert [item["status"] for item in history] == ["shared", "shared", "missed", "waiting"]
     assert history[0]["url"] == "https://news.example/a?id=1" and history[0]["title"].startswith("這個超扯")
-    assert ctx.sent == [("s-111", "https://news.example/a?id=1")], "只有漏掉連結的那次補發"
+    assert ctx.sent == [], "連結只能由正常回覆送出，不做額外補發"
+    assert "FOLLOWUP_DELAY_SECONDS" not in vars(topics_module), "補發機制已移除"
     assert "- 新番" in ctx.prompts[3] and "- 貓咪" not in ctx.prompts[3], "沒發出去的話題下次還能挑"
 
 

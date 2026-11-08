@@ -4,11 +4,10 @@
 MaiBot 的 replyer 看不到主動任務和她搜到的內容（只看真實聊天和 planner 填的 reply_reference），所以：
 - 給 planner 的指示要求把標題、連結、重點寫進 reply_reference；
 - 有話題等著發的聊天，replyer 開始前（reply_hint）從 reply_reference 抓出連結，提醒 replyer 這是主動分享、要附上連結；
-- 她的訊息送出後（on_sent）確認連結真的發出去，漏了就補發；SHARE_TIMEOUT 內沒發出就記成沒發出去。
+- 她的訊息送出後（on_sent）確認連結真的發出去；SHARE_TIMEOUT 內沒發出就記成沒發出去，不額外補發。
 紀錄存在插件資料目錄的 topics.json，挑話題時避開最近開過的（沒發出去的不算）。模型看到的文字用繁體中文。
 """
 
-import asyncio
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,8 +22,6 @@ PROMPT_FIELDS = ("pick_instructions", "share_instructions")
 MEMORY_QUERY = "這個群大家常聊的話題、興趣和最近在關注的事"
 # 觸發後多久內沒發出分享就算沒發出去
 SHARE_TIMEOUT = timedelta(minutes=15)
-# 回覆可能拆成好幾則送出：最後一則送完等這麼久還沒看到連結，才補發連結
-FOLLOWUP_DELAY_SECONDS = 3.0
 _URL = re.compile(r"https?://[^\s<>「」『』（）()\[\]{}，。！？、\"']+")
 STATUS_LABELS = {"waiting": "等她發", "shared": "已分享", "missed": "沒發出去", "unknown": "不確定（插件重啟過）"}
 
@@ -50,7 +47,7 @@ class TopicScout:
         self._resolve_stream = resolve_stream
         self._state: Dict[str, Any] = load_state(path)
         self._bad_cron = ""
-        # 每個聊天等著發的話題：{"entry": 紀錄, "kind": 新聞或影片, "deadline", "url": replyer 要附的連結, "title", "task"}
+        # 每個聊天等著發的話題：{"entry": 紀錄, "kind": 新聞或影片, "deadline", "url": replyer 要附的連結}
         self._pending: Dict[str, Dict[str, Any]] = {}
         for items in (self._state.get("history") or {}).values():
             for item in items:
@@ -170,8 +167,6 @@ class TopicScout:
             "kind": kind_text,
             "deadline": now + SHARE_TIMEOUT,
             "url": "",
-            "title": "",
-            "task": None,
         }
         self._save()
         return keywords
@@ -179,7 +174,7 @@ class TopicScout:
     def expire(self, now: datetime) -> None:
         """觸發後 SHARE_TIMEOUT 內沒發出分享的話題記成沒發出去。"""
         for stream_id, pending in list(self._pending.items()):
-            if now < pending["deadline"] or (pending["task"] is not None and not pending["task"].done()):
+            if now < pending["deadline"]:
                 continue
             del self._pending[stream_id]
             pending["entry"]["status"] = "missed"
@@ -204,39 +199,13 @@ class TopicScout:
         )
 
     def on_sent(self, stream_id: str, text: str) -> None:
-        """她的訊息送出後：看到連結就記成已分享；分享的回覆送完一陣子還沒看到連結，補發連結。"""
+        """她的訊息送出後：看到連結才記成已分享；漏連結不補發，以免分段回覆重複。"""
         pending = self._pending.get(stream_id)
         if not pending or not pending["url"] or not text:
             return
-        if pending["task"] is not None:
-            pending["task"].cancel()
         url = find_url(text)
         if url:
             self._mark_shared(stream_id, url, text)
-            return
-        pending["title"] = pending["title"] or text
-        pending["task"] = asyncio.create_task(self._follow_up(stream_id))
-
-    async def _follow_up(self, stream_id: str) -> None:
-        """replyer 把連結漏掉了：補發一則只有連結的訊息。"""
-        await asyncio.sleep(FOLLOWUP_DELAY_SECONDS)
-        pending = self._pending.get(stream_id)
-        if pending is None:
-            return
-        url = pending["url"]
-        self._mark_shared(stream_id, url, pending["title"])
-        try:
-            sent = await self._ctx.send.text(url, stream_id, sync_to_maisaka_history=True)
-        except Exception as exc:
-            sent, error = False, exc
-        else:
-            error = None
-        if sent:
-            self._ctx.logger.info(f"主動話題的回覆漏了連結，已補發：{url}")
-            return
-        pending["entry"]["status"] = "missed"
-        self._save()
-        self._ctx.logger.warning(f"主動話題的回覆漏了連結，補發也失敗：{error or url}")
 
     def _mark_shared(self, stream_id: str, url: str, text: str) -> None:
         pending = self._pending.pop(stream_id)
