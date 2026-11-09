@@ -149,6 +149,21 @@ def planner_messages(items: Any) -> List[Dict[str, Any]]:
     return messages
 
 
+def quoted(message: Mapping[str, Any]) -> Tuple[str, str]:
+    """入站訊息回覆的是哪則：(原始訊息 ID, 「名字」說：內容)；沒有回覆時兩個都是空字串。
+
+    第二個是插件收訊時從 Discord 拉的內容，MaiBot 沒收過那則（例如別的 bot 說的）時拿來頂替。
+    """
+    raw = message.get("raw_message")
+    for segment in raw if isinstance(raw, list) else []:
+        data = segment.get("data") if isinstance(segment, Mapping) and segment.get("type") == "reply" else None
+        if isinstance(data, Mapping) and data.get("target_message_id"):
+            name = data.get("target_message_sender_cardname") or data.get("target_message_sender_nickname") or ""
+            content = str(data.get("target_message_content") or "")
+            return str(data["target_message_id"]), f"{name}說：{content}" if content else ""
+    return "", ""
+
+
 def tool_names(kwargs: Mapping[str, Any]) -> set[str]:
     """planner Hook 載荷裡本輪候選工具的名稱（OpenAI function 結構）。"""
     tools = kwargs.get("tool_definitions")
@@ -213,8 +228,12 @@ class EmoteMixin:
         }
         if not message_id:
             return
+        quote, quote_text = quoted(message)
         entry = {
             "id": message_id,
+            # 回覆了哪則（原始 ID）和收訊時拉到的那則內容；被回覆那則滑出 planner 上下文時補給她看
+            "quote": quote,
+            "quote_text": quote_text,
             "addressed": self._is_calling_her(message),
             # 只有真的 Discord 訊息（數字 ID）按得了表情；語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
             "targetable": message_id.isdigit(),
