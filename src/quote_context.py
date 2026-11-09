@@ -1,17 +1,20 @@
-"""回覆舊訊息時，補上被回覆的那則和它之前的對話。
+"""回覆和叫她的訊息：告訴 planner 誰在找她，被回覆的舊訊息補上它和之前的對話。
 
 MaiBot 的 planner 上下文只用 ``quote="msg_id"`` 標出回覆了哪則、不附內容，replyer 也一樣；
-被回覆的訊息早就滑出上下文時，她只知道有人回覆了某則，不知道對方在回什麼。
-planner 和 replyer 開始前，從 MaiBot 的聊天紀錄找出那則和它之前的幾則接在提示詞後面；那則還在上下文裡就不補。
+有人 @ 她或回覆她時 MaiBot 會強制開一輪 planner，但觸發原因只寫進日誌，planner 不知道這輪是為誰開的，
+常常接著聊最新的話題、把找她的人晾著。所以 planner 開始前：
+
+- 她上次說話之後叫她的訊息（@、回覆她、喊她名字），列出來要她先回應；
+- 被回覆的那則早就滑出上下文時，從 MaiBot 的聊天紀錄找出那則和它之前的幾則接在提示詞後面（還在上下文裡就不補）。
 """
 
 from collections import OrderedDict
 from datetime import datetime, timedelta
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, List, Mapping
 
 from maibot_sdk import HookHandler
 
-from .emote import display_message_id, planner_messages
+from .emote import display_message_id, planner_messages, tool_names
 from .life.common import readable_chat
 
 # 被回覆的那則連同它之前一共給幾則；往前最多找多久
@@ -21,6 +24,12 @@ CONTEXT_SPAN = timedelta(hours=12)
 PLANNER_LIMIT = 2
 # 查過的上下文記幾筆（聊天紀錄不會變，查過就不用再查）
 CACHED = 50
+# 叫她的訊息最多列幾則（取最新的）
+CALLING_LIMIT = 3
+CALLING_NOTE = (
+    "【有人在找你】你上次說話之後，下面這幾則在叫你（@ 你、回覆你的訊息或喊你名字），這輪就是因為它們才開始的。"
+    "先回應它們（reply 帶那則的 msg_id）；其他人正在聊的只是背景，別只顧著接最新的話題、把找你的人晾著：\n"
+)
 PLANNER_NOTE = (
     "【被回覆的舊訊息】下面這幾則回覆了更早、已經不在上面聊天紀錄裡的訊息（quote 指向的那則）。"
     "這是被回覆的那則和它之前的對話，用來理解對方為什麼這樣回：\n"
@@ -29,7 +38,7 @@ REPLYER_NOTE = "你要回覆的這則訊息是在回覆更早的對話，這是�
 
 
 class QuoteContextMixin:
-    """需要主插件提供 ctx、_append_system_text，和 EmoteMixin 收訊時記下的 _inbound（裡面有 quote）。"""
+    """需要主插件提供 ctx、_append_system_text，和 EmoteMixin 收訊時記下的 _inbound（quote、addressed）與 _latest_inbound。"""
 
     def _init_quote_state(self) -> None:
         self._quote_contexts: "OrderedDict[str, str]" = OrderedDict()
@@ -55,6 +64,19 @@ class QuoteContextMixin:
                 self._quote_contexts.popitem(last=False)
         return text
 
+    def _calling_note(self, session_id: str, messages: List[Dict[str, Any]], remembered: Mapping[str, Any]) -> str:
+        """她上次說話之後叫她的訊息；私訊每則都在跟她說話，不用特別提。"""
+        if not self._latest_inbound.get(session_id, {}).get("group_id"):
+            return ""
+        last_self = max((index for index, message in enumerate(messages) if message["self"]), default=-1)
+        lines = []
+        for message in messages[last_self + 1 :]:
+            entry = remembered.get(message["msg_id"])
+            if entry and entry["addressed"]:
+                quote = f"（回覆 {entry['quote_text'][:60]}）" if entry.get("quote_text") else ""
+                lines.append(f"- msg_id={message['msg_id']}（{message['user']}）：{message['text']}{quote}")
+        return CALLING_NOTE + "\n".join(lines[-CALLING_LIMIT:]) if lines else ""
+
     @HookHandler(
         "maisaka.planner.before_request",
         name="discord_quote_context",
@@ -63,12 +85,14 @@ class QuoteContextMixin:
         timeout_ms=3000,
     )
     async def add_quote_context_to_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """這輪 planner 看得到的回覆裡，被回覆那則已經不在上下文的，補上它和之前的對話。"""
+        """先列出叫她的訊息（這輪能回覆時），再給被回覆那則已經不在上下文的回覆補上它和之前的對話。"""
         session_id = str(kwargs.get("session_id") or "")
         remembered = self._inbound.get(session_id)
         if not remembered:
             return {"action": "continue"}
         messages = planner_messages(kwargs.get("items"))
+        # 睡覺時段只剩 stop，不用叫她回
+        notes = [self._calling_note(session_id, messages, remembered)] if "reply" in tool_names(kwargs) else []
         visible = {message["msg_id"] for message in messages}
         blocks = []
         for message in reversed(messages):
@@ -80,9 +104,12 @@ class QuoteContextMixin:
                 blocks.append(f"msg_id={message['msg_id']}（{message['user']}）回覆的是這段的最後一則：\n{context}")
             if len(blocks) >= PLANNER_LIMIT:
                 break
-        if not blocks:
+        if blocks:
+            notes.append(PLANNER_NOTE + "\n\n".join(reversed(blocks)))
+        notes = [note for note in notes if note]
+        if not notes:
             return {"action": "continue"}
-        return self._append_system_text(kwargs, PLANNER_NOTE + "\n\n".join(reversed(blocks)))
+        return self._append_system_text(kwargs, "\n\n".join(notes))
 
     @HookHandler(
         "maisaka.replyer.before_request",

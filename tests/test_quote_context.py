@@ -82,6 +82,31 @@ def test_planner_and_replyer_get_the_conversation_before_an_old_quoted_message(m
     assert other == {"action": "continue"}
 
 
+def test_planner_is_told_who_is_calling_her_until_she_answers(monkeypatch) -> None:
+    # 小美回覆了她，之後小明又在聊別的：planner 要知道這輪是為小美開的，別只接最新的話題
+    env, calls = _setup(monkeypatch)
+    alias = env.module.display_message_id
+    mine = _message_item(alias(OLD), "麥麥", "好啊，明天見", self_message=True)
+    replying = _message_item(alias(REPLY), "小美", "真的嗎")
+    chatting = _message_item(alias(FUNNY), "小明", "我剛剛跌倒了哈哈哈")
+
+    def planner(*chat, tools=("reply", "stop")):
+        kwargs = _kwargs(env)
+        kwargs["items"] = [kwargs["items"][0], *chat]
+        kwargs["tool_definitions"] = [{"type": "function", "function": {"name": name}} for name in tools]
+        return asyncio.run(env.plugin.add_quote_context_to_planner(**kwargs))
+
+    note = planner(mine, replying, chatting)["modified_kwargs"]["items"][0]["parts"][-1]["text"]
+    assert note.startswith("【有人在找你】")
+    assert f"msg_id={alias(REPLY)}（「小美」）：真的嗎（回覆 「麥麥」說：好啊，明天見）" in note
+    assert "跌倒" not in note and "【被回覆的舊訊息】" not in note and calls["get_by_id"] == []
+
+    # 她回過話之後就不再提；睡覺時段只剩 stop 也不提
+    answered = _message_item("mself", "麥麥", "對啊", self_message=True)
+    assert planner(mine, replying, answered, chatting) == {"action": "continue"}
+    assert planner(mine, replying, chatting, tools=("stop",)) == {"action": "continue"}
+
+
 def test_quoted_message_still_in_context_is_not_repeated(monkeypatch) -> None:
     env, calls = _setup(monkeypatch)
     visible = _message_item(env.module.display_message_id(OLD), "麥麥", "好啊，明天見", self_message=True)
@@ -102,4 +127,3 @@ def test_failed_lookup_adds_nothing_and_retries_later(monkeypatch) -> None:
     assert asyncio.run(env.plugin.add_quote_context_to_planner(**_kwargs(env))) == {"action": "continue"}
     assert any("資料庫忙" in str(line) for line in env.ctx.logs)
     assert env.plugin._quote_contexts == {}, "失敗不記，下一輪再查"
-
