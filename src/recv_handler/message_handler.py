@@ -516,7 +516,11 @@ class DiscordMessageHandler:
                 message_segments.insert(0, Seg(type="reply", data=reply_data))
 
             # 在叫她：內文 @ 她，或回覆她的訊息；睡覺被吵醒、表情決策都用這個旗標
-            if self._account_id and (typed_mention(message, self._account_id) or self._replies_to_bot(message_segments)):
+            # 回覆她另外記一個：planner 上下文裡標「回覆你」還是「回覆某某」
+            replies_to_bot = self._replies_to_bot(message_segments)
+            if replies_to_bot:
+                additional_config["discord_replies_to_bot"] = True
+            if self._account_id and (typed_mention(message, self._account_id) or replies_to_bot):
                 additional_config["discord_mentions_bot"] = True
 
             if not message_segments:

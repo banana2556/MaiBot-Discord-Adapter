@@ -237,7 +237,9 @@ def test_message_ids_match_maibot_aliases_and_planner_items_are_parsed() -> None
     item = _message_item("mwjoitk", "A&amp;B", "第一行\n第二行")
     item["parts"].append({"type": "image", "image_base64": "", "image_format": "png"})
     parsed = emote.planner_messages([{"item_type": "SystemMessageItem", "parts": [{"type": "text", "text": "人設"}]}, item])
+    part, end = parsed[0].pop("head")
     assert parsed == [{"msg_id": "mwjoitk", "user": "「A&B」", "self": False, "text": "第一行 第二行 [圖片]"}]
+    assert part is item["parts"][0] and part["text"][end:] == "第一行\n第二行", "head 指向原本的 part，接在訊息頭後面"
 
 
 # ===== 向量表情庫 =====

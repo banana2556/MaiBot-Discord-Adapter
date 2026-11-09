@@ -2,8 +2,9 @@
 
 MaiBot 的 planner 上下文只用 ``quote="msg_id"`` 標出回覆了哪則、不附內容，replyer 也一樣；
 有人 @ 她或回覆她時 MaiBot 會強制開一輪 planner，但觸發原因只寫進日誌，planner 不知道這輪是為誰開的，
-常常接著聊最新的話題、把找她的人晾著。所以 planner 開始前：
+常常接著聊最新的話題、把找她的人晾著；別人之間的回覆沒主詞時（「開金口很厲害」），她又會以為在跟她說。所以 planner 開始前：
 
+- 每則回覆的正文前面標出回覆誰：``[回覆「小明」：…]``、``[回覆你：…]``；replyer 也告訴它要回的那則在回覆誰；
 - 她上次說話之後叫她的訊息（@、回覆她、喊她名字），列出來要她先回應；
 - 被回覆的那則早就滑出上下文時，從 MaiBot 的聊天紀錄找出那則和它之前的幾則接在提示詞後面（還在上下文裡就不補）。
 """
@@ -34,7 +35,7 @@ PLANNER_NOTE = (
     "【被回覆的舊訊息】下面這幾則回覆了更早、已經不在上面聊天紀錄裡的訊息（quote 指向的那則）。"
     "這是被回覆的那則和它之前的對話，用來理解對方為什麼這樣回：\n"
 )
-REPLYER_NOTE = "你要回覆的這則訊息是在回覆更早的對話，這是被回覆的那則（最後一則）和它之前的對話：\n"
+REPLYER_NOTE = "被回覆的那則已經不在聊天紀錄裡，這是它（最後一則）和之前的對話：\n"
 
 
 class QuoteContextMixin:
@@ -73,8 +74,8 @@ class QuoteContextMixin:
         for message in messages[last_self + 1 :]:
             entry = remembered.get(message["msg_id"])
             if entry and entry["addressed"]:
-                quote = f"（回覆 {entry['quote_text'][:60]}）" if entry.get("quote_text") else ""
-                lines.append(f"- msg_id={message['msg_id']}（{message['user']}）：{message['text']}{quote}")
+                label = f"[{entry['quote_label']}]" if entry.get("quote_label") else ""
+                lines.append(f"- msg_id={message['msg_id']}（{message['user']}）：{label}{message['text']}")
         return CALLING_NOTE + "\n".join(lines[-CALLING_LIMIT:]) if lines else ""
 
     @HookHandler(
@@ -85,12 +86,19 @@ class QuoteContextMixin:
         timeout_ms=3000,
     )
     async def add_quote_context_to_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """先列出叫她的訊息（這輪能回覆時），再給被回覆那則已經不在上下文的回覆補上它和之前的對話。"""
+        """每則回覆標出回覆誰；列出叫她的訊息（這輪能回覆時）；被回覆那則已經不在上下文的，補上它和之前的對話。"""
         session_id = str(kwargs.get("session_id") or "")
         remembered = self._inbound.get(session_id)
         if not remembered:
             return {"action": "continue"}
         messages = planner_messages(kwargs.get("items"))
+        labeled = False
+        for message in messages:
+            entry = remembered.get(message["msg_id"])
+            if entry and entry.get("quote_label"):
+                part, end = message["head"]
+                part["text"] = f"{part['text'][:end]}[{entry['quote_label']}]{part['text'][end:]}"
+                labeled = True
         # 睡覺時段只剩 stop，不用叫她回
         notes = [self._calling_note(session_id, messages, remembered)] if "reply" in tool_names(kwargs) else []
         visible = {message["msg_id"] for message in messages}
@@ -107,9 +115,9 @@ class QuoteContextMixin:
         if blocks:
             notes.append(PLANNER_NOTE + "\n\n".join(reversed(blocks)))
         notes = [note for note in notes if note]
-        if not notes:
-            return {"action": "continue"}
-        return self._append_system_text(kwargs, "\n\n".join(notes))
+        if notes:
+            self._append_system_text(kwargs, "\n\n".join(notes))
+        return {"action": "continue", "modified_kwargs": kwargs} if notes or labeled else {"action": "continue"}
 
     @HookHandler(
         "maisaka.replyer.before_request",
@@ -119,11 +127,13 @@ class QuoteContextMixin:
         timeout_ms=1000,
     )
     async def add_quote_context_to_replyer(self, **kwargs: Any) -> Dict[str, Any]:
-        """replyer 也只看得到 quote 的 ID：要回的那則在回覆舊訊息時，把 planner 那輪查到的對話一起給它。"""
+        """replyer 也只看得到 quote 的 ID：要回的那則是回覆時，告訴它在回覆誰；被回覆那則是舊訊息時，把 planner 那輪查到的對話一起給它。"""
         remembered = self._inbound.get(str(kwargs.get("session_id") or ""), {})
         entry = remembered.get(display_message_id(str(kwargs.get("reply_message_id") or "")))
-        context = self._quote_contexts.get(entry["quote"]) if entry and entry.get("quote") else None
-        if not context:
+        if not entry or not entry.get("quote_label"):
             return {"action": "continue"}
-        kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{REPLYER_NOTE}{context}".strip()
+        note = f"你要回覆的這則訊息是在{entry['quote_label']}。"
+        if context := self._quote_contexts.get(entry["quote"]):
+            note += f"\n{REPLYER_NOTE}{context}"
+        kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{note}".strip()
         return {"action": "continue", "modified_kwargs": kwargs}
