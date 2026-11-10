@@ -246,8 +246,8 @@ def planner_note(state: ChannelThreads, messages: Sequence[Mapping[str, Any]]) -
 
 
 class TopicThreadsMixin:
-    """需要主插件提供 ctx、_load_settings、_setting_rows、_save_page_fields、_webui_chat_names，
-    和 EmoteMixin 收訊時記下的 _inbound（mentions、addressed）與 _latest_inbound。"""
+    """需要主插件提供 ctx、_load_settings、_setting_rows、_save_page_fields、_save_page_setting、
+    _resolve_discord_stream、_webui_chat_names，和 EmoteMixin 收訊時記下的 _inbound（mentions、addressed）與 _latest_inbound。"""
 
     def _init_thread_state(self) -> None:
         self._threads: Dict[str, ChannelThreads] = {}
@@ -328,9 +328,10 @@ class TopicThreadsMixin:
         except Exception as exc:
             self.ctx.logger.warning(f"話題整理 [{session_id}] 失敗，保留規則切分結果：{exc}")
 
-    def _in_group_channel(self, session_id: str) -> bool:
-        """Discord 的群組頻道才切；私訊每則都在跟她說話，不用。"""
-        return bool(self._latest_inbound.get(session_id, {}).get("group_id"))
+    def _in_listed_channel(self, session_id: str) -> bool:
+        """只切頻道列表裡的頻道（Discord 頻道的 group_id 就是頻道 ID）；私訊沒有 group_id，不會切。"""
+        channel_id = self._latest_inbound.get(session_id, {}).get("group_id")
+        return bool(channel_id) and channel_id in self._load_settings().threads.channel_list
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -344,7 +345,7 @@ class TopicThreadsMixin:
         """這輪新出現的訊息歸進話題，兩個話題以上時在最後那條提醒前面插一段話題線索。"""
         session_id = str(kwargs.get("session_id") or "")
         items = kwargs.get("items")
-        if not (self._load_settings().threads.enabled and self._in_group_channel(session_id) and isinstance(items, list)):
+        if not (self._load_settings().threads.enabled and self._in_listed_channel(session_id) and isinstance(items, list)):
             return {"action": "continue"}
         messages = planner_messages(items)
         state = await self._assign_new(session_id, messages)
@@ -432,16 +433,30 @@ class TopicThreadsMixin:
         recent.sort(key=lambda row: row["at"], reverse=True)
         for row in recent:
             del row["at"]
+        channels = []
+        for channel_id in config.channel_list:
+            stream_id = await self._resolve_discord_stream(channel_id)
+            state = self._threads.get(stream_id or "")
+            if not stream_id:
+                status = "還沒有人說話，MaiBot 不認得這個頻道"
+            elif state is None:
+                status = "等待新訊息：有人說話、麥麥開始思考時就會切"
+            else:
+                status = f"切分中：{len(state.active(now, ttl, len(state.threads)))} 個活躍話題，記了 {len(state.entries)} 則"
+            channels.append({"channel_id": channel_id, "chat": names.get(stream_id or "", "—"), "status": status})
         ledgers = [state.ledger_at for state in self._threads.values() if state.ledger_at]
         notice = ""
         if not config.enabled:
             notice = "話題切分沒有啟用：在下面設定裡打開。"
+        elif not config.channel_list:
+            notice = "還沒設定頻道，話題切分不會動：在下面加入 Discord 頻道 ID。"
         elif self._threads_embed_warned:
             notice = "算不出向量（MaiBot 沒設 embedding 模型或呼叫失敗），目前只用規則和 LLM 整理；詳情看日誌。"
         return {
             "notice": notice,
-            "settings": self._setting_rows("threads", PAGE_FIELDS["threads"]),
-            "channels": len(self._threads),
+            "settings": self._setting_rows("threads", [field for field in PAGE_FIELDS["threads"] if field != "channel_list"]),
+            "channel_count": len(config.channel_list),
+            "channels": channels,
             "active": len(threads),
             "ledger_at": max(ledgers).strftime("%H:%M:%S") if ledgers else "—",
             "threshold": f"{config.similarity_threshold:.2f}",
@@ -451,4 +466,27 @@ class TopicThreadsMixin:
 
     @API("webui_threads_save", description="儲存話題切分的設定", version="1")
     async def webui_threads_save(self, **fields: Optional[str]) -> Dict[str, Any]:
+        fields.pop("channel_list", None)  # 頻道用下面的加入／移除
         return {"saved": self._save_page_fields("threads", fields)}
+
+    @API("webui_threads_add_channel", description="加入要切分話題的頻道", version="1")
+    async def webui_threads_add_channel(self, new_channel_id: str = "") -> Dict[str, Any]:
+        channel_id = new_channel_id.strip()
+        if not channel_id.isdigit():
+            raise ValueError("頻道 ID 要是一串數字（在 Discord 對頻道按右鍵 → 複製頻道 ID）")
+        channels = self._load_settings().threads.channel_list
+        if channel_id in channels:
+            raise ValueError("這個頻道已經在列表裡")
+        self._save_page_setting("threads", "channel_list", [*channels, channel_id])
+        return {"saved": True}
+
+    @API("webui_threads_remove_channel", description="移除要切分話題的頻道", version="1")
+    async def webui_threads_remove_channel(self, channel_id: str = "") -> Dict[str, Any]:
+        """移除後這個頻道的話題也清掉，planner 和 replyer 不再收到它的話題提示。"""
+        channels = self._load_settings().threads.channel_list
+        self._save_page_setting("threads", "channel_list", [item for item in channels if item != channel_id])
+        if stream_id := await self._resolve_discord_stream(channel_id):
+            state = self._threads.pop(stream_id, None)
+            if state is not None and state.ledger_task is not None:
+                state.ledger_task.cancel()
+        return {"saved": True}

@@ -1233,6 +1233,11 @@ class ThreadsConfig(PluginConfigBase):
         description="是否啟用話題切分；嵌入相似度要 MaiBot 設好 embedding 模型，沒設時只用規則和 LLM 整理。",
         json_schema_extra={"label": "啟用話題切分", "order": 0},
     )
+    channel_list: List[str] = Field(
+        default_factory=list,
+        description="要切分話題的 Discord 頻道 ID；子區沿用所在頻道的聊天時跟著頻道，獨立成一個聊天的子區要另外加它自己的 ID。",
+        json_schema_extra={"label": "頻道列表", "order": 1},
+    )
     thread_ttl_minutes: int = Field(
         default=15,
         ge=1,
@@ -1281,6 +1286,11 @@ class ThreadsConfig(PluginConfigBase):
         json_schema_extra={"label": "整理用的模型", "order": 8},
     )
 
+    @field_validator("channel_list", mode="before")
+    @classmethod
+    def _normalize_channel_list(cls, value: Any) -> List[str]:
+        return _normalize_string_list(value)
+
 
 # 改到「DC生活」工作區頁面設定、不在插件設定頁顯示的欄位 {配置節: 欄位}；順序也是頁面「目前設定」表格的順序。
 # 值存在插件資料目錄的 daily_settings.json，執行時覆蓋設定裡的同名欄位；第一次啟動時從原設定搬過去。
@@ -1311,6 +1321,7 @@ PAGE_FIELDS: Dict[str, tuple[str, ...]] = {
     ),
     "threads": (
         "enabled",
+        "channel_list",
         "thread_ttl_minutes",
         "max_active_threads",
         "same_speaker_seconds",

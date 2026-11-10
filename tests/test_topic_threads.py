@@ -27,7 +27,7 @@ class FakeCtx:
         self.logger.warning = self.logs.append
         self.logger.info = self.logs.append
         self.llm = SimpleNamespace(generate=self._generate)
-        self.chat = SimpleNamespace(get_all_streams=self._streams)
+        self.chat = SimpleNamespace(get_all_streams=self._streams, get_stream_by_group_id=self._stream_by_group)
 
     async def call_capability(self, name, **kwargs):
         assert name == "llm.embed"
@@ -45,11 +45,18 @@ class FakeCtx:
     async def _streams(self, platform):
         return [{"stream_id": "s1", "group_name": "閒聊", "user_cardname": None, "user_nickname": "x"}]
 
+    async def _stream_by_group(self, group_id, platform):
+        # 頻道 10 是聊天 s1；頻道 20 還沒有人說過話（SDK 回 None）
+        return {"stream_id": "s1"} if group_id == "10" else None
+
 
 def _plugin(**threads):
     plugin = _load_plugin_class()()
     plugin.set_plugin_config(
-        {"plugin": {"config_version": "1.0.0"}, "threads": {"enabled": True, "ledger_enabled": False, **threads}}
+        {
+            "plugin": {"config_version": "1.0.0"},
+            "threads": {"enabled": True, "ledger_enabled": False, "channel_list": ["10"], **threads},
+        }
     )
     plugin._ctx = FakeCtx()
     return plugin
@@ -217,9 +224,12 @@ def test_without_embeddings_rules_still_work_and_warn_once() -> None:
     assert "算不出向量" in asyncio.run(plugin.webui_threads())["notice"]
 
 
-def test_disabled_private_or_single_thread_leaves_the_request_alone() -> None:
+def test_disabled_unlisted_private_or_single_thread_leaves_the_request_alone() -> None:
     plugin = _setup(enabled=False)
     assert _planner(plugin)[0] == {"action": "continue"} and plugin._threads == {}
+
+    plugin = _setup(channel_list=["20"])
+    assert _planner(plugin)[0] == {"action": "continue"} and plugin._threads == {}, "沒列進頻道列表的不切"
 
     plugin = _plugin()
     private = _inbound("101", "u1")
@@ -236,7 +246,9 @@ def test_page_lists_threads_and_recent_assignments_and_saves_settings() -> None:
     plugin = _setup()
     _planner(plugin)
     page = asyncio.run(plugin.webui_threads())
-    assert page["notice"] == "" and page["channels"] == 1 and page["threshold"] == "0.60"
+    assert page["notice"] == "" and page["channel_count"] == 1 and page["threshold"] == "0.60"
+    assert page["channels"] == [{"channel_id": "10", "chat": "閒聊", "status": "切分中：1 個活躍話題，記了 8 則"}]
+    assert all(row["item"] != "頻道列表" for row in page["settings"]), "頻道另外列，不放在設定表格"
     assert [row["title"] for row in page["threads"]] == ["爬山的話要早點出發"], "冷場前的話題已經不活躍"
     newest = page["recent"][0]
     assert newest["chat"] == "閒聊" and newest["rule"] == "新話題" and newest["text"] == "爬山的話要早點出發"
@@ -248,3 +260,30 @@ def test_page_lists_threads_and_recent_assignments_and_saves_settings() -> None:
     saved = asyncio.run(plugin.webui_threads_save(similarity_threshold="0.75", ledger_every=""))
     assert saved == {"saved": ["similarity_threshold"]}
     assert plugin._load_settings().threads.similarity_threshold == 0.75
+
+
+def test_channels_are_added_and_removed_on_the_page_with_their_status() -> None:
+    plugin = _setup(channel_list=[])
+    page = asyncio.run(plugin.webui_threads())
+    assert page["notice"].startswith("還沒設定頻道") and page["channels"] == []
+    assert _planner(plugin)[0] == {"action": "continue"}, "沒有頻道就不切"
+
+    for bad, reason in (("abc", "一串數字"), ("10", None)):
+        if reason is None:
+            asyncio.run(plugin.webui_threads_add_channel(new_channel_id=" 10 "))
+        try:
+            asyncio.run(plugin.webui_threads_add_channel(new_channel_id=bad))
+        except ValueError as exc:
+            assert (reason or "已經在列表裡") in str(exc)
+        else:
+            raise AssertionError(bad)
+    asyncio.run(plugin.webui_threads_add_channel(new_channel_id="20"))
+    statuses = {row["channel_id"]: row["status"] for row in asyncio.run(plugin.webui_threads())["channels"]}
+    assert statuses == {"10": "等待新訊息：有人說話、麥麥開始思考時就會切", "20": "還沒有人說話，MaiBot 不認得這個頻道"}
+
+    _planner(plugin)
+    assert "s1" in plugin._threads
+    asyncio.run(plugin.webui_threads_remove_channel(channel_id="10"))
+    assert plugin._load_settings().threads.channel_list == ["20"] and "s1" not in plugin._threads
+    reply = asyncio.run(plugin.add_topic_thread_to_replyer(session_id="s1", reply_message_id=CALLING))
+    assert reply == {"action": "continue"}, "移除後 replyer 也不再收到話題提示"

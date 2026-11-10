@@ -1244,6 +1244,36 @@
         }
       },
       "actions": {
+        "add_channel": {
+          "api": "webui_threads_add_channel",
+          "version": "1",
+          "parameters": {
+            "new_channel_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 40
+            }
+          }
+        },
+        "remove_channel": {
+          "api": "webui_threads_remove_channel",
+          "version": "1",
+          "parameters": {
+            "channel_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 40
+            }
+          },
+          "arguments": {
+            "channel_id": {
+              "scope": "selection",
+              "source": "threadChannelRow",
+              "field": "channel_id"
+            }
+          },
+          "confirmation": "確定不再切分這個頻道的話題？它目前的話題會一起清掉。"
+        },
         "save": {
           "api": "webui_threads_save",
           "version": "1",
@@ -1317,10 +1347,10 @@
           "children": [
             {
               "type": "stat",
-              "label": "追蹤中的頻道",
+              "label": "切分的頻道",
               "value": {
                 "source": "summary",
-                "field": "channels"
+                "field": "channel_count"
               }
             },
             {
@@ -1346,6 +1376,92 @@
                 "source": "summary",
                 "field": "ledger_at"
               }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "label": "頻道（點一列可移除）",
+          "value": {
+            "source": "summary",
+            "field": "channels"
+          },
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "channels"
+            },
+            "operator": "not_empty"
+          },
+          "columns": [
+            {
+              "field": "channel_id",
+              "label": "頻道 ID"
+            },
+            {
+              "field": "chat",
+              "label": "聊天"
+            },
+            {
+              "field": "status",
+              "label": "狀態"
+            }
+          ],
+          "selection": "threadChannelRow",
+          "detail": "threadChannelDetails"
+        },
+        {
+          "type": "card",
+          "children": [
+            {
+              "type": "input",
+              "name": "new_channel_id",
+              "label": "加入頻道（Discord 頻道 ID）"
+            },
+            {
+              "type": "button",
+              "label": "加入頻道",
+              "action": "add_channel"
+            }
+          ]
+        },
+        {
+          "type": "dialog",
+          "name": "threadChannelDetails",
+          "label": "頻道",
+          "children": [
+            {
+              "type": "text",
+              "label": "頻道 ID",
+              "value": {
+                "scope": "selection",
+                "source": "threadChannelRow",
+                "field": "channel_id"
+              }
+            },
+            {
+              "type": "text",
+              "label": "聊天",
+              "value": {
+                "scope": "selection",
+                "source": "threadChannelRow",
+                "field": "chat"
+              }
+            },
+            {
+              "type": "text",
+              "label": "狀態",
+              "value": {
+                "scope": "selection",
+                "source": "threadChannelRow",
+                "field": "status"
+              }
+            },
+            {
+              "type": "button",
+              "label": "移除這個頻道",
+              "action": "remove_channel",
+              "variant": "danger"
             }
           ]
         },
