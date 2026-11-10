@@ -1222,6 +1222,66 @@ class TopicConfig(PluginConfigBase):
         return " ".join(_normalize_string(value).split()) or "0 12,20 * * *"
 
 
+class ThreadsConfig(PluginConfigBase):
+    """話題切分：把群聊裡交錯的對話分成並行話題，告訴 planner / replyer 誰在跟誰聊什麼。設定都在「DC生活 → 話題切分」頁面。"""
+
+    __ui_label__: ClassVar[str] = "話題切分"
+    __ui_order__: ClassVar[int] = 23
+
+    enabled: bool = Field(
+        default=False,
+        description="是否啟用話題切分；嵌入相似度要 MaiBot 設好 embedding 模型，沒設時只用規則和 LLM 整理。",
+        json_schema_extra={"label": "啟用話題切分", "order": 0},
+    )
+    thread_ttl_minutes: int = Field(
+        default=15,
+        ge=1,
+        description="話題多久沒有新訊息就不再接收新訊息，之後同樣的內容會開新話題。",
+        json_schema_extra={"label": "話題冷掉（分鐘）", "order": 1, "step": 1},
+    )
+    max_active_threads: int = Field(
+        default=5,
+        ge=1,
+        description="新訊息最多和幾個最近活躍的話題比對。",
+        json_schema_extra={"label": "比對的話題數", "order": 2, "step": 1},
+    )
+    same_speaker_seconds: int = Field(
+        default=120,
+        ge=0,
+        description="同一個人在這段時間內連發，沿用他上一則的話題。",
+        json_schema_extra={"label": "連發視為同話題（秒）", "order": 3, "step": 10},
+    )
+    similarity_threshold: float = Field(
+        default=0.6,
+        ge=0,
+        le=1,
+        description="新訊息和話題的嵌入相似度高於這個值就歸進去，否則開新話題；每個 embedding 模型的分數範圍不同，看頁面「最近的歸類」的相似度來調。",
+        json_schema_extra={"label": "相似度門檻", "order": 4, "step": 0.05},
+    )
+    ledger_enabled: bool = Field(
+        default=True,
+        description="定期請 LLM 重新整理最近的訊息歸屬，給話題命名和寫摘要，修正規則看不出的換話題。",
+        json_schema_extra={"label": "LLM 整理", "order": 5},
+    )
+    ledger_every: int = Field(
+        default=15,
+        ge=3,
+        description="每個頻道累積多少則新訊息整理一次。",
+        json_schema_extra={"label": "每幾則整理一次", "order": 6, "step": 1},
+    )
+    ledger_window: int = Field(
+        default=40,
+        ge=10,
+        description="每次整理 planner 上下文裡最近多少則訊息。",
+        json_schema_extra={"label": "每次整理幾則", "order": 7, "step": 5},
+    )
+    model_task: Literal["utils", "planner", "replyer"] = Field(
+        default="utils",
+        description="LLM 整理沿用 MaiBot 哪個模型任務：utils=工具模型（快、便宜，建議）, planner=規劃模型, replyer=回覆模型。",
+        json_schema_extra={"label": "整理用的模型", "order": 8},
+    )
+
+
 # 改到「DC生活」工作區頁面設定、不在插件設定頁顯示的欄位 {配置節: 欄位}；順序也是頁面「目前設定」表格的順序。
 # 值存在插件資料目錄的 daily_settings.json，執行時覆蓋設定裡的同名欄位；第一次啟動時從原設定搬過去。
 # 決策模型的 API Key 留在設定頁：頁面輸入框沒有密碼遮罩
@@ -1248,6 +1308,17 @@ PAGE_FIELDS: Dict[str, tuple[str, ...]] = {
         "model_task",
         "pick_instructions",
         "share_instructions",
+    ),
+    "threads": (
+        "enabled",
+        "thread_ttl_minutes",
+        "max_active_threads",
+        "same_speaker_seconds",
+        "similarity_threshold",
+        "ledger_enabled",
+        "ledger_every",
+        "ledger_window",
+        "model_task",
     ),
     "reminder": ("enabled", "drift_minutes", "max_per_chat", "followup_enabled", "followup_max_per_chat"),
     "decision": (
@@ -1286,7 +1357,7 @@ PAGE_MANAGED_FIELDS: tuple[tuple[str, str], ...] = tuple(
 # WebUI 配置页标签分组：(标签 ID, 标题, 配置节列表)。
 WEBUI_CONFIG_TABS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("basic", "基础设置", ("plugin", "connection", "platform")),
-    ("chat", "聊天与过滤", ("chat", "filters", "decision")),
+    ("chat", "聊天与过滤", ("chat", "filters", "decision", "threads")),
     ("daily", "日常", ("reminder", "life", "topics")),
     (
         "voice",
@@ -1327,6 +1398,7 @@ class DiscordPluginSettings(PluginConfigBase):
     reminder: ReminderConfig = Field(default_factory=ReminderConfig)
     life: LifeConfig = Field(default_factory=LifeConfig)
     topics: TopicConfig = Field(default_factory=TopicConfig)
+    threads: ThreadsConfig = Field(default_factory=ThreadsConfig)
 
     def should_connect(self) -> bool:
         """委托 ``plugin`` 子配置判断是否应连接 Discord。

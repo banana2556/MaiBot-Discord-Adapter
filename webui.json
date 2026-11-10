@@ -1232,6 +1232,335 @@
       ]
     },
     {
+      "id": "threads",
+      "title": "話題切分",
+      "description": "把群聊裡交錯的對話分成並行話題，告訴麥麥誰在跟誰聊什麼；這裡看目前的話題、每則怎麼歸類，調相似度門檻。",
+      "placement": "workspace",
+      "icon": "list",
+      "queries": {
+        "summary": {
+          "api": "webui_threads",
+          "version": "1"
+        }
+      },
+      "actions": {
+        "save": {
+          "api": "webui_threads_save",
+          "version": "1",
+          "parameters": {
+            "enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "thread_ttl_minutes": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "max_active_threads": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "same_speaker_seconds": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "similarity_threshold": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "ledger_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "ledger_every": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "ledger_window": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            },
+            "model_task": {
+              "type": "string",
+              "required": false,
+              "max_length": 40
+            }
+          }
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "value": {
+            "source": "summary",
+            "field": "notice"
+          },
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "notice"
+            },
+            "operator": "not_empty"
+          }
+        },
+        {
+          "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "追蹤中的頻道",
+              "value": {
+                "source": "summary",
+                "field": "channels"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "活躍話題",
+              "value": {
+                "source": "summary",
+                "field": "active"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "相似度門檻",
+              "value": {
+                "source": "summary",
+                "field": "threshold"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "上次 LLM 整理",
+              "value": {
+                "source": "summary",
+                "field": "ledger_at"
+              }
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "設定（只填要改的項目，沒動的不會變）",
+          "children": [
+            {
+              "type": "table",
+              "label": "目前的值",
+              "value": {
+                "source": "summary",
+                "field": "settings"
+              },
+              "columns": [
+                {
+                  "field": "item",
+                  "label": "項目"
+                },
+                {
+                  "field": "value",
+                  "label": "目前的值"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "enabled",
+              "label": "啟用話題切分",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "thread_ttl_minutes",
+              "label": "話題冷掉（分鐘；沒有新訊息多久就不再收新訊息）"
+            },
+            {
+              "type": "input",
+              "name": "max_active_threads",
+              "label": "新訊息最多和幾個活躍話題比對"
+            },
+            {
+              "type": "input",
+              "name": "same_speaker_seconds",
+              "label": "同一人連發視為同話題（秒）"
+            },
+            {
+              "type": "input",
+              "name": "similarity_threshold",
+              "label": "相似度門檻（0～1；看下面「最近的歸類」的相似度調）"
+            },
+            {
+              "type": "select",
+              "name": "ledger_enabled",
+              "label": "LLM 整理（命名、寫摘要、修正換話題）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "input",
+              "name": "ledger_every",
+              "label": "每幾則新訊息整理一次"
+            },
+            {
+              "type": "input",
+              "name": "ledger_window",
+              "label": "每次整理最近幾則"
+            },
+            {
+              "type": "select",
+              "name": "model_task",
+              "label": "整理用的模型",
+              "options": [
+                {
+                  "label": "工具模型（utils，建議）",
+                  "value": "utils"
+                },
+                {
+                  "label": "規劃模型（planner）",
+                  "value": "planner"
+                },
+                {
+                  "label": "回覆模型（replyer）",
+                  "value": "replyer"
+                }
+              ]
+            },
+            {
+              "type": "button",
+              "label": "儲存設定",
+              "action": "save"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "value": "目前沒有活躍的話題。",
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "threads"
+            },
+            "operator": "empty"
+          }
+        },
+        {
+          "type": "table",
+          "label": "目前的話題（最近活躍的頻道在前）",
+          "value": {
+            "source": "summary",
+            "field": "threads"
+          },
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "threads"
+            },
+            "operator": "not_empty"
+          },
+          "columns": [
+            {
+              "field": "chat",
+              "label": "頻道"
+            },
+            {
+              "field": "thread",
+              "label": "話題"
+            },
+            {
+              "field": "title",
+              "label": "標題"
+            },
+            {
+              "field": "people",
+              "label": "在聊的人"
+            },
+            {
+              "field": "count",
+              "label": "則數"
+            },
+            {
+              "field": "last",
+              "label": "最後一則"
+            },
+            {
+              "field": "summary",
+              "label": "摘要"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "label": "最近的歸類（新的在前；相似度是和最接近的活躍話題比的分數）",
+          "value": {
+            "source": "summary",
+            "field": "recent"
+          },
+          "when": {
+            "reference": {
+              "source": "summary",
+              "field": "recent"
+            },
+            "operator": "not_empty"
+          },
+          "columns": [
+            {
+              "field": "time",
+              "label": "時間"
+            },
+            {
+              "field": "chat",
+              "label": "頻道"
+            },
+            {
+              "field": "speaker",
+              "label": "發言人"
+            },
+            {
+              "field": "text",
+              "label": "內容"
+            },
+            {
+              "field": "thread",
+              "label": "話題"
+            },
+            {
+              "field": "rule",
+              "label": "依據"
+            },
+            {
+              "field": "score",
+              "label": "相似度"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "reminders",
       "title": "定時提醒",
       "description": "所有聊天待觸發的提醒，點一列可查看詳情或取消。",

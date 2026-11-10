@@ -5,9 +5,9 @@ MaiBot 的 Discord 插件，跑在 MaiBot 的插件 Runner 裡（`maibot_sdk`）
 
 ## 結構
 
-- `plugin.py`：入口、訊息閘道器和大部分 Tool / Hook / `webui_*` API；按功能拆出去的 mixin 有定時提醒（`src/life/reminders.py` 的 `ReminderMixin`）、表情（`src/emote.py` 的 `EmoteMixin`）和回覆舊訊息的上下文（`src/quote_context.py` 的 `QuoteContextMixin`），新功能照這個方式拆，不要再往 `plugin.py` 加。
+- `plugin.py`：入口、訊息閘道器和大部分 Tool / Hook / `webui_*` API；按功能拆出去的 mixin 有定時提醒（`src/life/reminders.py` 的 `ReminderMixin`）、表情（`src/emote.py` 的 `EmoteMixin`）、回覆舊訊息的上下文（`src/quote_context.py` 的 `QuoteContextMixin`）和話題切分（`src/topic_threads.py` 的 `TopicThreadsMixin`），新功能照這個方式拆，不要再往 `plugin.py` 加。
 - `config.py`：配置模型；`WEBUI_CONFIG_TABS` 決定設定頁分組，`PAGE_FIELDS` 是改到「DC生活」頁面設定的欄位（每頁一組，設定頁不再顯示，整節都搬走的設定節會整個隱藏）。
-- `webui.json`：「DC生活」工作區頁面（日常生活、主動話題、語音、定時提醒、決策模型）。
+- `webui.json`：「DC生活」工作區頁面（日常生活、主動話題、語音、話題切分、定時提醒、決策模型）。
 - `src/recv_handler/`：Discord → MaiBot；`src/send_handler/`：MaiBot → Discord（含 OpenCC 轉繁體）。
 - `src/voice/`：語音頻道、VAD、STT/TTS 服務商；`src/life/`：日常生活、主動話題、共用的狀態讀寫；`src/decision.py`：決策模型與統計。
 - `src/emote.py`（`EmoteMixin`）：表情情境判斷、只按表情／只發圖、回覆後附圖、`discord_emote` 工具與決策模型頁 API；`src/emote_library.py`：MaiBot 表情庫的向量檢索。

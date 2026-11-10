@@ -129,6 +129,7 @@ def planner_messages(items: Any) -> List[Dict[str, Any]]:
     """從 planner hook 的 items 取出聊天訊息：每則一個 item，第一段文字開頭是 ``<message msg_id=… user=…>``。
 
     ``head`` 是那段文字的 part（可以改，改了會送進這輪請求）和訊息頭的長度，要在正文前面加字時用。
+    ``quote`` 是它回覆的那則的 msg_id（沒回覆時是空字串），``time`` 是訊息時間（epoch 秒，item 沒帶時間時是 None）。
     """
     messages: List[Dict[str, Any]] = []
     for item in items if isinstance(items, list) else []:
@@ -142,12 +143,15 @@ def planner_messages(items: Any) -> List[Dict[str, Any]]:
         attributes = {key: html.unescape(value) for key, value in _ATTRIBUTE.findall(head.group(1))}
         images = sum(1 for part in parts if isinstance(part, dict) and part.get("type") == "image")
         content = (texts[0][head.end() :] + "".join(texts[1:])).strip() + " [圖片]" * images
+        stamp = (item.get("meta") or {}).get("timestamp")
         messages.append(
             {
                 "msg_id": attributes.get("msg_id", ""),
                 "user": attributes.get("group_card") or attributes.get("user", ""),
                 "self": attributes.get("is_self_message") == "true",
                 "text": " ".join(content.split())[:120],
+                "quote": attributes.get("quote", "").split(",")[0],
+                "time": datetime.fromisoformat(stamp).timestamp() if stamp else None,
                 "head": (text_parts[0], head.end()),
             }
         )
@@ -173,6 +177,17 @@ def quoted(message: Mapping[str, Any]) -> Tuple[str, str, str]:
             label = f"回覆{who}：{content[:30]}{'…' if len(content) > 30 else ''}" if content else f"回覆{who}"
             return str(data["target_message_id"]), f"{name}說：{content}" if content else "", label
     return "", "", ""
+
+
+def mentioned_names(message: Mapping[str, Any]) -> List[str]:
+    """入站訊息 @ 的人：每個人的伺服器暱稱和名字。"""
+    raw = message.get("raw_message")
+    names: List[str] = []
+    for segment in raw if isinstance(raw, list) else []:
+        data = segment.get("data") if isinstance(segment, Mapping) and segment.get("type") == "at" else None
+        if isinstance(data, Mapping):
+            names += [str(data[key]) for key in ("target_user_cardname", "target_user_nickname") if data.get(key)]
+    return names
 
 
 def tool_names(kwargs: Mapping[str, Any]) -> set[str]:
@@ -248,6 +263,8 @@ class EmoteMixin:
             # 「回覆「名字」：…」，標在 planner 上下文裡這則的正文前面
             "quote_label": quote_label,
             "addressed": self._is_calling_her(message),
+            # @ 了誰（伺服器暱稱和名字都記，對得上 planner 上下文的發話人）；話題切分用
+            "mentions": mentioned_names(message),
             # 只有真的 Discord 訊息（數字 ID）按得了表情；語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
             "targetable": message_id.isdigit(),
             "at": time.monotonic(),
