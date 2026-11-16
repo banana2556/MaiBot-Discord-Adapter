@@ -6,9 +6,11 @@
   不用另外收訊、對 ID。每則只在第一次出現時歸類，之後沿用。
 - 依序套用規則，命中就停：回覆了哪則 → @ 了誰（叫她的算 @ 她）→ 附和或表情 → 同一人短時間連發 → 嵌入相似度 → 開新話題。
   超過 thread_ttl_minutes 沒有新訊息的話題不再收新訊息（回覆除外）。
-- 新訊息每輪批次算一次向量，最多等 EMBED_TIMEOUT 秒；算不出來的那則只靠規則。
-- 每累積 ledger_every 則新訊息，背景請 LLM 重新歸類最近 ledger_window 則、給話題命名和寫摘要，下一輪生效；失敗時保留規則結果。
+- 新訊息每輪批次算一次向量，最多等 EMBED_TIMEOUT 秒；算不出來的那則沒有證據開新話題，先接最近的話題，交給 LLM 整理。
+- 每累積 ledger_every 則新訊息，背景請 LLM 把最近 ledger_window 則從頭分群、給話題命名和寫摘要，下一輪生效；失敗時保留規則結果。
+  LLM 看不到規則分的編號，免得照抄規則分碎的結果；分好的群再對回成員最多的舊話題，話題 ID 才穩定。
 - planner：在每輪最後那條提醒前面插一段「話題線索」，不改系統提示詞，前面的請求前綴還能命中快取；兩個話題以上才插。
+  只有一則、還沒被 LLM 命名的話題併成一行「零散訊息」，不逐條列成話題。
   replyer：告訴它要回的那則屬於哪個話題、群裡同時還在聊什麼。
 - 狀態只放記憶體，重啟後從新的 planner 輪重新累積。頁面「最近的歸類」列出每則用哪條規則、相似度多少，用來調門檻。
 """
@@ -50,6 +52,7 @@ RULE_LABELS = {
     "filler": "附和",
     "speaker": "連發",
     "embed": "語意相近",
+    "recent": "沒有向量，接最近的話題",
     "new": "新話題",
     "llm": "LLM 整理",
 }
@@ -57,22 +60,21 @@ PLANNER_NOTE = (
     "【話題線索】群裡同時有好幾個話題，下面是最近的訊息分成的話題（最近活躍的在前），依回覆、@、連發和語意相似度自動分組，"
     "可能有誤，以聊天紀錄為準。決定回應誰之前，先看對方在哪個話題、在跟誰說話；回覆只接那個話題，不要把不同話題的人和內容混在一起。"
 )
-LEDGER_PROMPT = """你在整理 Discord 群聊的話題。群裡常常同時有好幾個話題交錯進行，請把下面每則訊息歸到它真正在聊的話題。
+LEDGER_PROMPT = """你在整理 Discord 群聊的話題。群裡常常同時有好幾個話題交錯，請把下面的訊息分成話題。
 
-目前的話題：
-{threads}
-
-訊息（#編號 [目前話題] 發言人: 內容；→#n 表示回覆第 n 則）：
+訊息（#編號 時間 發言人: 內容；→#n 表示回覆第 n 則，@某人 表示點名）：
 {lines}
 
-規則：
-- 依內容判斷誰在回應誰、在聊什麼，不要只看先後順序；同一個人也可能在兩個話題之間來回。
-- 沿用既有話題編號；確實是新話題才用 new1、new2 這樣的新編號；兩個話題其實在聊同一件事就合成一個。
-- 附和、表情、「哈哈」之類歸到它回應的那個話題。
-- title 不超過 12 字；summary 一句話，說誰在聊什麼、聊到哪。
+怎麼分：
+- 話題是「一群人在聊的同一件事」，通常有好幾則、好幾個人。寧可少分，不要為了一兩句就開一個話題。
+- 同時進行的話題通常只有 1～3 個。同一件事的延伸、細節和小岔題都算同一個話題，明顯換成另一件事才分開。
+- 附和、表情、「哈哈」、短的插話，歸到它回應的那個話題；回覆（→#n）通常和被回覆的那則同一個話題。
+- 依內容判斷誰在回應誰，不要只看先後順序；同一個人也可能在兩個話題之間來回。
+- title 寫具體的事（例如「週末爬山行程」「顯卡漲價」），不超過 12 字；不要用「閒聊」「日常討論」這種空泛的詞。
+- summary 一句話：誰和誰在聊什麼、聊到哪了。
 
-只輸出 JSON，每則訊息都要歸類，threads 列出 assign 用到的每個話題：
-{{"assign": {{"1": "t3", "2": "new1"}}, "threads": {{"t3": {{"title": "…", "summary": "…"}}, "new1": {{"title": "…", "summary": "…"}}}}}}"""
+只輸出 JSON。每則訊息剛好出現在一個話題的 messages 裡：
+{{"topics": [{{"title": "…", "summary": "…", "messages": [1, 2, 5]}}, {{"title": "…", "summary": "…", "messages": [3, 4]}}]}}"""
 
 _thread_ids = count(1)
 
@@ -175,52 +177,73 @@ def assign(state: ChannelThreads, entry: Mapping[str, Any], config: Any) -> Tupl
                     best, score = thread_id, similarity
     if score is not None and score >= config.similarity_threshold:
         return best, "embed", score
+    if not entry["vector"]:
+        # 沒有向量就沒有證據說是新話題；先接最近的話題，LLM 整理時再分開，免得每則都開一個
+        return active[0], "recent", None
     return state.new_thread(), "new", score
 
 
 def ledger_prompt(state: ChannelThreads, window: Sequence[Mapping[str, Any]]) -> str:
+    """給 LLM 從頭分群的訊息列表：不帶規則分的話題編號，免得它照抄。"""
     index = {message["msg_id"]: number for number, message in enumerate(window, 1)}
+    bot_name = next((_plain(message["user"]) for message in window if message["self"]), "")
     lines = []
     for number, message in enumerate(window, 1):
+        entry = state.entries[message["msg_id"]]
         quote = f" →#{index[message['quote']]}" if message["quote"] in index else ""
-        who = "（你）" if message["self"] else _plain(message["user"])
-        lines.append(f"#{number} [{state.entries[message['msg_id']]['thread']}] {who}:{quote} {message['text']}")
-    used = dict.fromkeys(state.entries[message["msg_id"]]["thread"] for message in window)
-    threads = "\n".join(
-        f"- {t}: {state.label(t)}" + (f"（{state.threads[t]['summary']}）" if state.threads[t]["summary"] else "")
-        for t in used
-    )
-    return LEDGER_PROMPT.format(threads=threads, lines="\n".join(lines))
+        names = [bot_name if name == SELF else name for name in dict.fromkeys(entry["mentions"])]
+        mentions = "".join(f" @{name}" for name in names if name)
+        clock = datetime.fromtimestamp(entry["time"]).strftime("%H:%M")
+        lines.append(f"#{number} {clock} {_plain(message['user'])}:{quote}{mentions} {message['text']}")
+    return LEDGER_PROMPT.format(lines="\n".join(lines))
 
 
 def apply_ledger(state: ChannelThreads, window: Sequence[Mapping[str, Any]], result: Any) -> int:
-    """照 LLM 的結果改窗口裡訊息的話題、更新標題摘要，回傳改了幾則；格式不對時拋 ValueError。
+    """照 LLM 分好的群改窗口裡訊息的話題、更新標題摘要，回傳改了幾則；格式不對時拋 ValueError。
 
-    整理期間新來的訊息不在窗口裡，保持原樣；已經淘汰的跳過。
+    每群對回成員裡最多的舊話題（大群先挑），話題 ID 和頁面紀錄才穩定；對不到的開新話題。
+    LLM 漏掉的訊息、整理期間新來的訊息保持原樣；已經淘汰的跳過。
     """
-    if not isinstance(result, dict) or not isinstance(result.get("assign"), dict):
-        raise ValueError(f"LLM 回覆缺少 assign：{str(result)[:200]}")
-    infos = result.get("threads") if isinstance(result.get("threads"), dict) else {}
-    mapping: Dict[str, str] = {}
+    topics = result.get("topics") if isinstance(result, dict) else None
+    if not isinstance(topics, list):
+        raise ValueError(f"LLM 回覆缺少 topics：{str(result)[:200]}")
+    groups: List[Tuple[Mapping[str, Any], List[Dict[str, Any]]]] = []
+    seen: set[int] = set()
+    for topic in topics:
+        if not isinstance(topic, dict) or not isinstance(topic.get("messages"), list):
+            continue
+        members = []
+        for raw_number in topic["messages"]:
+            try:
+                number = int(str(raw_number).lstrip("#"))
+            except ValueError:
+                continue
+            entry = state.entries.get(window[number - 1]["msg_id"]) if 1 <= number <= len(window) else None
+            if entry is not None and number not in seen:
+                seen.add(number)
+                members.append(entry)
+        if members:
+            groups.append((topic, members))
+    if not groups:
+        raise ValueError(f"LLM 回覆沒有可用的話題：{str(result)[:200]}")
+    groups.sort(key=lambda group: len(group[1]), reverse=True)
+    taken: set[str] = set()
     changed = 0
-    for raw_number, label in result["assign"].items():
-        try:
-            message = window[int(str(raw_number).lstrip("#")) - 1]
-        except (ValueError, IndexError):
-            continue
-        entry = state.entries.get(message["msg_id"])
-        if entry is None or not isinstance(label, str):
-            continue
-        if label not in mapping:
-            mapping[label] = label if label in state.threads else state.new_thread()
-        if entry["thread"] != mapping[label]:
-            entry["thread"], entry["rule"] = mapping[label], "llm"
-            changed += 1
-    for label, info in infos.items():
-        thread = state.threads.get(mapping.get(label, label))
-        if thread is not None and isinstance(info, dict):
-            thread["title"] = _clip(str(info.get("title") or ""), 20)
-            thread["summary"] = _clip(str(info.get("summary") or ""), 80)
+    for topic, members in groups:
+        votes: Dict[str, int] = {}
+        for entry in members:
+            votes[entry["thread"]] = votes.get(entry["thread"], 0) + 1
+        reuse = [t for t in sorted(votes, key=votes.__getitem__, reverse=True) if t not in taken and t in state.threads]
+        thread_id = reuse[0] if reuse else state.new_thread()
+        taken.add(thread_id)
+        state.threads[thread_id] = {
+            "title": _clip(str(topic.get("title") or ""), 20),
+            "summary": _clip(str(topic.get("summary") or ""), 80),
+        }
+        for entry in members:
+            if entry["thread"] != thread_id:
+                entry["thread"], entry["rule"] = thread_id, "llm"
+                changed += 1
     state.prune()
     return changed
 
@@ -232,16 +255,22 @@ def planner_note(state: ChannelThreads, messages: Sequence[Mapping[str, Any]]) -
         if entry := state.entries.get(message["msg_id"]):
             # 先移除再放回，字典順序就是各話題最後一則出現的順序
             groups[entry["thread"]] = [*groups.pop(entry["thread"], []), message]
-    if len(groups) < 2:
-        return ""
-    lines = []
+    lines, scattered = [], []
     for thread_id, members in reversed(groups.items()):
+        # 只有一則、LLM 也還沒命名的多半是規則分碎的，不當成一個話題列
+        if len(members) == 1 and not state.threads[thread_id]["title"]:
+            scattered.append(f"{members[0]['msg_id']}（{'你' if members[0]['self'] else _plain(members[0]['user'])}）")
+            continue
         people = "、".join(dict.fromkeys("你" if m["self"] else _plain(m["user"]) for m in members))
         ids = " ".join(m["msg_id"] for m in members[-IDS_PER_THREAD:])
         line = f"- [{thread_id}] {state.label(thread_id)}｜{people}｜msg_id：{ids}"
         if summary := state.threads[thread_id]["summary"]:
             line += f"\n  {summary}"
         lines.append(line)
+    if scattered:
+        lines.append(f"- 零散訊息（還看不出屬於哪個話題）：{' '.join(scattered)}")
+    if len(lines) < 2:
+        return ""
     return PLANNER_NOTE + "\n" + "\n".join(lines)
 
 

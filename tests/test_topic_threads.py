@@ -137,9 +137,9 @@ def test_rules_split_interleaved_chat_and_planner_gets_the_threads() -> None:
     note = items[-2]["parts"][0]["text"]
     assert note.startswith("【話題線索】") and items[-2]["meta"]["timestamp"]
     lines = note.split("\n")[1:]
-    assert lines[0].startswith(f"- [{thread['108']}] 爬山的話要早點出發｜小明｜msg_id：108")
-    assert f"｜老王、阿強、小明、阿花｜msg_id：103 104 105 {alias(CALLING)} 107" in note
-    assert lines[-1].startswith(f"- [{thread['101']}] 週末要不要去爬山｜小明、阿花｜msg_id：101 102")
+    assert lines[0] == f"- [{thread['103']}] 新顯卡價格又漲了｜老王、阿強、小明、阿花｜msg_id：103 104 105 {alias(CALLING)} 107"
+    assert lines[1] == f"- [{thread['101']}] 週末要不要去爬山｜小明、阿花｜msg_id：101 102"
+    assert lines[2] == "- 零散訊息（還看不出屬於哪個話題）：108（小明）", "只有一則、沒命名的不當成話題列"
 
     # 同一輪後面的請求沿用，不重算
     _planner(plugin)
@@ -172,23 +172,29 @@ def test_her_own_messages_and_people_calling_her_join_the_right_thread() -> None
     assert entries["103"]["rule"] == "at", "叫她的訊息接到她最近說話的話題"
 
 
-def test_ledger_relabels_and_names_threads_and_survives_bad_replies() -> None:
+def _ledger_reply(*topics):
+    return "```json\n" + json.dumps(
+        {"topics": [{"title": title, "summary": summary, "messages": numbers} for title, summary, numbers in topics]},
+        ensure_ascii=False,
+    ) + "\n```"
+
+
+def _run_ledger_again(plugin, state):
+    window = _load_adapter_module("src.emote").planner_messages([_item(*row) for row in CHAT])
+    asyncio.run(plugin._run_ledger("s1", state, [{k: v for k, v in m.items() if k != "head"} for m in window]))
+
+
+def test_ledger_regroups_from_scratch_keeps_thread_ids_and_survives_bad_replies() -> None:
     plugin = _setup(ledger_enabled=True, ledger_every=8)
     _planner(plugin, CHAT[:7])
     state = plugin._threads["s1"]
     assert state.ledger_task is None, "還不到 8 則"
     hiking, gpu = state.entries["101"]["thread"], state.entries["103"]["thread"]
-    plugin.ctx.ledger_reply = "```json\n" + json.dumps(
-        {
-            "assign": {"1": hiking, "2": hiking, "3": gpu, "4": gpu, "5": hiking, "6": gpu, "7": gpu, "8": "new1"},
-            "threads": {
-                hiking: {"title": "週末爬山", "summary": "小明約阿花週末爬山"},
-                gpu: {"title": "顯卡漲價", "summary": "老王和阿強在抱怨顯卡價格"},
-                "new1": {"title": "出發時間", "summary": "小明提議早點出發"},
-            },
-        },
-        ensure_ascii=False,
-    ) + "\n```"
+    plugin.ctx.ledger_reply = _ledger_reply(
+        ("顯卡漲價", "老王和阿強在抱怨顯卡價格", [3, 4, 6, 7]),
+        ("週末爬山", "小明約阿花週末爬山", [1, 2, 5]),
+        ("出發時間", "小明提議早點出發", [8]),
+    )
 
     async def eighth_message_starts_the_ledger():
         await plugin.add_topic_threads_to_planner(**_kwargs())
@@ -196,21 +202,33 @@ def test_ledger_relabels_and_names_threads_and_survives_bad_replies() -> None:
         await state.ledger_task
 
     asyncio.run(eighth_message_starts_the_ledger())
+    later = state.entries["108"]["thread"]
     prompt = plugin.ctx.prompts[-1]
-    assert "#4 [" in prompt and "→#3" in prompt and "阿強" in prompt
+    assert "→#3" in prompt and "@老王" in prompt and "阿強" in prompt
+    assert f"[{hiking}]" not in prompt and f"[{gpu}]" not in prompt, "不給 LLM 看規則分的編號，免得照抄"
+    # 每群沿用成員最多的舊話題：ID 不變，附和那則從顯卡改回爬山
     assert state.entries["105"]["thread"] == hiking and state.entries["105"]["rule"] == "llm"
-    assert state.entries["108"]["thread"] not in (hiking, gpu)
-    assert state.threads[hiking]["title"] == "週末爬山" and state.ledger_at is not None
+    assert state.entries["107"]["thread"] == gpu and later not in (hiking, gpu)
+    assert state.threads[hiking]["title"] == "週末爬山" and state.threads[later]["title"] == "出發時間"
+    assert state.ledger_at is not None
 
     _, items = _planner(plugin)
     note = items[-2]["parts"][0]["text"]
-    assert "週末爬山" in note and "顯卡漲價" in note and "老王和阿強在抱怨顯卡價格" in note
+    assert "週末爬山" in note and "老王和阿強在抱怨顯卡價格" in note
+    assert f"[{later}] 出發時間｜小明｜msg_id：108" in note, "LLM 命名過的單則話題照常列出"
+
+    # LLM 把分碎的話題併回去：沒有訊息的話題清掉
+    plugin.ctx.ledger_reply = _ledger_reply(
+        ("週末爬山", "小明約阿花週末爬山，提議早點出發", [1, 2, 5, 8]), ("顯卡漲價", "", [3, 4, 6, 7])
+    )
+    _run_ledger_again(plugin, state)
+    assert state.entries["108"]["thread"] == hiking and later not in state.threads
 
     before = {msg_id: entry["thread"] for msg_id, entry in state.entries.items()}
-    plugin.ctx.ledger_reply = "我不知道"
-    window = _load_adapter_module("src.emote").planner_messages([_item(*row) for row in CHAT])
-    asyncio.run(plugin._run_ledger("s1", state, [{k: v for k, v in m.items() if k != "head"} for m in window]))
-    assert before == {msg_id: entry["thread"] for msg_id, entry in state.entries.items()}
+    for bad in ("我不知道", '{"assign": {"1": "t1"}}', '{"topics": [{"title": "x", "messages": [99]}]}'):
+        plugin.ctx.ledger_reply = bad
+        _run_ledger_again(plugin, state)
+        assert before == {msg_id: entry["thread"] for msg_id, entry in state.entries.items()}, bad
 
 
 def test_without_embeddings_rules_still_work_and_warn_once() -> None:
@@ -219,7 +237,8 @@ def test_without_embeddings_rules_still_work_and_warn_once() -> None:
     _planner(plugin, CHAT[:3])
     _planner(plugin, CHAT[:4])
     entries = plugin._threads["s1"].entries
-    assert entries["102"]["rule"] == "new" and entries["104"]["rule"] == "quote"
+    assert entries["102"]["rule"] == "recent" and entries["102"]["thread"] == entries["101"]["thread"], "沒向量不亂開新話題"
+    assert entries["104"]["rule"] == "quote"
     assert sum("沒有 embedding 模型" in str(line) for line in plugin.ctx.logs) == 1
     assert "算不出向量" in asyncio.run(plugin.webui_threads())["notice"]
 
