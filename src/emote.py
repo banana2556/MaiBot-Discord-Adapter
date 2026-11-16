@@ -37,6 +37,7 @@ from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import ask as ask_decision
 from .life.common import sent_text, short_time
+from .reply_links import link_questions, parse_links
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
@@ -217,6 +218,8 @@ class EmoteMixin:
         self._latest_inbound: Dict[str, Dict[str, Any]] = {}
         # 上次問決策模型的時間（time.monotonic）；之後收到的才算「新訊息」
         self._judged_at: Dict[str, float] = {}
+        # 決策模型判斷的回覆前文：每個聊天 {msg_id: 它在接的 msg_id}，見 reply_links.py
+        self._reply_links: Dict[str, "OrderedDict[str, List[str]]"] = {}
         self._pending_append: Dict[str, Dict[str, Any]] = {}
         self._append_tasks: Dict[str, asyncio.Task[None]] = {}
         # 只按表情／只發圖的背景任務；要留著引用，沒人引用的 Task 可能被回收
@@ -281,7 +284,8 @@ class EmoteMixin:
         "maisaka.planner.before_request",
         name="discord_emote_decision",
         mode="blocking",
-        order="late",
+        # 比回覆上下文（quote_context，late）早：「有人在找你」要用到這次順便判斷的回覆前文
+        order="normal",
         timeout_ms=5000,
     )
     async def decide_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
@@ -328,6 +332,8 @@ class EmoteMixin:
         now = datetime.now()
         remembered = self._inbound.get(session_id, {})
         window = list(messages)[-decision.context_messages :]
+        # 別人的訊息都編號（表態題和前文題共用），她自己的標「（你）」
+        numbers = {id(message): str(index) for index, message in enumerate((m for m in window if not m["self"]), 1)}
         # 能表態的：別人說的、換得回真的 Discord 訊息；取最後幾則
         targets = [
             message
@@ -337,23 +343,23 @@ class EmoteMixin:
         if not targets:
             self.ctx.logger.info(f"表情決策 [{session_id}]：planner 上下文裡沒有可以表態的訊息，這輪 planner 自己決定")
             return None
-        numbers = {id(message): str(index) for index, message in enumerate(targets, 1)}
+        target_numbers = {numbers[id(message)] for message in targets}
         reactions = self._reaction_summaries([remembered[message["msg_id"]]["id"] for message in targets])
         lines = []
         for message in window:
             if message["self"]:
                 lines.append(f"（你）：{message['text']}")
                 continue
-            number = numbers.get(id(message))
-            extra = reactions.get(remembered[message["msg_id"]]["id"], "") if number else ""
-            lines.append(f"{'#' + number + ' ' if number else ''}「{message['user']}」：{message['text']}{extra}")
+            number = numbers[id(message)]
+            extra = reactions.get(remembered[message["msg_id"]]["id"], "") if number in target_numbers else ""
+            lines.append(f"#{number} 「{message['user']}」：{message['text']}{extra}")
         judged_at = self._judged_at.get(session_id, 0.0)
         self._judged_at[session_id] = time.monotonic()
         addressed = any(entry["addressed"] and entry["at"] > judged_at for entry in remembered.values())
         state = (
             f"你是「{self._bot_name()}」，在 Discord 群組聊天。"
             + ("上次之後有人 @ 你、回覆你或私訊你。" if addressed else "上次之後沒有人 @ 你。")
-            + "\n\n最近的群聊（越下面越新，# 是可以表態的訊息）：\n"
+            + "\n\n最近的群聊（越下面越新，# 是訊息編號）：\n"
             + "\n".join(lines)
         )
         questions = decision_questions(decision)
@@ -365,24 +371,32 @@ class EmoteMixin:
                 "instructions": decision.target_instructions,
                 "criteria": {numbers[id(message)]: f"「{message['user']}」：{message['text']}" for message in targets},
             }
+        link_keys: Dict[str, Dict[str, Any]] = {}
+        if decision.reply_context_enabled:
+            link_asks, link_keys = link_questions(window, numbers, remembered)
+            questions.update(link_asks)
         started = time.monotonic()
         answers = await ask_decision(decision, state, questions, self.ctx.logger)
         latency_ms = round((time.monotonic() - started) * 1000)
+        judged_links, link_summary = parse_links(answers, link_keys, decision.link_threshold)
+        links = self._reply_links.setdefault(session_id, OrderedDict())
+        for msg_id, linked in judged_links.items():
+            links[msg_id] = linked
+            links.move_to_end(msg_id)
+        while len(links) > INBOUND_REMEMBERED:
+            links.popitem(last=False)
         scene_answer = (answers or {}).get("scene") or {}
         requested = str(scene_answer.get("choice") or "")
         target_choice = str(((answers or {}).get("target") or {}).get("choice") or "")
-        valid = target_choice.isdigit() and 1 <= int(target_choice) <= len(targets)
-        index = int(target_choice) - 1 if valid else len(targets) - 1
-        target = {
-            **targets[index],
-            "id": remembered[targets[index]["msg_id"]]["id"],
-        }
+        by_number = {numbers[id(message)]: message for message in targets}
+        picked = by_number.get(target_choice, targets[-1])
+        target = {**picked, "id": remembered[picked["msg_id"]]["id"]}
         summary = f"「{target['user']}」：{target['text']}"
         if requested not in SCENES:
             self.ctx.logger.warning(
                 f"表情決策 [{session_id}]：沒拿到有效的情境（可表態 {len(targets)} 則），這輪 planner 自己決定"
             )
-            self._decision_stats.record_decision(now, session_id, summary, "failed", latency_ms)
+            self._decision_stats.record_decision(now, session_id, summary, "failed", latency_ms, links=link_summary)
             return None
         probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}
         probability = float(probabilities.get(requested) or 0)
@@ -391,12 +405,21 @@ class EmoteMixin:
         emotion = emotion if emotion in emotions else next(iter(emotions), "開心")
         scene = self._guard_scene(decision, requested, probability, target, session_id)
         self.ctx.logger.info(
-            f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{index + 1}/{len(targets)} {summary[:40]}"
+            f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{numbers[id(picked)]}（可表態 {len(targets)} 則）{summary[:40]}"
             f"（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，情緒「{emotion}」，"
             f"門檻 {decision.emote_threshold:.2f}，{latency_ms} ms）"
+            + (f"；前文 {link_summary}" if link_summary else "")
         )
         self._decision_stats.record_decision(
-            now, session_id, summary, scene, latency_ms, requested=requested, emotion=emotion, probability=probability
+            now,
+            session_id,
+            summary,
+            scene,
+            latency_ms,
+            requested=requested,
+            emotion=emotion,
+            probability=probability,
+            links=link_summary,
         )
         if scene in ("quick_reaction", "quick_sticker"):
             task = asyncio.create_task(self._quick_send(session_id, scene, emotion, target))
@@ -791,6 +814,8 @@ class EmoteMixin:
                     "probability": f"{item['probability']:.2f}" if item["scene"] != "failed" else "—",
                     "latency": f"{item['latency_ms']} ms",
                     "message": item["message"],
+                    # 舊紀錄沒有這欄
+                    "links": item.get("links") or "—",
                 }
                 for item in decisions
             ],

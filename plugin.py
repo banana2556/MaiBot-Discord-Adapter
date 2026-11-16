@@ -34,7 +34,6 @@ from .src.life.reminders import ReminderMixin
 from .src.life.topics import PROMPT_FIELDS as TOPIC_PROMPT_FIELDS, STATUS_LABELS as TOPIC_STATUS_LABELS, TopicScout
 from .src.native_emoji import NativeEmojiRegistry
 from .src.quote_context import QuoteContextMixin
-from .src.topic_threads import TopicThreadsMixin
 from .src.recv_handler.discord_client import DiscordClientManager
 from .src.recv_handler.message_handler import DiscordMessageHandler, quote_name
 from .src.send_handler.message_send_handler import DiscordContentBuilder
@@ -68,10 +67,10 @@ VOICE_FIELD_LABELS = {
 }
 ON_OFF = {True: "開", False: "關"}
 # 頁面「目前設定」表格裡選項值的顯示名稱
-VALUE_LABELS = {"replyer": "回覆模型（replyer）", "planner": "規劃模型（planner）", "utils": "工具模型（utils）"}
+VALUE_LABELS = {"replyer": "回覆模型（replyer）", "planner": "規劃模型（planner）"}
 
 
-class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, TopicThreadsMixin, ReminderMixin, MaiBotPlugin):
+class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, ReminderMixin, MaiBotPlugin):
     """Discord 消息网关插件。
 
     负责注册双工消息网关、管理 discord.py 客户端生命周期，并将 Host 出站消息路由到
@@ -119,7 +118,6 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, TopicThreadsMixin, Rem
         self._emote_library: Optional[EmoteLibrary] = None
         self._init_emote_state()
         self._init_quote_state()
-        self._init_thread_state()
 
     async def on_load(self) -> None:
         """插件加载时启动日常功能的后台轮询，并根据当前配置启动或保持 Discord 连接。"""
@@ -131,7 +129,6 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, TopicThreadsMixin, Rem
         for task in (self._daily_task, *self._daily_jobs.values()):
             if task is not None:
                 task.cancel()
-        self._cancel_thread_tasks()
         # 不还原的话，被静默的聊天会一直不回复到 MaiBot 重启
         await self._restore_silenced()
         await self._stop_connection()
@@ -2263,10 +2260,16 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, TopicThreadsMixin, Rem
         return settings
 
     def _load_page_settings(self, path: Path) -> None:
-        """读回页面设置；缺的字段第一次从原配置搬过来，之后以页面为准。"""
+        """读回页面设置；缺的字段第一次从原配置搬过来，之后以页面为准。
+
+        已經不歸頁面管（或整個拿掉）的欄位直接丟掉：套設定時會逐一讀這些欄位，留著舊欄位會讓讀設定出錯。
+        """
         self._page_settings_path = path
+        stored = load_state(path)
         self._page_settings = {
-            section: fields for section, fields in load_state(path).items() if isinstance(fields, dict)
+            section: {field: value for field, value in fields.items() if field in PAGE_FIELDS[section]}
+            for section, fields in stored.items()
+            if isinstance(fields, dict) and section in PAGE_FIELDS
         }
         settings = self._load_settings()
         missing = [
@@ -2276,7 +2279,7 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, TopicThreadsMixin, Rem
         ]
         for section, field in missing:
             self._page_settings.setdefault(section, {})[field] = getattr(getattr(settings, section), field)
-        if missing:
+        if missing or self._page_settings != stored:
             save_state(path, self._page_settings)
 
     def _field_label(self, section: str, field: str) -> str:
