@@ -1834,6 +1834,36 @@
               "label": "前文判斷門檻（0～1；看下面「最近的判斷」的前文欄來調）"
             },
             {
+              "type": "select",
+              "name": "recall_enabled",
+              "label": "聯想（回一則訊息前先想起在聊什麼、參與的人，交給 planner 判斷；看下面「最近的判斷」的聯想欄）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "type": "select",
+              "name": "lookup_enabled",
+              "label": "看不懂就上網查（要先啟用「Linux 沙盒電腦」插件，查一次十幾秒）",
+              "options": [
+                {
+                  "label": "開",
+                  "value": "true"
+                },
+                {
+                  "label": "關",
+                  "value": "false"
+                }
+              ]
+            },
+            {
               "type": "input",
               "name": "context_messages",
               "label": "送出的聊天則數（3～30；planner 這輪上下文的最後幾則）"
@@ -2095,6 +2125,10 @@
             {
               "field": "links",
               "label": "前文"
+            },
+            {
+              "field": "recall",
+              "label": "聯想"
             }
           ]
         },
@@ -2182,6 +2216,15 @@
                 "scope": "selection",
                 "source": "decisionRow",
                 "field": "links"
+              }
+            },
+            {
+              "type": "text",
+              "label": "聯想",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "recall"
               }
             }
           ]
@@ -2323,6 +2366,16 @@
               "max_length": 200
             },
             "link_threshold": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "recall_enabled": {
+              "type": "string",
+              "required": false,
+              "max_length": 200
+            },
+            "lookup_enabled": {
               "type": "string",
               "required": false,
               "max_length": 200

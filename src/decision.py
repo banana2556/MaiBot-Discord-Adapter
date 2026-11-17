@@ -99,6 +99,7 @@ class DecisionStats:
         emotion: str = "",
         probability: float = 0.0,
         links: str = "",
+        recall: str = "",
     ) -> None:
         """記一次情境判斷；失敗的請求不算進平均延遲（多半是逾時，會把平均拉歪）。
 
@@ -108,6 +109,7 @@ class DecisionStats:
             emotion: 模型選的情緒。
             probability: 模型原本選的那個情境的機率。
             links: 順便判斷的回覆前文摘要（reply_links.parse_links）；沒問時是空字串。
+            recall: 聯想的摘要（recall.py）：看不看得懂、想到哪筆記憶、幾個人有記憶、有沒有上網；沒開時是空字串。
         """
         day = self._day(now.date().isoformat())
         day["calls"] += 1
@@ -126,6 +128,7 @@ class DecisionStats:
                 "probability": round(probability, 3),
                 "latency_ms": latency_ms,
                 "links": links,
+                "recall": recall,
             },
         )
 

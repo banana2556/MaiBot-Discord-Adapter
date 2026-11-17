@@ -180,15 +180,27 @@ def quoted(message: Mapping[str, Any]) -> Tuple[str, str, str]:
     return "", "", ""
 
 
+def _at_segments(message: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    raw = message.get("raw_message")
+    return [
+        segment["data"]
+        for segment in (raw if isinstance(raw, list) else [])
+        if isinstance(segment, Mapping) and segment.get("type") == "at" and isinstance(segment.get("data"), Mapping)
+    ]
+
+
 def mentioned_names(message: Mapping[str, Any]) -> List[str]:
     """入站訊息 @ 的人：每個人的伺服器暱稱和名字。"""
-    raw = message.get("raw_message")
-    names: List[str] = []
-    for segment in raw if isinstance(raw, list) else []:
-        data = segment.get("data") if isinstance(segment, Mapping) and segment.get("type") == "at" else None
-        if isinstance(data, Mapping):
-            names += [str(data[key]) for key in ("target_user_cardname", "target_user_nickname") if data.get(key)]
-    return names
+    return [str(data[key]) for data in _at_segments(message) for key in ("target_user_cardname", "target_user_nickname") if data.get(key)]
+
+
+def mentioned_people(message: Mapping[str, Any]) -> Dict[str, str]:
+    """入站訊息 @ 的人：{user_id: 伺服器暱稱或名字}；聯想時查他們的記憶。"""
+    return {
+        str(data["target_user_id"]): str(data.get("target_user_cardname") or data.get("target_user_nickname") or "")
+        for data in _at_segments(message)
+        if data.get("target_user_id")
+    }
 
 
 def tool_names(kwargs: Mapping[str, Any]) -> set[str]:
@@ -266,8 +278,12 @@ class EmoteMixin:
             # 「回覆「名字」：…」，標在 planner 上下文裡這則的正文前面
             "quote_label": quote_label,
             "addressed": self._is_calling_her(message),
-            # @ 了誰（伺服器暱稱和名字都記，對得上 planner 上下文的發話人）；話題切分用
+            # @ 了誰（伺服器暱稱和名字都記，對得上 planner 上下文的發話人）；回覆前文用
             "mentions": mentioned_names(message),
+            # 發話人和 @ 的人的 ID：聯想時換成 MaiBot 的人物 ID 查他們的記憶
+            "platform": str(message.get("platform") or DEFAULT_PLATFORM_NAME),
+            "user_id": str(user.get("user_id") or ""),
+            "mentioned": mentioned_people(message),
             # 只有真的 Discord 訊息（數字 ID）按得了表情；語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
             "targetable": message_id.isdigit(),
             "at": time.monotonic(),
@@ -286,10 +302,14 @@ class EmoteMixin:
         mode="blocking",
         # 比回覆上下文（quote_context，late）早：「有人在找你」要用到這次順便判斷的回覆前文
         order="normal",
-        timeout_ms=5000,
+        # 開了聯想時，看不懂的話題要等上網查（recall.LOOKUP_TIMEOUT_SECONDS），其餘幾秒內就完成
+        timeout_ms=90000,
     )
     async def decide_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """Discord 聊天裡拿掉 MaiBot 原生的 send_emoji；新訊息後第一次進 planner 時問決策模型，結果用系統提示告訴 planner。"""
+        """Discord 聊天裡拿掉 MaiBot 原生的 send_emoji；新訊息後第一次進 planner 時問決策模型，結果用系統提示告訴 planner。
+
+        開了聯想時同一次請求順便判斷話題（見 recall.py），聯想接在系統提示詞後面，這回合後面的請求也帶著。
+        """
         # 沒有這個工具：不是 Discord 聊天，或睡覺時段只剩 stop
         if "discord_emote" not in tool_names(kwargs):
             return {"action": "continue"}
@@ -308,9 +328,11 @@ class EmoteMixin:
             return result
         # 同一回合後面的請求、沒有新訊息的回合（主動話題、提醒、逾時）不問
         if session_id not in self._emote_unjudged:
+            self._add_recall_note(kwargs, session_id)
             return result
         self._emote_unjudged.discard(session_id)
         outcome = await self._decide_scene(decision, session_id, planner_messages(kwargs.get("items")))
+        self._add_recall_note(kwargs, session_id)
         if outcome is None or outcome["scene"] == "text":
             return result
         if outcome["scene"] == "text_emote":
@@ -375,6 +397,14 @@ class EmoteMixin:
         if decision.reply_context_enabled:
             link_asks, link_keys = link_questions(window, numbers, remembered)
             questions.update(link_asks)
+        # 聯想（recall.py）：群聊裡先想起要回那則在聊什麼、參與的人，同一次請求問看不看得懂、哪筆記憶有關
+        recall = None
+        if decision.recall_enabled and self._latest_inbound.get(session_id, {}).get("group_id"):
+            recall = await self._recall(session_id, window, remembered)
+            if recall is not None:
+                recall_text, recall_asks = self._recall_ask(recall, numbers[id(recall["focus"])])
+                state += recall_text
+                questions.update(recall_asks)
         started = time.monotonic()
         answers = await ask_decision(decision, state, questions, self.ctx.logger)
         latency_ms = round((time.monotonic() - started) * 1000)
@@ -396,7 +426,10 @@ class EmoteMixin:
             self.ctx.logger.warning(
                 f"表情決策 [{session_id}]：沒拿到有效的情境（可表態 {len(targets)} 則），這輪 planner 自己決定"
             )
-            self._decision_stats.record_decision(now, session_id, summary, "failed", latency_ms, links=link_summary)
+            recall_summary = await self._finish_recall(decision, session_id, recall, answers, "failed") if recall else ""
+            self._decision_stats.record_decision(
+                now, session_id, summary, "failed", latency_ms, links=link_summary, recall=recall_summary
+            )
             return None
         probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}
         probability = float(probabilities.get(requested) or 0)
@@ -404,11 +437,13 @@ class EmoteMixin:
         emotions = decision.emotion_options()
         emotion = emotion if emotion in emotions else next(iter(emotions), "開心")
         scene = self._guard_scene(decision, requested, probability, target, session_id)
+        recall_summary = await self._finish_recall(decision, session_id, recall, answers, scene) if recall else ""
         self.ctx.logger.info(
             f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{numbers[id(picked)]}（可表態 {len(targets)} 則）{summary[:40]}"
             f"（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，情緒「{emotion}」，"
             f"門檻 {decision.emote_threshold:.2f}，{latency_ms} ms）"
             + (f"；前文 {link_summary}" if link_summary else "")
+            + (f"；聯想 {recall_summary}" if recall_summary else "")
         )
         self._decision_stats.record_decision(
             now,
@@ -420,6 +455,7 @@ class EmoteMixin:
             emotion=emotion,
             probability=probability,
             links=link_summary,
+            recall=recall_summary,
         )
         if scene in ("quick_reaction", "quick_sticker"):
             task = asyncio.create_task(self._quick_send(session_id, scene, emotion, target))
@@ -814,8 +850,9 @@ class EmoteMixin:
                     "probability": f"{item['probability']:.2f}" if item["scene"] != "failed" else "—",
                     "latency": f"{item['latency_ms']} ms",
                     "message": item["message"],
-                    # 舊紀錄沒有這欄
+                    # 舊紀錄沒有這兩欄
                     "links": item.get("links") or "—",
+                    "recall": item.get("recall") or "—",
                 }
                 for item in decisions
             ],

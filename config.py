@@ -1104,6 +1104,19 @@ class DecisionConfig(PluginConfigBase):
         description="決策模型判斷「在接哪一則」的機率要高過這個值才算前文；看頁面「最近的判斷」的前文欄來調。",
         json_schema_extra={"label": "前文判斷門檻", "order": 18, "step": 0.05},
     )
+    recall_enabled: bool = Field(
+        default=False,
+        description=(
+            "聯想：群聊裡回一則訊息前，先用它和前文查群記憶、查參與者的記憶，問決策模型時順便判斷看不看得懂、哪一筆記憶有關，"
+            "整理成一段給 planner 判斷（標明是聯想、把握多少，沒把握時要她用問的）。每次多幾次記憶檢索，planner 開始前慢一點。"
+        ),
+        json_schema_extra={"label": "聯想", "order": 19},
+    )
+    lookup_enabled: bool = Field(
+        default=False,
+        description="聯想時看不懂話題、這輪又要用文字參與，就請「Linux 沙盒電腦」插件上網查（十幾秒）；要先裝好並啟用那個插件。",
+        json_schema_extra={"label": "看不懂就上網查", "order": 20},
+    )
     scene_instructions: str = Field(
         default="看最近的群聊，你這輪要怎麼參與最自然？快速表態可以針對前面任何一則 # 訊息，不一定是最新的。",
         description="問「這輪怎麼參與」的提示詞。",
@@ -1275,6 +1288,8 @@ PAGE_FIELDS: Dict[str, tuple[str, ...]] = {
         "emote_threshold",
         "reply_context_enabled",
         "link_threshold",
+        "recall_enabled",
+        "lookup_enabled",
         "context_messages",
         "target_candidates",
         "scene_instructions",
