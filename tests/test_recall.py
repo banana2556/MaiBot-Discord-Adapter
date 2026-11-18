@@ -70,11 +70,11 @@ def test_pieces() -> None:
     assert recall.parse_hits("你知道这些知识: 1. A 常玩 R6\n2. 上週在排位") == ["A 常玩 R6", "上週在排位"]
     assert recall.parse_hits("你不太了解有关x的知识") == [] and recall.parse_hits({"success": False}) == []
     window = [
-        {"msg_id": "a", "user": "「A」", "self": False},
-        {"msg_id": "b", "user": "「B」", "self": False},
-        {"msg_id": "me", "user": "麥麥", "self": True},
-        {"msg_id": "c", "user": "「C」", "self": False},
-        {"msg_id": "d", "user": "「D」", "self": False},
+        {"msg_id": "a", "user": "「A」", "self": False, "text": "x"},
+        {"msg_id": "b", "user": "「B」", "self": False, "text": "x"},
+        {"msg_id": "me", "user": "麥麥", "self": True, "text": "x"},
+        {"msg_id": "c", "user": "「C」", "self": False, "text": "x"},
+        {"msg_id": "d", "user": "「D」", "self": False, "text": "x"},
     ]
     remembered = {
         "a": {"user_id": "1", "platform": "discord", "addressed": True},
@@ -87,20 +87,26 @@ def test_pieces() -> None:
     people = recall.participants(window, window[4], ["a", "b"], remembered, "bot")
     assert [person["name"] for person in people] == ["D", "E", "B"], "發話人、@ 的人、前文（新的先）；不含她自己，最多 3 個"
 
+RECALL_NO_M1 = {
+    "recall_understand": {"choice": "no", "probabilities": {"no": 0.7, "yes": 0.3}},
+    "recall_pick": {"choice": "m1", "probabilities": {"m1": 0.6, "none": 0.3}},
+}
+
 
 def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypatch) -> None:
-    answers = {
-        **_answer("text", 0.8),
-        "recall_understand": {"choice": "no", "probabilities": {"no": 0.7, "yes": 0.3}},
-        "recall_pick": {"choice": "m1", "probabilities": {"m1": 0.6, "none": 0.3}},
-    }
-    env, calls = _setup(monkeypatch, [answers], {"recall_enabled": True, "lookup_enabled": True})
+    env, calls = _setup(monkeypatch, [_answer("text", 0.8), RECALL_NO_M1], {"recall_enabled": True, "lookup_enabled": True})
     result = asyncio.run(env.plugin.decide_emote_in_planner(**_planner()))
 
-    state, questions = env.asked[0]
-    assert "【聯想】#3 是你要回的那則" in state and "m1. 群裡常打虹彩六號：圍攻" in state
-    assert "對「阿華」的印象：阿華主玩防守方" in state
-    assert list(questions["recall_pick"]["criteria"]) == ["m1", "m2", "none"] and "recall_understand" in questions
+    # 表情決策那次不問聯想；前文（回覆、@）就是整串，前面沒有別的訊息，不用問「同一件事」；第二次才問聯想
+    assert len(env.asked) == 2 and not any(name.startswith("recall_") for name in env.asked[0][1])
+    state, questions = env.asked[1]
+    assert (
+        "【聯想】#3 是你要回的那則，它和這幾則在聊同一件事：\n"
+        "#1 「小明」：今天好累\n#2 「阿華」：晚上要打R6嗎\n#3 「小美」：羚羊拿MP5打盾牌\n"
+    ) in state
+    assert "m1. 群裡常打虹彩六號：圍攻" in state and "對「阿華」的印象：阿華主玩防守方" in state
+    assert list(questions) == ["recall_understand", "recall_pick"]
+    assert list(questions["recall_pick"]["criteria"]) == ["m1", "m2", "none"]
     lookup = next(kwargs for name, kwargs in calls if name == "api.call")
     assert lookup["api_name"] == "luca.linux-computer.lookup"
     assert lookup["args"] == {
@@ -131,31 +137,34 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
     row = asyncio.run(env.plugin.webui_decision())["decisions"][0]
     assert row["recall"] == summary
     assert "#3 「小美」：羚羊拿MP5打盾牌" in row["context"], "詳情看得到 # 編號對應的訊息"
-    assert row["recall_detail"].startswith("關鍵字：R6 羚羊 MP5 盾牌\n群記憶：\nm1. 群裡常打虹彩六號：圍攻")
+    assert row["recall_detail"].startswith(
+        "往回找話題：\n→ #3 「小美」：羚羊拿MP5打盾牌（要回的這則）\n"
+        "← #2 「阿華」：晚上要打R6嗎（明確前文）\n← #1 「小明」：今天好累（明確前文）\n"
+        "關鍵字：R6 羚羊 MP5 盾牌\n群記憶：\nm1. 群裡常打虹彩六號：圍攻"
+    )
     assert "「小美」：沒查到" in row["recall_detail"] and row["recall_detail"].endswith(note)
 
     # 同一回合後面的請求（不再問決策模型）也帶著；replyer 回的是那則才給
     later = asyncio.run(env.plugin.decide_emote_in_planner(**_planner()))
-    assert later["modified_kwargs"]["items"][0]["parts"][-1]["text"] == note and len(env.asked) == 1
+    assert later["modified_kwargs"]["items"][0]["parts"][-1]["text"] == note and len(env.asked) == 2
     replied = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LATEST, extra_prompt="前面"))
     assert replied["modified_kwargs"]["extra_prompt"] == f"前面\n{note}"
     assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=FUNNY)) == {"action": "continue"}
 
 
 def test_unsure_recall_asks_her_to_hedge_and_lookup_only_when_enabled(monkeypatch) -> None:
-    answers = {
-        **_answer("text", 0.8),
+    unsure = {
         "recall_understand": {"choice": "no", "probabilities": {"no": 0.8, "yes": 0.2}},
         "recall_pick": {"choice": "none", "probabilities": {"none": 0.7}},
     }
-    env, calls = _setup(monkeypatch, [answers], {"recall_enabled": True})
+    env, calls = _setup(monkeypatch, [_answer("text", 0.8), unsure], {"recall_enabled": True})
     result = asyncio.run(env.plugin.decide_emote_in_planner(**_planner()))
     note = result["modified_kwargs"]["items"][0]["parts"][-1]["text"]
     assert "看不出是哪一筆：群裡常打虹彩六號：圍攻；上週在聊顯卡" in note and note.endswith(recall.UNSURE)
     assert not any(name == "api.call" for name, _ in calls), "沒開上網查"
 
     # 寫不出關鍵字時改用原文查
-    failing, failing_calls = _setup(monkeypatch, [answers], {"recall_enabled": True})
+    failing, failing_calls = _setup(monkeypatch, [_answer("text", 0.8), unsure], {"recall_enabled": True})
     original = failing.ctx.call_capability
 
     async def no_keywords(name, **kwargs):
@@ -169,14 +178,18 @@ def test_unsure_recall_asks_her_to_hedge_and_lookup_only_when_enabled(monkeypatc
     queries = [kwargs["query"] for name, kwargs in failing_calls if name == "knowledge.search" and not kwargs["person_id"]]
     assert queries[0] == "今天好累 晚上要打R6嗎 羚羊拿MP5打盾牌"
 
+    # 只按表情（她這輪不說話）不跑聯想；沒開聯想也不跑
+    quiet, quiet_calls = _setup(monkeypatch, [_answer("quick_reaction", 0.9)], {"recall_enabled": True})
+    asyncio.run(quiet.plugin.decide_emote_in_planner(**_planner()))
+    assert len(quiet.asked) == 1 and not any(name == "knowledge.search" for name, _ in quiet_calls)
     off, off_calls = _setup(monkeypatch, [_answer("text", 0.8)], {})
     asyncio.run(off.plugin.decide_emote_in_planner(**_planner()))
-    assert not any(name.startswith("recall_") for name in off.asked[0][1]) and not off_calls, "沒開聯想就不查也不問"
+    assert len(off.asked) == 1 and not off_calls, "沒開聯想就不查也不問"
 
 
 def test_timed_out_searches_are_not_reported_as_empty(monkeypatch) -> None:
-    answers = {**_answer("text", 0.8), "recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
-    env, calls = _setup(monkeypatch, [answers], {"recall_enabled": True})
+    understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, calls = _setup(monkeypatch, [_answer("text", 0.8), understood], {"recall_enabled": True})
     original = env.ctx.call_capability
 
     async def slow(name, **kwargs):
@@ -194,16 +207,58 @@ def test_timed_out_searches_are_not_reported_as_empty(monkeypatch) -> None:
     assert "「阿華」：阿華主玩防守方" in note and "小明" not in note.split("\n", 1)[1], "沒等到的人不說成沒有記憶"
 
 
-def test_short_message_uses_recent_chat_and_her_name_is_not_a_keyword(monkeypatch) -> None:
-    """「打」沒回覆也沒 @ 人：拿前面幾則當前文；叫她的 @ 換成「@你」，暱稱不會被當成要查的詞。"""
-    env, calls = _setup(monkeypatch, [_answer("text", 0.8)], {"recall_enabled": True})
+OLD = "1567700000000000001"
+
+
+def test_walks_back_from_a_short_reply_to_the_topic_it_belongs_to(monkeypatch) -> None:
+    """正式機那次：#4「打」在接她答應打絕本那句，往回是 #3 @ 她問要不要打絕本、#2 問要不要打絕歐；#1 是戀愛話題，不算。"""
+    links = {"link_4": {"choice": "you", "probabilities": {"you": 0.57, "3": 0.37, "none": 0.01}}}
+    same = {
+        "recall_same_2": {"choice": "yes", "probabilities": {"yes": 1.0, "no": 0.0}},
+        "recall_same_1": {"choice": "no", "probabilities": {"yes": 0.08, "no": 0.92}},
+    }
+    understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, calls = _setup(
+        monkeypatch, [{**_answer("text", 0.8), **links}, same, understood], {"recall_enabled": True, "reply_context_enabled": True}
+    )
+    env.plugin._remember_inbound("s1", _inbound(OLD, "u4"))
+    env.plugin._inbound["s1"][alias(LAUGH)]["addressed"] = True  # #3 @ 了她
     bot = env.plugin._bot_name()
     planner = _planner()
     planner["items"][2:] = [
-        _item(alias(FUNNY), "Ahh shit. here we go again", f"@「{bot}」 要不要打絕本"),
+        _item(alias(OLD), "海苔", "你沒談過噢"),
+        _item(alias(FUNNY), "海苔", "欸刻主Bo你要不要打絕歐"),
+        _item(alias(LAUGH), "Ahh shit. here we go again", f"@「{bot}」 要不要打絕本"),
         _message_item("mself2", bot, "好呀，但我只會躺地板", self_message=True),
         _item(alias(LATEST), "Clover", "打"),
     ]
+    asyncio.run(env.plugin.decide_emote_in_planner(**planner))
+
+    # 第二次請求：前面兩則各問一次是不是跟「#3、她、#4」這串同一件事
+    state, questions = env.asked[1]
+    assert sorted(questions) == ["recall_same_1", "recall_same_2"]
+    thread = f"#3 「Ahh shit. here we go again」：@「{bot}」 要不要打絕本\n（你）：好呀，但我只會躺地板\n#4 「Clover」：打"
+    assert thread in questions["recall_same_2"]["instructions"] and "#2 和這段在聊同一件事嗎？" in questions["recall_same_2"]["instructions"]
+    # 第三次才問聯想；這串是 #2、#3、她、#4，#1 不在裡面
+    recall_state = env.asked[2][0]
+    assert f"它和這幾則在聊同一件事：\n#2 「海苔」：欸刻主Bo你要不要打絕歐\n{thread}\n" in recall_state
+
+    prompt = next(kwargs["prompt"] for name, kwargs in calls if name == "llm.generate")
+    assert "「海苔」：欸刻主Bo你要不要打絕歐\n「Ahh shit. here we go again」：@你 要不要打絕本\n（你）：好呀，但我只會躺地板\n「Clover」：打" in prompt
+    assert "你沒談過噢" not in prompt, "不相關的不拿去寫關鍵字"
+    detail = env.plugin._decision_stats.state["decisions"][0]["recall_detail"]
+    assert detail.startswith(
+        "往回找話題：\n→ #4 「Clover」：打（要回的這則）\n"
+        "← （你）：好呀，但我只會躺地板（明確前文）\n"
+        f"← #3 「Ahh shit. here we go again」：@「{bot}」 要不要打絕本（明確前文）\n"
+        "← #2 「海苔」：欸刻主Bo你要不要打絕歐（同一件事 1.00）\n"
+        "✕ #1 「海苔」：你沒談過噢（同一件事 0.08，不算）\n"
+    ), detail
+
+
+def test_keyword_model_saying_nothing_falls_back_to_the_thread_text(monkeypatch) -> None:
+    understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, calls = _setup(monkeypatch, [_answer("text", 0.8), understood], {"recall_enabled": True})
     original = env.ctx.call_capability
 
     async def nothing(name, **kwargs):
@@ -213,8 +268,6 @@ def test_short_message_uses_recent_chat_and_her_name_is_not_a_keyword(monkeypatc
         return await original(name, **kwargs)
 
     env.ctx.call_capability = nothing
-    asyncio.run(env.plugin.decide_emote_in_planner(**planner))
-    prompt = next(kwargs["prompt"] for name, kwargs in calls if name == "llm.generate")
-    assert "「Ahh shit. here we go again」：@你 要不要打絕本\n（你）：好呀，但我只會躺地板\n「Clover」：打" in prompt
+    asyncio.run(env.plugin.decide_emote_in_planner(**_planner()))
     queries = [kwargs["query"] for name, kwargs in calls if name == "knowledge.search" and not kwargs["person_id"]]
-    assert queries[0] == f"大家在幹嘛 @「{bot}」 要不要打絕本 好呀，但我只會躺地板 打", "看不出在聊什麼就用前面幾則的原文查"
+    assert queries[0] == "今天好累 晚上要打R6嗎 羚羊拿MP5打盾牌", "看不出在聊什麼就用這串的原文查"

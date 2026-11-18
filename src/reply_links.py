@@ -21,6 +21,8 @@ MAX_LINKS = 2
 # 同一人在這段時間內連發的算前文
 SAME_SPEAKER_SECONDS = 120
 REPLY_CHAIN_DEPTH = 3
+# 整則只有自訂表情（拿掉 <:名:ID> 和它的圖之後沒東西）時給模型看的文字（emote.strip_emotes）
+EMOTE_ONLY = "（表情）"
 
 
 def plain(name: str) -> str:
@@ -44,7 +46,12 @@ def link_questions(
         (要加進請求的 questions, 題目 ID -> {"target": msg_id, "options": {選項: msg_id}})。
     """
     last_self = max((index for index, message in enumerate(window) if message["self"]), default=-1)
-    candidates = [index for index, message in enumerate(window) if not message["self"] and not message["quote"]]
+    # 只有表情的不問也不當選項：看不出在接什麼，只會佔掉題目和選項
+    candidates = [
+        index
+        for index, message in enumerate(window)
+        if not message["self"] and not message["quote"] and message["text"] != EMOTE_ONLY
+    ]
     calling = [
         index for index in candidates if index > last_self and (remembered.get(window[index]["msg_id"]) or {}).get("addressed")
     ]
@@ -58,6 +65,8 @@ def link_questions(
         for message in reversed(window[:index]):
             if len(options) >= LINK_OPTIONS:
                 break
+            if message["text"] == EMOTE_ONLY:
+                continue
             # 她說過的只給最近一句，免得選項被她自己的話塞滿
             key = SELF_OPTION if message["self"] else numbers[id(message)]
             if key in options:
@@ -119,6 +128,8 @@ def context_ids(
     target_id: str,
     inbound: Mapping[str, Any],
     judged: Sequence[str],
+    *,
+    her_last_line: bool = True,
 ) -> List[str]:
     """target 的前文 msg_id，照時間排；target 不在 messages 裡時回傳空清單。
 
@@ -127,6 +138,7 @@ def context_ids(
         target_id: 要回的那則（上下文裡顯示的 msg_id）。
         inbound: 這則收訊時記下的 _inbound（mentions、addressed）；她自己的訊息或沒記到時是空的。
         judged: 決策模型判斷這則在接的 msg_id。
+        her_last_line: 叫她的訊息把她上一句也算進來；聯想找話題時不用（她上一句常是別的話題，決策模型判斷的前文比較準）。
     """
     position = {message["msg_id"]: index for index, message in enumerate(messages)}
     if target_id not in position:
@@ -148,7 +160,7 @@ def context_ids(
         latest = next((m for m in reversed(before) if not m["self"] and plain(m["user"]) == name), None)
         if latest is not None:
             related.add(latest["msg_id"])
-    if inbound.get("addressed"):
+    if her_last_line and inbound.get("addressed"):
         latest_self = next((m for m in reversed(before) if m["self"]), None)
         if latest_self is not None:
             related.add(latest_self["msg_id"])

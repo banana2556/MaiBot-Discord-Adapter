@@ -37,7 +37,7 @@ from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import ask as ask_decision
 from .life.common import sent_text, short_time
-from .reply_links import link_questions, parse_links, plain
+from .reply_links import EMOTE_ONLY, link_questions, parse_links, plain
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
@@ -53,6 +53,9 @@ QUICK_ADDRESSED_NOTE = (
     "【表情】你已經用{what}回應了「{user}」那則訊息。有人在跟你說話，需要的話照常回覆。"
 )
 APPEND_NOTE = "【表情】這輪你回覆送出後，會自動附上一張符合情緒的表情或貼圖。"
+# 插件替她送的表情和文字同步進 planner 歷史時標成她自己說的；不給的話主程式記成 plugin_send，
+# planner 上下文裡就沒有 is_self_message，會當成一個也叫她名字的群友在說話
+SELF_SENT = "guided_reply"
 # 決策模型能選的情境（說明在設定裡，可在頁面改）
 SCENES = ("text", "text_emote", "quick_reaction", "quick_sticker")
 SCENE_LABELS = {
@@ -101,6 +104,42 @@ MIN_FRESH = 3
 
 _MESSAGE_HEAD = re.compile(r'<message ((?:[\w-]+="[^"]*"\s*)*)>\n?')
 _ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+# 收訊時（recv_handler/message_handler.py）自訂表情是「<:名:ID>」文字＋緊接一張圖，貼圖是「[貼圖：名（說明）]」＋一張圖
+_CUSTOM_EMOJI = re.compile(r"<a?:\w+:\d+>")
+_STICKER_LABEL = re.compile(r"\[貼圖：[^\]]*\]")
+
+
+def strip_emotes(items: Any) -> None:
+    """planner 上下文的聊天訊息拿掉自訂表情（<:名:ID> 和它的圖）和貼圖的圖；貼圖的名字和說明留著。
+
+    表情 ID 和表情圖對判斷話題沒有幫助，只會被當成內容。圖在收訊時照送，MaiBot 的表情庫要收（discord_emote 靠它）；
+    這裡只改這一輪請求看到的內容。整則只剩表情時寫成 reply_links.EMOTE_ONLY。
+    """
+    for item in items if isinstance(items, list) else []:
+        parts = item.get("parts") if isinstance(item, dict) else None
+        if not isinstance(parts, list) or not parts or not isinstance(parts[0], dict):
+            continue
+        head = _MESSAGE_HEAD.match(str(parts[0].get("text") or "")) if parts[0].get("type") == "text" else None
+        if head is None:
+            continue
+        # ponytail: 圖照順序配給前面的表情和貼圖；讀不到圖的表情、Lottie 貼圖沒有圖，會多吃掉同一則後面的一張真圖片
+        pending = 0
+        kept: List[Dict[str, Any]] = []
+        for index, part in enumerate(parts):
+            if part.get("type") == "text":
+                text = str(part.get("text") or "")
+                pending += len(_CUSTOM_EMOJI.findall(text)) + len(_STICKER_LABEL.findall(text))
+                part["text"] = _CUSTOM_EMOJI.sub("", text)
+                if index == 0 or part["text"].strip():
+                    kept.append(part)
+            elif part.get("type") == "image" and pending:
+                pending -= 1
+            else:
+                kept.append(part)
+        rest = str(kept[0]["text"])[head.end() :] + "".join(str(part.get("text") or "") for part in kept[1:] if part.get("type") == "text")
+        if not rest.strip() and len(kept) == 1:
+            kept[0]["text"] = str(kept[0]["text"]).rstrip("\n") + "\n" + EMOTE_ONLY
+        item["parts"] = kept
 
 
 def named(name: str, description: Optional[str]) -> str:
@@ -302,13 +341,15 @@ class EmoteMixin:
         mode="blocking",
         # 比回覆上下文（quote_context，late）早：「有人在找你」要用到這次順便判斷的回覆前文
         order="normal",
-        # 開了聯想時，看不懂的話題要等上網查（recall.LOOKUP_TIMEOUT_SECONDS），記憶檢索（recall.SEARCH_TIMEOUT_SECONDS）兩輪、寫關鍵字也要等
-        timeout_ms=120000,
+        # 開了聯想時還要等：決策模型兩次、寫關鍵字、記憶檢索（recall.SEARCH_TIMEOUT_SECONDS）兩輪，
+        # 看不懂的話題再加上網查（recall.LOOKUP_TIMEOUT_SECONDS）
+        timeout_ms=150000,
     )
     async def decide_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """Discord 聊天裡拿掉 MaiBot 原生的 send_emoji；新訊息後第一次進 planner 時問決策模型，結果用系統提示告訴 planner。
+        """Discord 聊天裡拿掉 MaiBot 原生的 send_emoji 和聊天裡的表情 ID、表情圖；新訊息後第一次進 planner 時問決策模型，
+        結果用系統提示告訴 planner。
 
-        開了聯想時同一次請求順便判斷話題（見 recall.py），聯想接在系統提示詞後面，這回合後面的請求也帶著。
+        開了聯想、她這輪要用文字參與時，接著跑聯想（見 recall.py），聯想接在系統提示詞後面，這回合後面的請求也帶著。
         """
         # 沒有這個工具：不是 Discord 聊天，或睡覺時段只剩 stop
         if "discord_emote" not in tool_names(kwargs):
@@ -318,6 +359,7 @@ class EmoteMixin:
         kwargs["tool_definitions"] = [
             tool for tool in kwargs["tool_definitions"] if tool_names({"tool_definitions": [tool]}) != {"send_emoji"}
         ]
+        strip_emotes(kwargs.get("items"))
         result = {"action": "continue", "modified_kwargs": kwargs}
         settings = self._load_settings()
         decision = settings.decision
@@ -354,6 +396,14 @@ class EmoteMixin:
         now = datetime.now()
         remembered = self._inbound.get(session_id, {})
         window = list(messages)[-decision.context_messages :]
+        # 用回覆功能回的，正文前面標「[回覆「名字」：…]」：planner 看到的回覆標籤要等 quote_context 那個 late hook 才加，
+        # 這裡不補的話決策模型和聯想不知道它在回誰，被回覆那則滑出上下文時連前文都沒有
+        window = [
+            {**message, "text": f"[{label}]{message['text']}"}
+            if (label := (remembered.get(message["msg_id"]) or {}).get("quote_label"))
+            else message
+            for message in window
+        ]
         # 別人的訊息都編號（表態題和前文題共用），她自己的標「（你）」
         numbers = {id(message): str(index) for index, message in enumerate((m for m in window if not m["self"]), 1)}
         # 能表態的：別人說的、換得回真的 Discord 訊息；取最後幾則
@@ -397,14 +447,6 @@ class EmoteMixin:
         if decision.reply_context_enabled:
             link_asks, link_keys = link_questions(window, numbers, remembered)
             questions.update(link_asks)
-        # 聯想（recall.py）：群聊裡先想起要回那則在聊什麼、參與的人，同一次請求問看不看得懂、哪筆記憶有關
-        recall = None
-        if decision.recall_enabled and self._latest_inbound.get(session_id, {}).get("group_id"):
-            recall = await self._recall(session_id, window, remembered)
-            if recall is not None:
-                recall_text, recall_asks = self._recall_ask(recall, numbers[id(recall["focus"])])
-                state += recall_text
-                questions.update(recall_asks)
         started = time.monotonic()
         answers = await ask_decision(decision, state, questions, self.ctx.logger)
         latency_ms = round((time.monotonic() - started) * 1000)
@@ -426,19 +468,8 @@ class EmoteMixin:
             self.ctx.logger.warning(
                 f"表情決策 [{session_id}]：沒拿到有效的情境（可表態 {len(targets)} 則），這輪 planner 自己決定"
             )
-            recall_summary, recall_detail = (
-                await self._finish_recall(decision, session_id, recall, answers, "failed") if recall else ("", "")
-            )
             self._decision_stats.record_decision(
-                now,
-                session_id,
-                summary,
-                "failed",
-                latency_ms,
-                links=link_summary,
-                recall=recall_summary,
-                context="\n".join(lines),
-                recall_detail=recall_detail,
+                now, session_id, summary, "failed", latency_ms, links=link_summary, context="\n".join(lines)
             )
             return None
         probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}
@@ -447,9 +478,10 @@ class EmoteMixin:
         emotions = decision.emotion_options()
         emotion = emotion if emotion in emotions else next(iter(emotions), "開心")
         scene = self._guard_scene(decision, requested, probability, target, session_id)
-        recall_summary, recall_detail = (
-            await self._finish_recall(decision, session_id, recall, answers, scene) if recall else ("", "")
-        )
+        # 聯想（recall.py）：群聊裡她這輪要用文字參與時，用這次判斷的前文往回找話題、想起相關的記憶和人，再問決策模型
+        recall_summary, recall_detail = "", ""
+        if decision.recall_enabled and scene in ("text", "text_emote") and self._latest_inbound.get(session_id, {}).get("group_id"):
+            recall_summary, recall_detail = await self._run_recall(decision, session_id, window, remembered, numbers, state, scene)
         self.ctx.logger.info(
             f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{numbers[id(picked)]}（可表態 {len(targets)} 則）{summary[:40]}"
             f"（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，情緒「{emotion}」，"
@@ -542,7 +574,7 @@ class EmoteMixin:
                 found_image = await self._pick_image(guild, query, session_id)
                 if found_image:
                     picked, image_b64, score = found_image
-                    ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True))
+                    ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True, maisaka_source_kind=SELF_SENT))
         except Exception as exc:  # 背景任務：沒接住只會變成沒人看的 Task 例外
             self.ctx.logger.warning(f"{SEND_KIND_LABELS[kind]}失敗：{exc!r}")
         self._record_send(session_id, kind, started, picked, score, ok)
@@ -578,7 +610,7 @@ class EmoteMixin:
             found = await self._pick_image(guild, f"{pending['emotion']}：{pending['reply'][-200:]}", session_id)
             if found:
                 picked, image_b64, score = found
-                ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True))
+                ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True, maisaka_source_kind=SELF_SENT))
         except Exception as exc:  # 背景任務：沒接住只會變成沒人看的 Task 例外
             self.ctx.logger.warning(f"回覆後附圖失敗：{exc!r}")
         self._record_send(session_id, "append", started, picked, score, ok)
@@ -701,6 +733,10 @@ class EmoteMixin:
             return None
         return getattr(channel, "guild", None)
 
+    async def _ask_decision(self, decision: Any, state: str, questions: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """給聯想（recall.py）用的決策模型請求，和表情決策同一個設定。"""
+        return await ask_decision(decision, state, questions, self.ctx.logger)
+
     def _bot_name(self) -> str:
         user = getattr(getattr(self._client_manager, "client", None), "user", None)
         return str(getattr(user, "display_name", "") or "麥麥")
@@ -772,7 +808,7 @@ class EmoteMixin:
             if not found_image:
                 return {"success": False, "error": f"沒有可用的{label}，沒有送出"}
             picked, image_b64, score = found_image
-            sent = await self.ctx.send.emoji(image_b64, stream_id, sync_to_maisaka_history=True)
+            sent = await self.ctx.send.emoji(image_b64, stream_id, sync_to_maisaka_history=True, maisaka_source_kind=SELF_SENT)
         else:
             found = await self._pick_custom_emoji(target.guild, query, stream_id)
             if not found:
@@ -787,7 +823,7 @@ class EmoteMixin:
                 sent = True
             else:
                 # 走 Host 發送鏈路，訊息才會進聊天紀錄
-                sent = await self.ctx.send.text(picked, stream_id, sync_to_maisaka_history=True)
+                sent = await self.ctx.send.text(picked, stream_id, sync_to_maisaka_history=True, maisaka_source_kind=SELF_SENT)
         self._record_send(stream_id or "", "tool", started, picked, score, bool(sent))
         if not sent:
             return {"success": False, "error": f"發送{label}失敗"}

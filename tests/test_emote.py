@@ -57,6 +57,7 @@ class FakeCtx:
         self.logger = SimpleNamespace(
             info=self.logs.append, warning=self.logs.append, debug=lambda *a: None, exception=self.logs.append
         )
+        self.sent_options: list = []
         self.send = SimpleNamespace(emoji=self._sender("emoji"), text=self._sender("text"))
         self.emoji = SimpleNamespace(get_by_description=self._by_description)
         self.chat = SimpleNamespace(get_all_streams=self._streams)
@@ -80,6 +81,7 @@ class FakeCtx:
     def _sender(self, kind):
         async def send(data, stream_id, **kwargs):
             self.sent.append((kind, data, stream_id))
+            self.sent_options.append(kwargs)
             return True
 
         return send
@@ -352,6 +354,9 @@ def test_sticker_is_sent_even_when_the_target_is_an_older_message(monkeypatch) -
 
     assert asyncio.run(scenario()) == KEPT_TOOLS
     assert env.reactions == [] and len(env.ctx.sent) == 1 and env.ctx.sent[0][0] == "emoji", "對象較早也照樣發圖，不改成按表情"
+    assert env.ctx.sent_options[0] == {"sync_to_maisaka_history": True, "maisaka_source_kind": "guided_reply"}, (
+        "記進 planner 歷史時標成她自己發的，不然會被當成另一個也叫她名字的人"
+    )
 
 
 def test_asked_to_react_she_reacts_and_can_still_talk(monkeypatch) -> None:
@@ -602,3 +607,48 @@ def test_send_emoji_is_hidden_wherever_discord_emote_exists(monkeypatch) -> None
     assert names == KEPT_TOOLS, "決策模型沒開也一樣：發表情包只走 discord_emote"
     other_platform = _planner(env.module, tools=("reply", "send_emoji", "stop"))
     assert asyncio.run(env.plugin.decide_emote_in_planner(**other_platform)) == {"action": "continue"}, "別的平台不動"
+
+
+def test_custom_emoji_ids_and_their_images_are_hidden_from_the_models(monkeypatch) -> None:
+    """表情 ID 和表情圖對判斷話題沒幫助：planner 和決策模型都看不到；貼圖留名字和說明；真的圖片留著。"""
+    image = {"type": "image", "image_format": "png", "data": "x"}
+    items = [
+        {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設 <:keep:1>"}]},
+        {"item_type": "UserMessageItem", "meta": {}, "parts": [
+            {"type": "text", "text": '<message msg_id="m1" user="「A」">\n不太一樣 '},
+            {"type": "text", "text": "<a:CFthinkge:1507125146987659506>"}, dict(image),
+        ]},
+        {"item_type": "UserMessageItem", "meta": {}, "parts": [
+            {"type": "text", "text": '<message msg_id="m2" user="「B」">\n<:RenaWhy:827792040212299796>'}, dict(image),
+        ]},
+        {"item_type": "UserMessageItem", "meta": {}, "parts": [
+            {"type": "text", "text": '<message msg_id="m3" user="「C」">\n[貼圖：wave（揮手）]'}, dict(image),
+        ]},
+        {"item_type": "UserMessageItem", "meta": {}, "parts": [
+            {"type": "text", "text": '<message msg_id="m4" user="「D」">\n看這張 <:lol:5>'}, dict(image), dict(image),
+        ]},
+    ]
+    emote_module = _load_adapter_module("src.emote")
+    emote_module.strip_emotes(items)
+    assert items[0]["parts"][0]["text"] == "人設 <:keep:1>", "只動聊天訊息"
+    assert [part.get("text") for part in items[1]["parts"]] == ['<message msg_id="m1" user="「A」">\n不太一樣 ']
+    assert [part.get("text") for part in items[2]["parts"]] == ['<message msg_id="m2" user="「B」">\n（表情）']
+    assert [part.get("text") for part in items[3]["parts"]] == ['<message msg_id="m3" user="「C」">\n[貼圖：wave（揮手）]']
+    assert [part["type"] for part in items[4]["parts"]] == ["text", "image"], "表情的圖拿掉，真的圖片留著"
+    texts = [message["text"] for message in emote_module.planner_messages(items)]
+    assert texts == ["不太一樣", "（表情）", "[貼圖：wave（揮手）]", "看這張 [圖片]"]
+
+    # 決策模型那邊：表情不出前文題，用回覆功能回的訊息標出在回誰
+    env = _env(monkeypatch, answers=[_answer("text", 0.8)], decision={"reply_context_enabled": True})
+    _receive_all(env.plugin)
+    alias = emote_module.display_message_id
+    env.plugin._inbound["s1"][alias(LATEST)]["quote_label"] = "回覆「阿華」：笑死"
+    kwargs = _planner(env.module)
+    kwargs["items"][3]["parts"] = [
+        {"type": "text", "text": kwargs["items"][3]["parts"][0]["text"].split("\n")[0] + "\n<:lol:5>"}, dict(image),
+    ]
+    asyncio.run(env.plugin.decide_emote_in_planner(**kwargs))
+    state, questions = env.asked[0]
+    assert "#2 「阿華」：（表情）" in state and "<:lol:5>" not in state
+    assert "#3 「小美」：[回覆「阿華」：笑死]真的假的" in state
+    assert "link_2" not in questions, "只有表情的不問在接哪一則"
