@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from maibot_sdk import HookHandler
 
 from .emote import display_message_id, planner_messages
+from .topics import lacks_content, topic_members, with_card
 from .reply_links import EMOTE_ONLY, NONE, context_ids, plain
 
 LOOKUP_API = "luca.linux-computer.lookup"
@@ -32,6 +33,8 @@ MEMORY_HITS = 3
 PERSON_HITS = 2
 # 每個人各查一次記憶；正式機檢索慢，等不及放棄的查詢在主程式那邊還會跑完，查太多會越積越慢
 MAX_PEOPLE = 3
+# 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
+FOCUS_WAIT_SECONDS = 5
 # 往回問幾則別人的訊息「是不是同一件事」；機率到 SAME_THRESHOLD 才算進這串
 WALK_BACK = 6
 SAME_THRESHOLD = 0.5
@@ -336,11 +339,19 @@ class RecallMixin:
         state: str,
         focus: Mapping[str, Any],
     ) -> tuple[List[Mapping[str, Any]], List[str]]:
-        """從要回的那則往回找這串話題：明確前文當起點，再問前面幾則是不是同一件事。
+        """要回的那則所在的話題串（topics.py）；還沒分到串時往回找：明確前文當起點，再問前面幾則是不是同一件事。
 
         Returns:
             這串的訊息（照時間排，最後是要回的那則）和判斷詳情裡的經過。
         """
+        store = getattr(self, "_topics", {}).get(session_id)
+        members = topic_members(store, focus["msg_id"]) if store else []
+        if members:
+            thread = thread_messages(window, members)
+            topic_id = store["of"][focus["msg_id"]]
+            walk = [f"→ {numbered(focus, numbers)}（要回的這則，話題串 {topic_id}）"]
+            walk += [f"← {numbered(message, numbers)}（同一串）" for message in reversed(thread) if message is not focus]
+            return thread, walk
         links = self._reply_links.get(session_id, {})
         inbound = remembered.get(focus["msg_id"]) or {}
         context = context_ids(window, focus["msg_id"], inbound, links.get(focus["msg_id"], []), her_last_line=False)
@@ -431,6 +442,23 @@ class RecallMixin:
             "hits": hits or [],
             "missed": hits is None,
         }
+
+    async def _wait_for_focus_card(self, session_id: str, window: Sequence[Mapping[str, Any]]) -> None:
+        """要回的那則只有網址時，等 Discord 補上連結卡片（_remember_card），最多 FOCUS_WAIT_SECONDS 秒。"""
+        focus = focus_message(window, self._inbound.get(session_id, {}))
+        deadline = asyncio.get_running_loop().time() + FOCUS_WAIT_SECONDS
+        while focus is not None and asyncio.get_running_loop().time() < deadline:
+            entry = self._inbound.get(session_id, {}).get(focus["msg_id"]) or {}
+            if not lacks_content(with_card(focus, entry)):
+                return
+            await asyncio.sleep(0.5)
+
+    def _remember_card(self, message_id: str, card: str) -> None:
+        """Discord 晚一點才展開連結預覽（訊息編輯事件，正文沒變）：把卡片文字補記在那則訊息上，分話題和聯想用得到。"""
+        key = display_message_id(message_id)
+        for remembered in self._inbound.values():
+            if key in remembered:
+                remembered[key]["card"] = card
 
     async def _recall_query(self, chat: str) -> str:
         """請小模型把這段聊天寫成檢索關鍵字；失敗或它看不出在聊什麼時回傳空字串（改用原文查）。"""

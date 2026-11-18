@@ -8,7 +8,7 @@ import re
 import traceback
 from collections import defaultdict
 from time import time as get_time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import discord
 
@@ -110,6 +110,8 @@ class DiscordClientManager:
         self._gateway_name = gateway_name
         self._gateway_capability = gateway_capability
         self._message_handler = message_handler
+        # 連結預覽晚到時呼叫：(Discord 訊息 ID, 卡片文字)；插件啟動後設定
+        self.on_card: Optional[Callable[[str, str], None]] = None
         self._thread_routing_manager = thread_routing_manager
         self._chat_filter = chat_filter
         self._filter_config = filter_config
@@ -187,9 +189,14 @@ class DiscordClientManager:
         # ponytail: 只收缓存里的消息（默认最近 1000 条）；更早的消息被改或撤回不会通知，需要时改用 on_raw_* 事件
         @client.event
         async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
-            # 链接预览展开、置顶也会触发编辑事件，正文没变就不通知
+            # 链接预览展开、置顶也会触发编辑事件，正文没变就不通知；预览晚到时把卡片文字交给插件补记（分话题、联想用）
             if before.content != after.content:
                 await self._on_message_change(after, before)
+            elif len(after.embeds) > len(before.embeds) and self.on_card is not None:
+                cards = [self._message_handler._embed_text_segment(embed) for embed in after.embeds[len(before.embeds) :]]
+                text = " ".join(str(seg.data) for seg in cards if seg is not None)
+                if text:
+                    self.on_card(str(after.id), text)
 
         @client.event
         async def on_message_delete(message: discord.Message) -> None:

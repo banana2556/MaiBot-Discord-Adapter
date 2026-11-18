@@ -35,9 +35,11 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
+from .decision import TIMEOUT_SECONDS
 from .decision import ask as ask_decision
 from .life.common import sent_text, short_time
 from .reply_links import EMOTE_ONLY, link_questions, parse_links, plain
+from .topics import apply_topics, new_store, topic_questions, with_card
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
@@ -198,6 +200,21 @@ def planner_messages(items: Any) -> List[Dict[str, Any]]:
     return messages
 
 
+# 附圖給決策模型時整次請求的秒數上限；圖太大就不附（base64 字數）
+IMAGE_TIMEOUT_SECONDS = 8
+IMAGE_MAX_CHARS = 1_500_000
+
+
+def first_image(message: Mapping[str, Any]) -> str:
+    """入站訊息的第一張圖片（base64）；沒有或太大時是空字串。表情包不算（type 是 emoji）。"""
+    raw = message.get("raw_message")
+    for segment in raw if isinstance(raw, list) else []:
+        if isinstance(segment, Mapping) and segment.get("type") == "image":
+            data = str(segment.get("binary_data_base64") or segment.get("data") or "")
+            return data if 100 < len(data) <= IMAGE_MAX_CHARS else ""
+    return ""
+
+
 def quoted(message: Mapping[str, Any]) -> Tuple[str, str, str]:
     """入站訊息回覆的是哪則：(原始訊息 ID, 「名字」說：內容, 回覆「名字」：內容開頭)；沒有回覆時都是空字串。
 
@@ -275,6 +292,8 @@ class EmoteMixin:
         self._append_tasks: Dict[str, asyncio.Task[None]] = {}
         # 只按表情／只發圖的背景任務；要留著引用，沒人引用的 Task 可能被回收
         self._emote_tasks: set[asyncio.Task[None]] = set()
+        # 每個聊天的話題串（topics.py）；插件重啟就清空
+        self._topics: Dict[str, Dict[str, Any]] = {}
         # 每個聊天最近挑過的表情 key，下次先排除
         self._recent_picks: Dict[str, "deque[str]"] = {}
         # MaiBot 設定的暱稱與別名，和它的「被提及必回覆」用同一份
@@ -326,6 +345,8 @@ class EmoteMixin:
             # 只有真的 Discord 訊息（數字 ID）按得了表情；語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
             "targetable": message_id.isdigit(),
             "at": time.monotonic(),
+            # 第一張圖片（base64）：分話題時直接附給決策模型看，不等主程式寫圖片描述
+            "image": first_image(message),
         }
         remembered = self._inbound.setdefault(session_id, OrderedDict())
         # 用 planner 上下文顯示的 msg_id（長 ID 是別名）當鍵
@@ -396,6 +417,11 @@ class EmoteMixin:
         now = datetime.now()
         remembered = self._inbound.get(session_id, {})
         window = list(messages)[-decision.context_messages :]
+        # 要回的那則只有網址、卡片還沒到時等一下（最多 recall.FOCUS_WAIT_SECONDS）；其他的照常，晚點再分話題
+        await self._wait_for_focus_card(session_id, window)
+        remembered = self._inbound.get(session_id, {})
+        # 卡片晚到時插件補記的文字接在正文後面
+        window = [{**message, "text": with_card(message, remembered.get(message["msg_id"]) or {})} for message in window]
         # 用回覆功能回的，正文前面標「[回覆「名字」：…]」：planner 看到的回覆標籤要等 quote_context 那個 late hook 才加，
         # 這裡不補的話決策模型和聯想不知道它在回誰，被回覆那則滑出上下文時連前文都沒有
         window = [
@@ -448,9 +474,20 @@ class EmoteMixin:
             link_asks, link_keys = link_questions(window, numbers, remembered)
             questions.update(link_asks)
         started = time.monotonic()
-        answers = await ask_decision(decision, state, questions, self.ctx.logger)
+        # 話題串（topics.py）：開了聯想的群聊，這輪還沒分配的訊息同一次請求一起問；圖片直接附上
+        store = self._topics.setdefault(session_id, new_store())
+        topic_asks, topic_keys, images = {}, {}, []
+        if decision.recall_enabled and self._latest_inbound.get(session_id, {}).get("group_id"):
+            topic_asks, topic_keys, images = topic_questions(store, window, numbers, remembered, time.time())
+        questions.update(topic_asks)
+        answers = await ask_decision(
+            decision, state, questions, self.ctx.logger, images=images or None, timeout=IMAGE_TIMEOUT_SECONDS if images else TIMEOUT_SECONDS
+        )
+        topic_summary = apply_topics(store, topic_keys, answers)
+        link_summary_extra = f"；話題 {topic_summary}" if topic_summary else ""
         latency_ms = round((time.monotonic() - started) * 1000)
         judged_links, link_summary = parse_links(answers, link_keys, decision.link_threshold)
+        link_summary = (link_summary + link_summary_extra).lstrip("；")
         links = self._reply_links.setdefault(session_id, OrderedDict())
         for msg_id, linked in judged_links.items():
             links[msg_id] = linked

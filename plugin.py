@@ -2421,6 +2421,7 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, RecallMixin, ReminderM
             typing_indicator_delay_ms=settings.chat.typing_indicator_delay_ms,
             typing_indicator_timeout_sec=settings.chat.typing_indicator_timeout_sec,
         )
+        self._client_manager.on_card = self._remember_card
         if self._daily_life is not None:
             # 新客户端登录时没有状态文字，日常生活下一轮要重新推送当前时段
             self._daily_life.invalidate_presence()

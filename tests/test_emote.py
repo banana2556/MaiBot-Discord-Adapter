@@ -398,7 +398,8 @@ def test_single_candidate_skips_the_target_question(monkeypatch) -> None:
         await _drain()
 
     asyncio.run(scenario())
-    assert set(env.asked[0][1]) == {"scene", "emotion"}, "只有一個選項的選擇題會被決策模型回 422"
+    asked = set(env.asked[0][1])
+    assert {"scene", "emotion"} <= asked and "target" not in asked, "只有一個選項的選擇題會被決策模型回 422"
     assert env.reactions == [(LATEST, env.emojis[1])], "表態對象就是唯一那則"
 
 
