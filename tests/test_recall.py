@@ -85,7 +85,7 @@ def test_pieces() -> None:
     assert recall.focus_message(window, remembered)["msg_id"] == "c", "她說話之後叫她的優先"
     assert recall.focus_message(window, {})["msg_id"] == "d", "沒人叫她就是最新一則"
     people = recall.participants(window, window[4], ["a", "b"], remembered, "bot")
-    assert [person["name"] for person in people] == ["D", "B", "A", "E"], "發話人、前文（新的先）、@ 的人；不含她自己"
+    assert [person["name"] for person in people] == ["D", "E", "B"], "發話人、@ 的人、前文（新的先）；不含她自己，最多 3 個"
 
 
 def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypatch) -> None:
@@ -123,8 +123,8 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
         "- 上網查到：在聊《虹彩六號：圍攻》（來源：https://r6.example）\n"
         "- 可能在聊：群裡常打虹彩六號：圍攻（把握 0.60）\n"
         "- 「小美」：沒有相關的記憶\n"
-        "- 「阿華」：阿華 R6 鑽石牌位；阿華主玩防守方\n"
-        "- 「小明」：沒有相關的記憶"
+        "- 「小明」：沒有相關的記憶\n"
+        "- 「阿華」：阿華 R6 鑽石牌位；阿華主玩防守方"
     )
     summary = "看不懂 0.70・想到 m1（0.60）・人 1/3・上網「羚羊 MP5 盾牌」"
     assert env.plugin._decision_stats.state["decisions"][0]["recall"] == summary
@@ -192,3 +192,29 @@ def test_timed_out_searches_are_not_reported_as_empty(monkeypatch) -> None:
     assert "群記憶：沒等到（逾時或失敗）" in record["recall_detail"] and "「小明」：沒等到（逾時或失敗）" in record["recall_detail"]
     note = result["modified_kwargs"]["items"][0]["parts"][-1]["text"]
     assert "「阿華」：阿華主玩防守方" in note and "小明" not in note.split("\n", 1)[1], "沒等到的人不說成沒有記憶"
+
+
+def test_short_message_uses_recent_chat_and_her_name_is_not_a_keyword(monkeypatch) -> None:
+    """「打」沒回覆也沒 @ 人：拿前面幾則當前文；叫她的 @ 換成「@你」，暱稱不會被當成要查的詞。"""
+    env, calls = _setup(monkeypatch, [_answer("text", 0.8)], {"recall_enabled": True})
+    bot = env.plugin._bot_name()
+    planner = _planner()
+    planner["items"][2:] = [
+        _item(alias(FUNNY), "Ahh shit. here we go again", f"@「{bot}」 要不要打絕本"),
+        _message_item("mself2", bot, "好呀，但我只會躺地板", self_message=True),
+        _item(alias(LATEST), "Clover", "打"),
+    ]
+    original = env.ctx.call_capability
+
+    async def nothing(name, **kwargs):
+        if name == "llm.generate":
+            calls.append((name, kwargs))
+            return {"success": True, "response": "無"}
+        return await original(name, **kwargs)
+
+    env.ctx.call_capability = nothing
+    asyncio.run(env.plugin.decide_emote_in_planner(**planner))
+    prompt = next(kwargs["prompt"] for name, kwargs in calls if name == "llm.generate")
+    assert "「Ahh shit. here we go again」：@你 要不要打絕本\n（你）：好呀，但我只會躺地板\n「Clover」：打" in prompt
+    queries = [kwargs["query"] for name, kwargs in calls if name == "knowledge.search" and not kwargs["person_id"]]
+    assert queries[0] == f"大家在幹嘛 @「{bot}」 要不要打絕本 好呀，但我只會躺地板 打", "看不出在聊什麼就用前面幾則的原文查"

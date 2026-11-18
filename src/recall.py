@@ -28,11 +28,13 @@ LOOKUP_API = "luca.linux-computer.lookup"
 # 文字聯想取幾筆、每個人取幾筆、最多看幾個人
 MEMORY_HITS = 3
 PERSON_HITS = 2
-MAX_PEOPLE = 4
+# 每個人各查一次記憶；正式機檢索慢，等不及放棄的查詢在主程式那邊還會跑完，查太多會越積越慢
+MAX_PEOPLE = 3
+# 要回的那則沒有明確前文（沒回覆、沒 @）時，拿它前面幾則當前文：聯想在決策模型判斷前文之前跑，最新那則還沒有判斷
+RECENT_CONTEXT = 4
 # 查詢字數上限（記憶檢索和整理話題用）
 QUERY_CHARS = 300
 # 正式機的記憶檢索常要好幾秒，4 秒時幾乎每次都逾時；等不到就這輪少一段聯想
-# ponytail: 群記憶和每個人同時查，檢索慢時會互相拖慢；還是常逾時就改成先查群記憶、人只查要回那則的發話人
 SEARCH_TIMEOUT_SECONDS = 15
 MISSED = "沒等到（逾時或失敗）"
 # 上網查最多等多久；lookup 本身最多 150 秒，等不到就這輪不用
@@ -48,8 +50,12 @@ QUERY_TIMEOUT_SECONDS = 10
 QUERY_PROMPT = """下面是 Discord 群聊裡的一段對話：
 {chat}
 
-寫一行記憶檢索用的關鍵字（3～8 個詞，空格分開）：對話裡的遊戲、作品、人物、事件、梗、術語，和這段在聊的主題。
-只輸出關鍵字這一行，不要解釋。"""
+每行開頭「」裡是發話人的 Discord 暱稱，可以隨便改、常常像一句話或梗，不是聊天內容；（你）和「@你」是你自己。
+
+寫一行記憶檢索用的關鍵字（3～8 個詞，空格分開）：對話內容裡的遊戲、作品、人物、事件、梗、術語，和這段在聊的主題，不要放暱稱。
+看不出在聊什麼就只輸出「無」。只輸出這一行，不要解釋。"""
+# 小模型說看不出在聊什麼時的回答
+NOTHING = "無"
 UNSURE = "你對這段在聊什麼沒有把握：要回的話可以用問的（例如「你們在說……嗎？」），或接得保守一點，別把猜測當成事實。"
 
 _HIT = re.compile(r"(?:^|\n)\s*\d+\.\s*")
@@ -85,16 +91,21 @@ def participants(
     remembered: Mapping[str, Mapping[str, Any]],
     bot_id: str,
 ) -> List[Dict[str, str]]:
-    """這段話題的參與者：要回那則的發話人、前文的發話人（新的先）、那則 @ 的人；不含她自己，最多 MAX_PEOPLE 個。"""
+    """這段話題的參與者：要回那則的發話人、那則 @ 的人、前文的發話人（新的先）；不含她自己，最多 MAX_PEOPLE 個。"""
     by_id = {message["msg_id"]: message for message in window}
     people: Dict[str, Dict[str, str]] = {}
-    for msg_id in [focus["msg_id"], *reversed(context)]:
+
+    def add(msg_id: str) -> None:
         message, entry = by_id.get(msg_id), remembered.get(msg_id) or {}
         if message and not message["self"] and entry.get("user_id"):
             people.setdefault(entry["user_id"], {"user_id": entry["user_id"], "name": plain(message["user"]), "platform": entry["platform"]})
+
+    add(focus["msg_id"])
     entry = remembered.get(focus["msg_id"]) or {}
     for user_id, name in (entry.get("mentioned") or {}).items():
         people.setdefault(user_id, {"user_id": user_id, "name": plain(name), "platform": entry["platform"]})
+    for msg_id in reversed(context):
+        add(msg_id)
     return [person for user_id, person in people.items() if user_id != bot_id][:MAX_PEOPLE]
 
 
@@ -238,9 +249,19 @@ class RecallMixin:
             return None
         judged = self._reply_links.get(session_id, {}).get(focus["msg_id"], [])
         context = context_ids(window, focus["msg_id"], remembered.get(focus["msg_id"]) or {}, judged)
+        if not context:
+            index = next(index for index, message in enumerate(window) if message["msg_id"] == focus["msg_id"])
+            context = [message["msg_id"] for message in window[max(0, index - RECENT_CONTEXT) : index]]
         by_id = {message["msg_id"]: message for message in window}
         said = [by_id[msg_id] for msg_id in [*context, focus["msg_id"]]]
-        chat = "\n".join(("（你）" if message["self"] else f"「{plain(message['user'])}」") + f"：{message['text']}" for message in said)
+        # 叫她的 @ 換成「@你」：她的 Discord 暱稱會被小模型和上網查當成要查的詞
+        bot = self._bot_name()
+        chat = "\n".join(
+            ("（你）" if message["self"] else f"「{plain(message['user'])}」")
+            + "："
+            + message["text"].replace(f"@「{bot}」", "@你").replace(f"@{bot}", "@你")
+            for message in said
+        )
         user = getattr(getattr(self._client_manager, "client", None), "user", None)
         people = participants(window, focus, context, remembered, str(getattr(user, "id", "") or ""))
         query, person_ids = await asyncio.gather(
@@ -258,7 +279,7 @@ class RecallMixin:
         return {"focus": focus, "chat": chat, "query": query, "people": people, "hits": hits or [], "missed": hits is None}
 
     async def _recall_query(self, chat: str) -> str:
-        """請小模型把這段聊天寫成檢索關鍵字；失敗時回傳空字串（改用原文查）。"""
+        """請小模型把這段聊天寫成檢索關鍵字；失敗或它看不出在聊什麼時回傳空字串（改用原文查）。"""
         try:
             reply = await asyncio.wait_for(
                 self.ctx.call_capability("llm.generate", prompt=QUERY_PROMPT.format(chat=chat), task_name=QUERY_TASK),
@@ -270,7 +291,8 @@ class RecallMixin:
         if not text:
             error = reply.get("error") if isinstance(reply, Mapping) else reply
             self.ctx.logger.warning(f"聯想：寫檢索關鍵字失敗，改用原文查：{error}")
-        return text.splitlines()[0].strip() if text else ""
+        keywords = text.splitlines()[0].strip().strip("「」") if text else ""
+        return "" if keywords == NOTHING else keywords
 
     def _recall_ask(self, recall: Mapping[str, Any], number: str) -> tuple[str, Dict[str, Dict[str, Any]]]:
         """接在決策模型 state 後面的文字和要加的題目（表情決策那次請求一起問）。"""
