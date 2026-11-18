@@ -302,8 +302,8 @@ class EmoteMixin:
         mode="blocking",
         # 比回覆上下文（quote_context，late）早：「有人在找你」要用到這次順便判斷的回覆前文
         order="normal",
-        # 開了聯想時，看不懂的話題要等上網查（recall.LOOKUP_TIMEOUT_SECONDS），其餘幾秒內就完成
-        timeout_ms=90000,
+        # 開了聯想時，看不懂的話題要等上網查（recall.LOOKUP_TIMEOUT_SECONDS），記憶檢索（recall.SEARCH_TIMEOUT_SECONDS）兩輪、寫關鍵字也要等
+        timeout_ms=120000,
     )
     async def decide_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
         """Discord 聊天裡拿掉 MaiBot 原生的 send_emoji；新訊息後第一次進 planner 時問決策模型，結果用系統提示告訴 planner。

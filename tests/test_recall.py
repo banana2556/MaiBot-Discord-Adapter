@@ -172,3 +172,23 @@ def test_unsure_recall_asks_her_to_hedge_and_lookup_only_when_enabled(monkeypatc
     off, off_calls = _setup(monkeypatch, [_answer("text", 0.8)], {})
     asyncio.run(off.plugin.decide_emote_in_planner(**_planner()))
     assert not any(name.startswith("recall_") for name in off.asked[0][1]) and not off_calls, "沒開聯想就不查也不問"
+
+
+def test_timed_out_searches_are_not_reported_as_empty(monkeypatch) -> None:
+    answers = {**_answer("text", 0.8), "recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, calls = _setup(monkeypatch, [answers], {"recall_enabled": True})
+    original = env.ctx.call_capability
+
+    async def slow(name, **kwargs):
+        if name == "knowledge.search" and kwargs["person_id"] in ("", "p-u1"):
+            calls.append((name, kwargs))
+            return {"success": False, "error": "TimeoutError()"}
+        return await original(name, **kwargs)
+
+    env.ctx.call_capability = slow
+    result = asyncio.run(env.plugin.decide_emote_in_planner(**_planner()))
+    record = env.plugin._decision_stats.state["decisions"][0]
+    assert record["recall"] == "看得懂 0.90・群記憶沒等到（逾時或失敗）・人 1/3（1 人沒等到）"
+    assert "群記憶：沒等到（逾時或失敗）" in record["recall_detail"] and "「小明」：沒等到（逾時或失敗）" in record["recall_detail"]
+    note = result["modified_kwargs"]["items"][0]["parts"][-1]["text"]
+    assert "「阿華」：阿華主玩防守方" in note and "小明" not in note.split("\n", 1)[1], "沒等到的人不說成沒有記憶"

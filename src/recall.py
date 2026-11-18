@@ -31,7 +31,10 @@ PERSON_HITS = 2
 MAX_PEOPLE = 4
 # 查詢字數上限（記憶檢索和整理話題用）
 QUERY_CHARS = 300
-SEARCH_TIMEOUT_SECONDS = 4
+# 正式機的記憶檢索常要好幾秒，4 秒時幾乎每次都逾時；等不到就這輪少一段聯想
+# ponytail: 群記憶和每個人同時查，檢索慢時會互相拖慢；還是常逾時就改成先查群記憶、人只查要回那則的發話人
+SEARCH_TIMEOUT_SECONDS = 15
+MISSED = "沒等到（逾時或失敗）"
 # 上網查最多等多久；lookup 本身最多 150 秒，等不到就這輪不用
 LOOKUP_TIMEOUT_SECONDS = 60
 # 選中的記憶（或看得懂）的機率低於這個值，就要她用問的或保守地接
@@ -41,7 +44,7 @@ PICK = "recall_pick"
 NOTE_HEAD = "【聯想】回 msg_id={msg_id}（{user}）之前，你想起這些。這是聯想，不一定對；和眼前的聊天衝突時以聊天為準，也別逐字說出來："
 # 記憶檢索是向量比對：整段聊天原文太長太雜，分數常過不了門檻，先請小模型寫成關鍵字再查
 QUERY_TASK = "utils"
-QUERY_TIMEOUT_SECONDS = 15
+QUERY_TIMEOUT_SECONDS = 10
 QUERY_PROMPT = """下面是 Discord 群聊裡的一段對話：
 {chat}
 
@@ -148,6 +151,8 @@ def recall_note(recall: Mapping[str, Any], picked: str, confidence: float, looku
     for person in recall["people"]:
         memories = list(dict.fromkeys([*person.get("details", []), *person["impression"]]))[:3]
         remembered = remembered or bool(memories)
+        if not memories and person.get("missed"):
+            continue  # 沒等到結果不等於沒有記憶，別跟她說「沒有相關的記憶」
         lines.append(f"- 「{person['name']}」：" + ("；".join(memories) if memories else "沒有相關的記憶"))
     unsure = not lookup.get("summary") and confidence < CONFIDENT
     if unsure:
@@ -161,10 +166,13 @@ def recall_note(recall: Mapping[str, Any], picked: str, confidence: float, looku
 def recall_detail(recall: Mapping[str, Any], lookup: Mapping[str, Any], note: str) -> str:
     """判斷詳情裡的聯想經過：用什麼關鍵字查、每一邊查到什麼、上網結果、最後給 planner 的那段。"""
     hits = "".join(f"\nm{index}. {hit}" for index, hit in enumerate(recall["hits"], 1))
-    lines = [f"關鍵字：{recall['query']}", f"群記憶：{hits or '沒查到'}"]
+    lines = [f"關鍵字：{recall['query']}", f"群記憶：{hits or (MISSED if recall['missed'] else '沒查到')}"]
     for person in recall["people"]:
         found = list(dict.fromkeys([*person["impression"], *person.get("details", [])]))
-        state = "；".join(found) if found else "沒查到" if person.get("person_id") else "找不到這個人的人物 ID"
+        if found:
+            state = "；".join(found) + (f"（有一次{MISSED}）" if person["missed"] else "")
+        else:
+            state = MISSED if person["missed"] else "沒查到" if person.get("person_id") else "找不到這個人的人物 ID"
         lines.append(f"「{person['name']}」：{state}")
     if lookup:
         lines.append(f"上網「{lookup.get('query', '')}」：" + str(lookup.get("summary") or f"失敗：{lookup.get('error', '')}"))
@@ -179,8 +187,14 @@ class RecallMixin:
         # 每個聊天最近一次聯想：{"focus": msg_id, "note": 給 planner / replyer 的那段, "lookup": 上網查的結果}
         self._recalls: Dict[str, Dict[str, Any]] = {}
 
-    async def _search_memory(self, session_id: str, query: str, person_id: str = "", limit: int = MEMORY_HITS) -> List[str]:
-        """查這個群看得到的記憶（和 planner 內建 query_memory 一樣限定這個聊天）；給 person_id 時只查這個人的。"""
+    async def _search_memory(
+        self, session_id: str, query: str, person_id: str = "", limit: int = MEMORY_HITS
+    ) -> Optional[List[str]]:
+        """查這個群看得到的記憶（和 planner 內建 query_memory 一樣限定這個聊天）；給 person_id 時只查這個人的。
+
+        Returns:
+            每筆記憶；逾時或失敗時是 None，和「查了但沒有」的空清單分開，頁面才不會把沒等到結果寫成 0 筆。
+        """
         try:
             result = await asyncio.wait_for(
                 self.ctx.call_capability(
@@ -197,10 +211,13 @@ class RecallMixin:
         except Exception as exc:  # 讀不到記憶這輪就少一段聯想，不影響回覆
             result = {"error": repr(exc)}
         if isinstance(result, Mapping):
-            self.ctx.logger.warning(f"聯想：讀取記憶失敗：{result.get('error')}")
+            self.ctx.logger.warning(f"聯想：讀取記憶失敗或逾時（最多等 {SEARCH_TIMEOUT_SECONDS} 秒）：{result.get('error')}")
+            return None
         return parse_hits(result)
 
-    async def _person_memories(self, session_id: str, person: Mapping[str, str], query: str, limit: int) -> List[str]:
+    async def _person_memories(
+        self, session_id: str, person: Mapping[str, str], query: str, limit: int
+    ) -> Optional[List[str]]:
         if not person.get("person_id"):
             return []
         return await self._search_memory(session_id, query, person["person_id"], limit)
@@ -237,8 +254,8 @@ class RecallMixin:
             *(self._person_memories(session_id, person, f"{person['name']} {query}", PERSON_HITS) for person in people),
         )
         for person, impression in zip(people, impressions, strict=True):
-            person["impression"] = impression
-        return {"focus": focus, "chat": chat, "query": query, "people": people, "hits": hits}
+            person["impression"], person["missed"] = impression or [], impression is None
+        return {"focus": focus, "chat": chat, "query": query, "people": people, "hits": hits or [], "missed": hits is None}
 
     async def _recall_query(self, chat: str) -> str:
         """請小模型把這段聊天寫成檢索關鍵字；失敗時回傳空字串（改用原文查）。"""
@@ -287,15 +304,21 @@ class RecallMixin:
                 *(self._person_memories(session_id, person, topic, PERSON_HITS) for person in recall["people"])
             )
             for person, found in zip(recall["people"], details, strict=True):
-                person["details"] = found
+                person["details"] = found or []
+                person["missed"] = person["missed"] or found is None
         note = recall_note(recall, picked, confidence, lookup)
         self._recalls[session_id] = {"focus": recall["focus"]["msg_id"], "note": note, "lookup": lookup}
         verdict = str(understand.get("choice") or "")
         known = sum(1 for person in recall["people"] if person["impression"] or person.get("details"))
+        missed = sum(1 for person in recall["people"] if person["missed"])
         parts = [
             f"{'看不懂' if lost else '看得懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "沒拿到判斷",
-            f"想到 m{index}（{confidence:.2f}）" if picked else f"記憶 {len(recall['hits'])} 筆都沒選",
-            f"人 {known}/{len(recall['people'])}",
+            f"想到 m{index}（{confidence:.2f}）"
+            if picked
+            else "群記憶沒等到（逾時或失敗）"
+            if recall["missed"]
+            else f"記憶 {len(recall['hits'])} 筆都沒選",
+            f"人 {known}/{len(recall['people'])}" + (f"（{missed} 人沒等到）" if missed else ""),
         ]
         if lookup:
             parts.append(f"上網「{lookup.get('query', '')}」" + ("" if lookup.get("summary") else f"失敗：{lookup.get('error', '')}"))
