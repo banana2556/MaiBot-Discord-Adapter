@@ -43,6 +43,12 @@ def test_rules_pending_links_images_and_answers() -> None:
     # 卡片晚到補記後就有內容
     assert not topics.lacks_content(topics.with_card(window[3], {"card": "[卡片: Suica 新角色是兔子]"}))
 
+    # 連結有預覽文字時不附它的預覽圖
+    linked = [_msg("x", "五星", "https://perfectpitchtw.vercel.app/ [链接预览: 音痴檢定]", 2000.0)]
+    _, _, none = topics.topic_questions(topics.new_store() | {"topics": store["topics"], "of": dict(store["of"])}, linked,
+                                        {id(linked[0]): "1"}, {"x": {"image": "P" * 200}}, now=2000.0)
+    assert none == []
+
 
 def test_recall_reads_the_topic_thread_instead_of_walking_back(monkeypatch) -> None:
     """表情決策那次請求順便分好話題，聯想直接拿要回那則所在的串，不用再一則一則往回問。"""

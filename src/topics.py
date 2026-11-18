@@ -7,6 +7,7 @@
 
 - 每輪表情決策那次請求順便問：這輪還沒分配的訊息，各出一題選擇題（選項：開著的話題串、這輪前面剛問的那幾則、新話題）。
 - 用回覆功能回的直接跟被回覆那則同一串；她自己說的跟她回的那則（沒有就是她說之前最近叫她的那則）同一串；只有表情的不分。
+- 自己上傳的圖片直接附給決策模型看（連結預覽的圖不附，用預覽文字；表情和貼圖不附）。
 - 只有網址、卡片還沒到，或只有圖片的訊息：卡片晚到時插件會補記（emote._remember_card）；圖片直接附給決策模型看，
   不等主程式寫圖片描述。卡片沒到的先等（PENDING_SECONDS 內不問），不擋住這輪。
 - 話題串留 TOPIC_TTL_SECONDS；插件重啟就清空，聯想照舊往回找（recall._walk_thread）。
@@ -157,7 +158,8 @@ def topic_questions(
             continue
         criteria[NONE] = NEW_TOPIC
         picture = ""
-        if entry.get("image"):
+        # 附圖只給自己上傳的圖；連結預覽的圖不附（預覽文字已經夠，也省得上傳）。表情和貼圖收訊時就不記
+        if entry.get("image") and not any(label in line for label in _CARD):
             images.append(f"data:image/png;base64,{entry['image']}")
             picture = f"（這則的圖片是附圖第 {len(images)} 張）"
         number = numbers[id(message)]
