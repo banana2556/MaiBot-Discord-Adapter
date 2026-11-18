@@ -359,13 +359,13 @@ def test_topic_counts_as_shared_only_when_her_link_is_actually_sent(tmp_path) ->
     picks = [{"topics": [{"keyword": keyword}]} for keyword in ("新番", "音遊", "貓咪", "拉麵")]
     scout, ctx = _scout(tmp_path, picks)
     config = _topic_config()
-    share = {"reply_reference": "這是我主動分享的新聞：《新番定檔》https://news.example/a?id=1。重點是…"}
+    share = {"chat_anlyze": "這是我主動分享的新聞：《新番定檔》https://news.example/a?id=1。重點是…"}
 
     async def scenario():
         # 1. 她發的回覆裡有連結：記成已分享
         await scout.run_channel("111", NOW, config)
-        assert "不是回應群裡正在聊的內容" in ctx.triggered[0][1] and "reply_reference 一定要寫清楚" in ctx.triggered[0][1]
-        assert scout.reply_hint("s-111", {"reply_reference": "小明在問晚餐"}) == "", "沒有連結的是一般聊天回覆，不動"
+        assert "不是回應群裡正在聊的內容" in ctx.triggered[0][1] and "chat_anlyze 一定要寫清楚" in ctx.triggered[0][1]
+        assert scout.reply_hint("s-111", {"chat_anlyze": "小明在問晚餐"}) == "", "沒有連結的是一般聊天回覆，不動"
         hint = scout.reply_hint("s-111", share)
         assert "主動在群裡開新話題" in hint and "https://news.example/a?id=1" in hint
         scout.on_sent("s-111", "這個超扯 https://news.example/a?id=1 大家看了嗎")
@@ -395,7 +395,7 @@ def test_topic_share_hint_reaches_the_replyer(tmp_path) -> None:
     scout, _ = _scout(tmp_path, [{"topics": [{"keyword": "新番"}]}])
     plugin._topic_scout = scout
     _run(scout.run_channel("111", NOW, _topic_config()))
-    args = {"reply_reference": "主動分享 https://news.example/a"}
+    args = {"chat_anlyze": "主動分享 https://news.example/a"}
     result = _run(plugin.add_topic_share_hint(session_id="s-111", reply_tool_args=args, extra_prompt="原本的要求"))
     prompt = result["modified_kwargs"]["extra_prompt"]
     assert prompt.startswith("原本的要求\n") and "https://news.example/a" in prompt
@@ -415,7 +415,7 @@ def test_topic_prompts_edited_on_the_page_are_used(tmp_path) -> None:
     assert "只挑動畫相關的\n" in ctx.prompts[0] and "只輸出 JSON" in ctx.prompts[0], "輸出格式由插件固定附上"
     intent = ctx.triggered[0][1]
     assert "去巴哈姆特找" in intent and "Bilibili" not in intent
-    assert "reply_reference 一定要寫清楚" in intent and "不是回應群裡正在聊的內容" in intent, "分享規則固定附上"
+    assert "chat_anlyze 一定要寫清楚" in intent and "不是回應群裡正在聊的內容" in intent, "分享規則固定附上"
 
     async def no_streams(platform="all_platforms"):
         return []

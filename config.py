@@ -1235,7 +1235,7 @@ class TopicConfig(PluginConfigBase):
         ),
         description=(
             "分享話題的提示詞：喚醒麥麥時交給她的任務說明，寫去哪裡找、怎麼挑。"
-            "「這輪是開新話題」「reply_reference 要寫標題和連結」「內容要實際查到」「找不到就 stop」由插件自動附上，分享才發得出去。"
+            "「這輪是開新話題」「chat_anlyze 要寫標題和連結」「內容要實際查到」「找不到就 stop」由插件自動附上，分享才發得出去。"
         ),
         json_schema_extra={"label": "分享話題的提示詞", "order": 8},
     )

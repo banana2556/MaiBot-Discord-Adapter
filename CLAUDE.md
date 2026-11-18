@@ -17,7 +17,7 @@ MaiBot 的 Discord 插件，跑在 MaiBot 的插件 Runner 裡（`maibot_sdk`）
 
 ```bash
 python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt "maibot-plugin-sdk==2.21.0" "maim-message==0.6.8" numpy pytest ruff
+.venv/Scripts/pip install -r requirements.txt "maibot-plugin-sdk==2.23.0" "maim-message==0.6.8" numpy pytest ruff
 .venv/Scripts/python -m pytest -q tests
 .venv/Scripts/ruff check .
 ```

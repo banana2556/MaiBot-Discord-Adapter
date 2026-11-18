@@ -1,9 +1,9 @@
 """主動話題：按 cron 定時，根據群的長期記憶和最近聊天挑幾個可能有興趣的話題，喚醒麥麥自己去找新聞或影片分享到群裡。
 
 插件不替她搜尋、也不指定工具：用哪個搜尋或瀏覽工具、找到什麼，都交給麥麥自己決定。
-MaiBot 的 replyer 看不到主動任務和她搜到的內容（只看真實聊天和 planner 填的 reply_reference），所以：
-- 給 planner 的指示要求把標題、連結、重點寫進 reply_reference；
-- 有話題等著發的聊天，replyer 開始前（reply_hint）從 reply_reference 抓出連結，提醒 replyer 這是主動分享、要附上連結；
+MaiBot 的 replyer 看不到主動任務和她搜到的內容（只看真實聊天和 planner 填的 chat_anlyze），所以：
+- 給 planner 的指示要求把標題、連結、重點寫進 chat_anlyze；
+- 有話題等著發的聊天，replyer 開始前（reply_hint）從 chat_anlyze 抓出連結，提醒 replyer 這是主動分享、要附上連結；
 - 她的訊息送出後（on_sent）確認連結真的發出去；SHARE_TIMEOUT 內沒發出就記成沒發出去，不額外補發。
 紀錄存在插件資料目錄的 topics.json，挑話題時避開最近開過的（沒發出去的不算）。模型看到的文字用繁體中文。
 """
@@ -133,15 +133,15 @@ class TopicScout:
 
         kind_text = "或".join(kinds)
         candidates = "\n".join(f"- {t['keyword']}：{t.get('why') or '跟最近的話題有關'}" for t in topics)
-        # 開頭的任務定位和後面的分享規則固定附上：replyer 看不到主動任務，reply_reference 沒寫標題和連結就發不出分享
+        # 開頭的任務定位和後面的分享規則固定附上：replyer 看不到主動任務，chat_anlyze 沒寫標題和連結就發不出分享
         intent = (
             "這輪的任務是主動在群裡開一個新話題，不是回應群裡正在聊的內容（別人的訊息之後會有自己的回合）。\n"
             f"{config.share_instructions.strip()}\n"
             f"這個群最近可能有興趣的方向：\n{candidates}\n"
             f"要分享的類型：{kind_text}\n"
-            "找到後呼叫 reply 分享：msg_id 填最新一則訊息即可；reply_reference 一定要寫清楚"
+            "找到後呼叫 reply 分享：msg_id 填最新一則訊息即可；chat_anlyze 一定要寫清楚"
             f"「這是我主動分享的{kind_text}」、標題、完整連結網址、內容重點和你想說的看法——"
-            "負責寫回覆的模型看不到這個任務和你搜到的內容，只看得到 reply_reference；reply_style 用「正常回复」。\n"
+            "負責寫回覆的模型看不到這個任務和你搜到的內容，只看得到 chat_anlyze；reply_style 用「正常回复」。\n"
             f"最近開過的話題不要重複：\n{shared}\n"
             "分享的標題、內容和連結一定要是你這輪實際上網查到、看過的，不要憑記憶或沒查證的摘要寫；"
             "只用你手上真的有的工具，不要自己編工具名稱。"
@@ -183,12 +183,12 @@ class TopicScout:
             self._ctx.logger.warning(f"主動話題「{pending['entry']['topic']}」觸發後 {minutes} 分鐘內沒有發出分享")
 
     def reply_hint(self, stream_id: str, reply_tool_args: Mapping[str, Any]) -> str:
-        """replyer 開始前：這個聊天有話題等著發、reply_reference 裡有連結，就是這次的分享，回傳要加給 replyer 的要求。
+        """replyer 開始前：這個聊天有話題等著發、chat_anlyze 裡有連結，就是這次的分享，回傳要加給 replyer 的要求。
 
-        reply_reference 沒有連結的是一般聊天回覆，不動它。
+        chat_anlyze 沒有連結的是一般聊天回覆，不動它。
         """
         pending = self._pending.get(stream_id)
-        url = find_url(str(reply_tool_args.get("reply_reference") or "")) if pending else ""
+        url = find_url(str(reply_tool_args.get("chat_anlyze") or "")) if pending else ""
         if not url:
             return ""
         pending["url"] = url

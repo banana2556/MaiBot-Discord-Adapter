@@ -6,7 +6,6 @@
       "id": "life",
       "title": "日常生活",
       "description": "麥麥今天每小時在做什麼；目前時段會注入對話，並同步成 Discord 狀態。",
-      "placement": "workspace",
       "icon": "chart",
       "queries": {
         "life": {
@@ -387,7 +386,6 @@
       "id": "topics",
       "title": "主動話題",
       "description": "按排程挑群裡可能有興趣的話題，喚醒麥麥自己去找新聞或影片、自己決定發不發；點一列可看詳情。",
-      "placement": "workspace",
       "icon": "puzzle",
       "queries": {
         "topics": {
@@ -906,7 +904,6 @@
       "id": "voice",
       "title": "語音",
       "description": "語音頻道的連線狀態與頻道、空閒退出、VAD 設定；服務商和金鑰仍在插件設定的「語音」分頁。",
-      "placement": "workspace",
       "icon": "settings",
       "queries": {
         "voice": {
@@ -1235,7 +1232,6 @@
       "id": "reminders",
       "title": "定時提醒",
       "description": "所有聊天待觸發的提醒，點一列可查看詳情或取消。",
-      "placement": "workspace",
       "icon": "list",
       "queries": {
         "summary": {
@@ -1600,7 +1596,6 @@
       "id": "decision",
       "title": "話題分析",
       "description": "她回話前怎麼讀懂這段在聊什麼：訊息分到哪個話題串、看不看得懂、想起什麼記憶，最後用文字還是表情反應。",
-      "placement": "workspace",
       "icon": "chart",
       "queries": {
         "decision": {
