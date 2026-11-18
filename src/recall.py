@@ -320,11 +320,11 @@ class RecallMixin:
         numbers: Mapping[int, str],
         state: str,
         scene: str,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, Dict[str, str]]:
         """表情決策之後跑完整個聯想；回傳頁面「聯想」欄的摘要和判斷詳情的經過（沒有別人的訊息時都是空字串）。"""
         recall = await self._recall(decision, session_id, window, remembered, numbers, state)
         if recall is None:
-            return "", ""
+            return "", "", {}
         number = numbers[id(recall["focus"])]
         answers = await self._ask_decision(decision, state + recall_state(recall, number), recall_questions(recall, number))
         return await self._finish_recall(decision, session_id, recall, answers, scene)
@@ -351,6 +351,8 @@ class RecallMixin:
             topic_id = store["of"][focus["msg_id"]]
             walk = [f"→ {numbered(focus, numbers)}（要回的這則，話題串 {topic_id}）"]
             walk += [f"← {numbered(message, numbers)}（同一串）" for message in reversed(thread) if message is not focus]
+            opener = store["topics"][topic_id]["lines"][0].split("：", 1)[-1]
+            self._topic_label = f"串 {topic_id}「{opener[:16]}」・{len(members)} 則"
             return thread, walk
         links = self._reply_links.get(session_id, {})
         inbound = remembered.get(focus["msg_id"]) or {}
@@ -408,7 +410,9 @@ class RecallMixin:
         focus = focus_message(window, remembered)
         if focus is None:
             return None
+        self._topic_label = ""
         said, walk = await self._walk_thread(decision, session_id, window, remembered, numbers, state, focus)
+        topic_label = self._topic_label or f"往回找・{len(said)} 則"
         context = [message["msg_id"] for message in said if message["msg_id"] != focus["msg_id"]]
         # 叫她的 @ 換成「@你」：她的 Discord 暱稱會被小模型和上網查當成要查的詞
         bot = self._bot_name()
@@ -437,6 +441,7 @@ class RecallMixin:
             "chat": chat,
             "thread_text": "\n".join(numbered(message, numbers) for message in said),
             "walk": walk,
+            "topic_label": topic_label,
             "query": query,
             "people": people,
             "hits": hits or [],
@@ -478,7 +483,7 @@ class RecallMixin:
 
     async def _finish_recall(
         self, decision: Any, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]], scene: str
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, Dict[str, str]]:
         """第 2～5 步：照決策模型的答案挑記憶、看不懂就上網查、用話題查參與者，記下給 planner 的那段。
 
         Returns:
@@ -522,7 +527,12 @@ class RecallMixin:
         ]
         if lookup:
             parts.append(f"上網「{lookup.get('query', '')}」" + ("" if lookup.get("summary") else f"失敗：{lookup.get('error', '')}"))
-        return "・".join(parts), recall_detail(recall, lookup, note)
+        columns = {
+            "topic": recall.get("topic_label", ""),
+            "understood": f"{'不懂' if lost else '懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "—",
+            "memory": "檢索逾時" if recall["missed"] else f"{len(recall['hits'])} 筆・人 {known}/{len(recall['people'])}",
+        }
+        return "・".join(parts), recall_detail(recall, lookup, note), columns
 
     async def _lookup(self, session_id: str, chat: str, hint: str) -> Dict[str, Any]:
         """請 linux 沙盒電腦插件上網查；沒裝、沒權限或逾時都回傳帶 error 的 dict。"""

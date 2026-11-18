@@ -516,9 +516,11 @@ class EmoteMixin:
         emotion = emotion if emotion in emotions else next(iter(emotions), "開心")
         scene = self._guard_scene(decision, requested, probability, target, session_id)
         # 聯想（recall.py）：群聊裡她這輪要用文字參與時，用這次判斷的前文往回找話題、想起相關的記憶和人，再問決策模型
-        recall_summary, recall_detail = "", ""
+        recall_summary, recall_detail, recall_columns = "", "", {}
         if decision.recall_enabled and scene in ("text", "text_emote") and self._latest_inbound.get(session_id, {}).get("group_id"):
-            recall_summary, recall_detail = await self._run_recall(decision, session_id, window, remembered, numbers, state, scene)
+            recall_summary, recall_detail, recall_columns = await self._run_recall(
+                decision, session_id, window, remembered, numbers, state, scene
+            )
         self.ctx.logger.info(
             f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{numbers[id(picked)]}（可表態 {len(targets)} 則）{summary[:40]}"
             f"（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，情緒「{emotion}」，"
@@ -539,6 +541,7 @@ class EmoteMixin:
             recall=recall_summary,
             context="\n".join(lines),
             recall_detail=recall_detail,
+            columns=recall_columns,
         )
         if scene in ("quick_reaction", "quick_sticker"):
             task = asyncio.create_task(self._quick_send(session_id, scene, emotion, target))
@@ -897,6 +900,11 @@ class EmoteMixin:
                 "decision", [field for field in PAGE_FIELDS["decision"] if field not in PROMPT_FIELDS[2:]]
             ),
             "prompts": self._setting_rows("decision", PROMPT_FIELDS[2:-1]),
+            # 設定分頁每一列旁邊顯示的目前的值
+            "current": {
+                field: row["value"]
+                for field, row in zip(PAGE_FIELDS["decision"], self._setting_rows("decision", PAGE_FIELDS["decision"]), strict=True)
+            },
             "emotions": [{"name": name, "description": text} for name, text in config.emotion_options().items()],
             "threshold": f"{config.emote_threshold:.2f}",
             "last_test": (
@@ -942,6 +950,9 @@ class EmoteMixin:
                     "recall": item.get("recall") or "—",
                     "context": item.get("context") or "—",
                     "recall_detail": item.get("recall_detail") or "—",
+                    "topic": (item.get("columns") or {}).get("topic") or "—",
+                    "understood": (item.get("columns") or {}).get("understood") or "—",
+                    "memory": (item.get("columns") or {}).get("memory") or "—",
                 }
                 for item in decisions
             ],

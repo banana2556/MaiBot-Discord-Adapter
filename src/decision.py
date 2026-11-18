@@ -102,6 +102,7 @@ class DecisionStats:
         recall: str = "",
         context: str = "",
         recall_detail: str = "",
+        columns: Optional[Dict[str, str]] = None,
     ) -> None:
         """記一次情境判斷；失敗的請求不算進平均延遲（多半是逾時，會把平均拉歪）。
 
@@ -135,6 +136,8 @@ class DecisionStats:
                 "recall": recall,
                 "context": context,
                 "recall_detail": recall_detail,
+                # 話題分析頁的欄位：話題串、看得懂嗎、想起的記憶
+                "columns": dict(columns or {}),
             },
         )
 

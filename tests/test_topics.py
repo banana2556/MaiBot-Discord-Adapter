@@ -82,3 +82,18 @@ def test_late_link_card_is_remembered_and_shown(monkeypatch) -> None:
     window = [_message_item(alias(LATEST), "小美", "https://x.com/abc")]
     messages = _load_adapter_module("src.emote").planner_messages(window)
     asyncio.run(env.plugin._wait_for_focus_card("s1", messages))  # 卡片已到，不用等
+
+
+def test_topic_page_shows_thread_understanding_memory_and_current_settings(monkeypatch) -> None:
+    scene = {**_answer("text", 0.8), "topic_2": {"choice": "none"}, "topic_3": {"choice": "t1"}}
+    understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, _ = _setup(monkeypatch, [scene, understood], {"recall_enabled": True})
+    planner = _planner()
+    planner["items"][2:] = [_item(alias(FUNNY), "阿傑", "我顯卡燒了"), _item(alias(LAUGH), "海苔", "週六吃火鍋"),
+                            _item(alias(LATEST), "阿凱", "風扇有轉但沒畫面")]
+    asyncio.run(env.plugin.decide_emote_in_planner(**planner))
+    page = asyncio.run(env.plugin.webui_decision())
+    row = page["decisions"][0]
+    assert row["topic"].startswith("串 ") and row["topic"].endswith(" 則") and row["understood"] == "懂 0.90"
+    assert row["memory"].endswith("・人 1/1") or row["memory"].endswith("/2") or "筆" in row["memory"]
+    assert page["current"]["recall_enabled"] == "開" and "lookup_enabled" in page["current"]
