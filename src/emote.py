@@ -37,7 +37,7 @@ from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import ask as ask_decision
 from .life.common import sent_text, short_time
-from .reply_links import link_questions, parse_links
+from .reply_links import link_questions, parse_links, plain
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
@@ -148,7 +148,7 @@ def planner_messages(items: Any) -> List[Dict[str, Any]]:
         messages.append(
             {
                 "msg_id": attributes.get("msg_id", ""),
-                "user": attributes.get("group_card") or attributes.get("user", ""),
+                "user": plain(attributes.get("group_card") or attributes.get("user", "")),
                 "self": attributes.get("is_self_message") == "true",
                 "text": " ".join(content.split())[:120],
                 "quote": attributes.get("quote", "").split(",")[0],

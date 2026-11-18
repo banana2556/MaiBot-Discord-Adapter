@@ -239,7 +239,7 @@ def test_message_ids_match_maibot_aliases_and_planner_items_are_parsed() -> None
     parsed = emote.planner_messages([{"item_type": "SystemMessageItem", "parts": [{"type": "text", "text": "人設"}]}, item])
     part, end = parsed[0].pop("head")
     assert parsed == [
-        {"msg_id": "mwjoitk", "user": "「A&B」", "self": False, "text": "第一行 第二行 [圖片]", "quote": "", "time": None}
+        {"msg_id": "mwjoitk", "user": "A&B", "self": False, "text": "第一行 第二行 [圖片]", "quote": "", "time": None}
     ]
     assert part is item["parts"][0] and part["text"][end:] == "第一行\n第二行", "head 指向原本的 part，接在訊息頭後面"
 
@@ -320,7 +320,7 @@ def test_decision_runs_once_per_new_message_and_never_touches_planner_tools(monk
     assert len(env.asked) == 2, "每次 planner 啟動只問一次"
     state, questions = env.asked[0]
     assert "你是「麥麥」" in state and "沒有人 @ 你" in state and "（你）：大家在幹嘛" in state
-    assert "#1 「「小明」」：我剛剛跌倒了哈哈哈（已有人按 😂×3）" in state, "別人已經按的表情是線索"
+    assert "#1 「小明」：我剛剛跌倒了哈哈哈（已有人按 😂×3）" in state, "別人已經按的表情是線索"
     assert set(questions["target"]["criteria"]) == {"1", "2", "3"}, "她自己說的話不能當表態對象"
 
 
@@ -334,7 +334,7 @@ def test_quick_reaction_goes_to_the_funny_message_not_the_latest(monkeypatch) ->
         return decided
 
     names, prompt = asyncio.run(scenario())
-    assert names == KEPT_TOOLS and "回應了「「小明」」那則訊息" in prompt and "直接呼叫 stop() 結束" in prompt
+    assert names == KEPT_TOOLS and "回應了「小明」那則訊息" in prompt and "直接呼叫 stop() 結束" in prompt
     assert "不要再發" not in prompt, "不限制她接著再發圖"
     assert env.reactions == [(FUNNY, env.emojis[0])], "按在被大家笑的那則，kekw 的描述是好笑"
     stats = env.plugin._decision_stats.state

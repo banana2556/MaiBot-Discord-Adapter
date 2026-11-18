@@ -72,7 +72,7 @@ def test_decision_request_also_asks_what_each_message_continues(monkeypatch) -> 
     _receive_all(env.plugin)
     asyncio.run(env.plugin.decide_emote_in_planner(**_emote_planner(env.module)))
     state, questions = env.asked[0]
-    assert "# 是訊息編號" in state and "#1 「「小明」」" in state
+    assert "# 是訊息編號" in state and "#1 「小明」" in state
     assert set(questions) >= {"scene", "target", "emotion", "link_1", "link_2", "link_3"}, "同一次請求一起問"
     assert list(questions["link_1"]["criteria"]) == ["you", "none"], "前面只有她說的那句"
     assert env.plugin._reply_links["s1"][alias(LATEST)] == [alias(FUNNY)]
@@ -102,7 +102,7 @@ def test_calling_note_marks_what_each_message_continues(monkeypatch) -> None:
     }
     result = asyncio.run(env.plugin.add_quote_context_to_planner(**kwargs))
     note = result["modified_kwargs"]["items"][0]["parts"][-1]["text"]
-    assert f"msg_id={alias(LATEST)}（「小美」）：真的假的（在接 msg_id={alias(FUNNY)}（「小明」））" in note
+    assert f"msg_id={alias(LATEST)}（小美）：真的假的（在接 msg_id={alias(FUNNY)}（小明））" in note
 
 
 def _item(msg_id, user, text, quote=""):

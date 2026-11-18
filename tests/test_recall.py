@@ -112,7 +112,7 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
 
     note = result["modified_kwargs"]["items"][0]["parts"][-1]["text"]
     assert note == (
-        f"【聯想】回 msg_id={alias(LATEST)}（「小美」）之前，你想起這些。這是聯想，不一定對；和眼前的聊天衝突時以聊天為準，也別逐字說出來：\n"
+        f"【聯想】回 msg_id={alias(LATEST)}（小美）之前，你想起這些。這是聯想，不一定對；和眼前的聊天衝突時以聊天為準，也別逐字說出來：\n"
         "- 上網查到：在聊《虹彩六號：圍攻》（來源：https://r6.example）\n"
         "- 可能在聊：群裡常打虹彩六號：圍攻（把握 0.60）\n"
         "- 「小美」：沒有相關的記憶\n"

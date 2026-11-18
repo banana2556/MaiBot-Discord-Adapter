@@ -72,7 +72,7 @@ def test_planner_and_replyer_get_the_conversation_before_an_old_quoted_message(m
     env, calls = _setup(monkeypatch)
     _, note, texts = _planner(env)
     alias = env.module.display_message_id
-    assert note.startswith("【被回覆的舊訊息】") and f"msg_id={alias(REPLY)}（「小美」）" in note
+    assert note.startswith("【被回覆的舊訊息】") and f"msg_id={alias(REPLY)}（小美）" in note
     assert "明天要不要去看展" in note, "planner 看得到被回覆那則之前在聊什麼"
     assert texts == ["我剛剛跌倒了哈哈哈", "[回覆你：好啊，明天見]真的嗎"]
     assert calls["get_by_id"] == [(OLD, "s1")]
@@ -120,7 +120,7 @@ def test_planner_is_told_who_is_calling_her_until_she_answers(monkeypatch) -> No
 
     _, note, _ = _planner(env, mine, replying, chatting, tools=("reply", "stop"))
     assert note.startswith("【有人在找你】")
-    assert f"msg_id={alias(REPLY)}（「小美」）：[回覆你：好啊，明天見]真的嗎" in note
+    assert f"msg_id={alias(REPLY)}（小美）：[回覆你：好啊，明天見]真的嗎" in note
     assert "跌倒" not in note and "【被回覆的舊訊息】" not in note and calls["get_by_id"] == []
 
     # 她回過話之後就不再提；睡覺時段只剩 stop 也不提
