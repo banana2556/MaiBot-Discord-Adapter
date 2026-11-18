@@ -2211,6 +2211,15 @@
             },
             {
               "type": "text",
+              "label": "當時的群聊（# 是訊息編號，和前文判斷對得上）",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "context"
+              }
+            },
+            {
+              "type": "text",
               "label": "前文判斷",
               "value": {
                 "scope": "selection",
@@ -2225,6 +2234,15 @@
                 "scope": "selection",
                 "source": "decisionRow",
                 "field": "recall"
+              }
+            },
+            {
+              "type": "text",
+              "label": "聯想經過",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "recall_detail"
               }
             }
           ]

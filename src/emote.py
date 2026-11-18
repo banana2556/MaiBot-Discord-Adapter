@@ -426,9 +426,19 @@ class EmoteMixin:
             self.ctx.logger.warning(
                 f"表情決策 [{session_id}]：沒拿到有效的情境（可表態 {len(targets)} 則），這輪 planner 自己決定"
             )
-            recall_summary = await self._finish_recall(decision, session_id, recall, answers, "failed") if recall else ""
+            recall_summary, recall_detail = (
+                await self._finish_recall(decision, session_id, recall, answers, "failed") if recall else ("", "")
+            )
             self._decision_stats.record_decision(
-                now, session_id, summary, "failed", latency_ms, links=link_summary, recall=recall_summary
+                now,
+                session_id,
+                summary,
+                "failed",
+                latency_ms,
+                links=link_summary,
+                recall=recall_summary,
+                context="\n".join(lines),
+                recall_detail=recall_detail,
             )
             return None
         probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}
@@ -437,7 +447,9 @@ class EmoteMixin:
         emotions = decision.emotion_options()
         emotion = emotion if emotion in emotions else next(iter(emotions), "開心")
         scene = self._guard_scene(decision, requested, probability, target, session_id)
-        recall_summary = await self._finish_recall(decision, session_id, recall, answers, scene) if recall else ""
+        recall_summary, recall_detail = (
+            await self._finish_recall(decision, session_id, recall, answers, scene) if recall else ("", "")
+        )
         self.ctx.logger.info(
             f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{numbers[id(picked)]}（可表態 {len(targets)} 則）{summary[:40]}"
             f"（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，情緒「{emotion}」，"
@@ -456,6 +468,8 @@ class EmoteMixin:
             probability=probability,
             links=link_summary,
             recall=recall_summary,
+            context="\n".join(lines),
+            recall_detail=recall_detail,
         )
         if scene in ("quick_reaction", "quick_sticker"):
             task = asyncio.create_task(self._quick_send(session_id, scene, emotion, target))
@@ -850,9 +864,11 @@ class EmoteMixin:
                     "probability": f"{item['probability']:.2f}" if item["scene"] != "failed" else "—",
                     "latency": f"{item['latency_ms']} ms",
                     "message": item["message"],
-                    # 舊紀錄沒有這兩欄
+                    # 舊紀錄沒有這幾欄
                     "links": item.get("links") or "—",
                     "recall": item.get("recall") or "—",
+                    "context": item.get("context") or "—",
+                    "recall_detail": item.get("recall_detail") or "—",
                 }
                 for item in decisions
             ],

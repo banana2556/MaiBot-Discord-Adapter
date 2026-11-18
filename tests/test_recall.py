@@ -51,6 +51,8 @@ def _setup(monkeypatch, answers, decision):
             return f"p-{kwargs['user_id']}"
         if name == "api.call":
             return LOOKUP
+        if name == "llm.generate":
+            return {"success": True, "response": "R6 羚羊 MP5 盾牌\n（多的行不要）"}
         if name != "knowledge.search":
             return await original(name, **kwargs)
         if not kwargs["person_id"]:
@@ -106,8 +108,13 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
         "hint": "群裡常打虹彩六號：圍攻",
         "stream_id": "s1",
     }, "前文：回覆鏈和 @ 的人剛說的"
-    searched = [(kwargs["person_id"], kwargs["query"]) for name, kwargs in calls if name == "knowledge.search"]
-    assert ("p-u2", "阿華 今天好累 晚上要打R6嗎 羚羊拿MP5打盾牌") in searched, "整體印象：名字＋這段文字"
+    keywords = next(kwargs for name, kwargs in calls if name == "llm.generate")
+    assert "「小美」：羚羊拿MP5打盾牌" in keywords["prompt"] and keywords["task_name"] == "utils"
+    searches = [kwargs for name, kwargs in calls if name == "knowledge.search"]
+    assert all(kwargs["group_id"] == "10" and kwargs["chat_id"] == "s1" for kwargs in searches), "和 query_memory 一樣帶群號"
+    searched = [(kwargs["person_id"], kwargs["query"]) for kwargs in searches]
+    assert ("", "R6 羚羊 MP5 盾牌") in searched, "群記憶用小模型寫的關鍵字查，不用整段原文"
+    assert ("p-u2", "阿華 R6 羚羊 MP5 盾牌") in searched, "整體印象：名字＋關鍵字"
     assert ("p-u2", "群裡常打虹彩六號：圍攻") in searched, "有了話題再用話題查"
 
     note = result["modified_kwargs"]["items"][0]["parts"][-1]["text"]
@@ -121,7 +128,11 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
     )
     summary = "看不懂 0.70・想到 m1（0.60）・人 1/3・上網「羚羊 MP5 盾牌」"
     assert env.plugin._decision_stats.state["decisions"][0]["recall"] == summary
-    assert asyncio.run(env.plugin.webui_decision())["decisions"][0]["recall"] == summary
+    row = asyncio.run(env.plugin.webui_decision())["decisions"][0]
+    assert row["recall"] == summary
+    assert "#3 「小美」：羚羊拿MP5打盾牌" in row["context"], "詳情看得到 # 編號對應的訊息"
+    assert row["recall_detail"].startswith("關鍵字：R6 羚羊 MP5 盾牌\n群記憶：\nm1. 群裡常打虹彩六號：圍攻")
+    assert "「小美」：沒查到" in row["recall_detail"] and row["recall_detail"].endswith(note)
 
     # 同一回合後面的請求（不再問決策模型）也帶著；replyer 回的是那則才給
     later = asyncio.run(env.plugin.decide_emote_in_planner(**_planner()))
@@ -142,6 +153,21 @@ def test_unsure_recall_asks_her_to_hedge_and_lookup_only_when_enabled(monkeypatc
     note = result["modified_kwargs"]["items"][0]["parts"][-1]["text"]
     assert "看不出是哪一筆：群裡常打虹彩六號：圍攻；上週在聊顯卡" in note and note.endswith(recall.UNSURE)
     assert not any(name == "api.call" for name, _ in calls), "沒開上網查"
+
+    # 寫不出關鍵字時改用原文查
+    failing, failing_calls = _setup(monkeypatch, [answers], {"recall_enabled": True})
+    original = failing.ctx.call_capability
+
+    async def no_keywords(name, **kwargs):
+        if name == "llm.generate":
+            failing_calls.append((name, kwargs))
+            return {"success": False, "error": "沒有模型"}
+        return await original(name, **kwargs)
+
+    failing.ctx.call_capability = no_keywords
+    asyncio.run(failing.plugin.decide_emote_in_planner(**_planner()))
+    queries = [kwargs["query"] for name, kwargs in failing_calls if name == "knowledge.search" and not kwargs["person_id"]]
+    assert queries[0] == "今天好累 晚上要打R6嗎 羚羊拿MP5打盾牌"
 
     off, off_calls = _setup(monkeypatch, [_answer("text", 0.8)], {})
     asyncio.run(off.plugin.decide_emote_in_planner(**_planner()))

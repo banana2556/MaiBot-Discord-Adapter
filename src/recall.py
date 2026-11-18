@@ -4,7 +4,8 @@
 想錯時靠接下來的話修正，沒把握就用問的。照這個順序，在表情決策那次請求前後做（要回時才想，不邊聽邊想）：
 
 1. 喚起：要回的那則（叫她的優先，否則最新一則）連同前文（reply_links.context_ids 的明確連結），
-   查群記憶（文字聯想），每個參與者再用「名字＋這段文字」限定這個人查（整體印象）。
+   先請小模型寫成檢索關鍵字（整段原文向量比對分數過不了門檻），查群記憶（文字聯想），
+   每個參與者再用「名字＋關鍵字」限定這個人查（整體印象）。
    人物畫像沒開放給插件，用限定人物的記憶檢索代替。
 2. 整合：決策模型同一次請求多兩題：看得懂這段在聊什麼嗎、哪一筆記憶最有關（可選都無關）。
    記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），不直接取最像的那筆。
@@ -38,6 +39,14 @@ CONFIDENT = 0.5
 UNDERSTAND = "recall_understand"
 PICK = "recall_pick"
 NOTE_HEAD = "【聯想】回 msg_id={msg_id}（{user}）之前，你想起這些。這是聯想，不一定對；和眼前的聊天衝突時以聊天為準，也別逐字說出來："
+# 記憶檢索是向量比對：整段聊天原文太長太雜，分數常過不了門檻，先請小模型寫成關鍵字再查
+QUERY_TASK = "utils"
+QUERY_TIMEOUT_SECONDS = 15
+QUERY_PROMPT = """下面是 Discord 群聊裡的一段對話：
+{chat}
+
+寫一行記憶檢索用的關鍵字（3～8 個詞，空格分開）：對話裡的遊戲、作品、人物、事件、梗、術語，和這段在聊的主題。
+只輸出關鍵字這一行，不要解釋。"""
 UNSURE = "你對這段在聊什麼沒有把握：要回的話可以用問的（例如「你們在說……嗎？」），或接得保守一點，別把猜測當成事實。"
 
 _HIT = re.compile(r"(?:^|\n)\s*\d+\.\s*")
@@ -149,6 +158,20 @@ def recall_note(recall: Mapping[str, Any], picked: str, confidence: float, looku
     return NOTE_HEAD.format(msg_id=focus["msg_id"], user=focus["user"]) + "\n" + "\n".join(lines)
 
 
+def recall_detail(recall: Mapping[str, Any], lookup: Mapping[str, Any], note: str) -> str:
+    """判斷詳情裡的聯想經過：用什麼關鍵字查、每一邊查到什麼、上網結果、最後給 planner 的那段。"""
+    hits = "".join(f"\nm{index}. {hit}" for index, hit in enumerate(recall["hits"], 1))
+    lines = [f"關鍵字：{recall['query']}", f"群記憶：{hits or '沒查到'}"]
+    for person in recall["people"]:
+        found = list(dict.fromkeys([*person["impression"], *person.get("details", [])]))
+        state = "；".join(found) if found else "沒查到" if person.get("person_id") else "找不到這個人的人物 ID"
+        lines.append(f"「{person['name']}」：{state}")
+    if lookup:
+        lines.append(f"上網「{lookup.get('query', '')}」：" + str(lookup.get("summary") or f"失敗：{lookup.get('error', '')}"))
+    lines.append("給 planner 的：" + (f"\n{note}" if note else "沒有（什麼都沒想起來，也不缺把握）"))
+    return "\n".join(lines)
+
+
 class RecallMixin:
     """需要主插件提供 ctx、_append_system_text、_client_manager，和 EmoteMixin 的 _reply_links。"""
 
@@ -161,7 +184,13 @@ class RecallMixin:
         try:
             result = await asyncio.wait_for(
                 self.ctx.call_capability(
-                    "knowledge.search", query=query[:QUERY_CHARS], limit=limit, chat_id=session_id, person_id=person_id
+                    "knowledge.search",
+                    query=query[:QUERY_CHARS],
+                    limit=limit,
+                    chat_id=session_id,
+                    person_id=person_id,
+                    # 和 planner 內建的 query_memory 一樣帶群號：記憶的聊天過濾用群號比對，只給 chat_id 可能整個被濾掉
+                    group_id=str(self._latest_inbound.get(session_id, {}).get("group_id") or ""),
                 ),
                 SEARCH_TIMEOUT_SECONDS,
             )
@@ -194,19 +223,37 @@ class RecallMixin:
         context = context_ids(window, focus["msg_id"], remembered.get(focus["msg_id"]) or {}, judged)
         by_id = {message["msg_id"]: message for message in window}
         said = [by_id[msg_id] for msg_id in [*context, focus["msg_id"]]]
-        text = " ".join(message["text"] for message in said)
+        chat = "\n".join(("（你）" if message["self"] else f"「{plain(message['user'])}」") + f"：{message['text']}" for message in said)
         user = getattr(getattr(self._client_manager, "client", None), "user", None)
         people = participants(window, focus, context, remembered, str(getattr(user, "id", "") or ""))
-        for person, person_id in zip(people, await asyncio.gather(*(self._person_id(person) for person in people)), strict=True):
+        query, person_ids = await asyncio.gather(
+            self._recall_query(chat), asyncio.gather(*(self._person_id(person) for person in people))
+        )
+        query = query or " ".join(message["text"] for message in said)
+        for person, person_id in zip(people, person_ids, strict=True):
             person["person_id"] = person_id
         hits, *impressions = await asyncio.gather(
-            self._search_memory(session_id, text),
-            *(self._person_memories(session_id, person, f"{person['name']} {text}", PERSON_HITS) for person in people),
+            self._search_memory(session_id, query),
+            *(self._person_memories(session_id, person, f"{person['name']} {query}", PERSON_HITS) for person in people),
         )
         for person, impression in zip(people, impressions, strict=True):
             person["impression"] = impression
-        chat = "\n".join(("（你）" if message["self"] else f"「{plain(message['user'])}」") + f"：{message['text']}" for message in said)
-        return {"focus": focus, "chat": chat, "people": people, "hits": hits}
+        return {"focus": focus, "chat": chat, "query": query, "people": people, "hits": hits}
+
+    async def _recall_query(self, chat: str) -> str:
+        """請小模型把這段聊天寫成檢索關鍵字；失敗時回傳空字串（改用原文查）。"""
+        try:
+            reply = await asyncio.wait_for(
+                self.ctx.call_capability("llm.generate", prompt=QUERY_PROMPT.format(chat=chat), task_name=QUERY_TASK),
+                QUERY_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # 寫不出關鍵字就用原文查
+            reply = {"error": repr(exc)}
+        text = str(reply.get("response") or "").strip() if isinstance(reply, Mapping) and reply.get("success") else ""
+        if not text:
+            error = reply.get("error") if isinstance(reply, Mapping) else reply
+            self.ctx.logger.warning(f"聯想：寫檢索關鍵字失敗，改用原文查：{error}")
+        return text.splitlines()[0].strip() if text else ""
 
     def _recall_ask(self, recall: Mapping[str, Any], number: str) -> tuple[str, Dict[str, Dict[str, Any]]]:
         """接在決策模型 state 後面的文字和要加的題目（表情決策那次請求一起問）。"""
@@ -214,8 +261,12 @@ class RecallMixin:
 
     async def _finish_recall(
         self, decision: Any, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]], scene: str
-    ) -> str:
-        """第 2～5 步：照決策模型的答案挑記憶、看不懂就上網查、用話題查參與者，記下給 planner 的那段；回傳頁面摘要。"""
+    ) -> tuple[str, str]:
+        """第 2～5 步：照決策模型的答案挑記憶、看不懂就上網查、用話題查參與者，記下給 planner 的那段。
+
+        Returns:
+            頁面「聯想」欄的摘要，和判斷詳情裡的經過（用什麼查、查到什麼、最後給 planner 什麼）。
+        """
         understand = (answers or {}).get(UNDERSTAND) or {}
         pick = (answers or {}).get(PICK) or {}
         choice = str(pick.get("choice") or "")
@@ -248,7 +299,7 @@ class RecallMixin:
         ]
         if lookup:
             parts.append(f"上網「{lookup.get('query', '')}」" + ("" if lookup.get("summary") else f"失敗：{lookup.get('error', '')}"))
-        return "・".join(parts)
+        return "・".join(parts), recall_detail(recall, lookup, note)
 
     async def _lookup(self, session_id: str, chat: str, hint: str) -> Dict[str, Any]:
         """請 linux 沙盒電腦插件上網查；沒裝、沒權限或逾時都回傳帶 error 的 dict。"""
