@@ -73,10 +73,6 @@ def add_member(store: Dict[str, Any], topic_id: Optional[int], message: Mapping[
     topic = store["topics"][topic_id]
     topic["members"].append(message["msg_id"])
     topic["lines"].append(line)
-    # replyer 的聊天紀錄沒有 msg_id，只對得上「時間｜發話人」（她自己是空字串）
-    if message.get("time"):
-        who = "" if message.get("self") else message["user"]
-        topic.setdefault("heads", set()).add(f"{datetime.fromtimestamp(message['time']):%H:%M:%S}|{who}")
     topic["last"] = max(topic["last"], float(message.get("time") or time.time()))
     store["topics"].move_to_end(topic_id)
     store["of"][message["msg_id"]] = topic_id
@@ -196,61 +192,3 @@ def topic_members(store: Mapping[str, Any], msg_id: str) -> List[str]:
     """這則所在那串的 msg_id；還沒分配時是空清單。"""
     topic_id = store["of"].get(msg_id)
     return list(store["topics"][topic_id]["members"]) if topic_id in store["topics"] else []
-
-
-def topic_heads(store: Mapping[str, Any], msg_id: str) -> set:
-    """這則所在那串每則的「時間｜發話人」；還沒分配時是空集合。"""
-    topic_id = store["of"].get(msg_id)
-    return set(store["topics"][topic_id].get("heads", ())) if topic_id in store["topics"] else set()
-
-
-# replyer 的聊天紀錄（MaiBot 1.4.6 起整段塞在一則 user 訊息裡）：每行 ``[時:分:秒] 「名字」说：…``，
-# 她自己是 ``名字(你)说：`` 或 ``你说：``；圖片 part 跟在那行後面；聊天紀錄後面接「现在…引起了你的注意」
-_LINE = re.compile(r"\n(?=\[\d\d:\d\d:\d\d\] )")
-_HEAD = re.compile(r"\[(\d\d:\d\d:\d\d)\] (?:「(.*?)」(?:\[回复了| ?说：))?")
-_TAIL = re.compile(r"\n\n现在[^\n]*引起了你的注意")
-
-
-def keep_thread_lines(parts: List[Dict[str, Any]], heads: set) -> Optional[Tuple[List[Dict[str, Any]], int]]:
-    """只留聊天紀錄裡屬於這串的行（連同跟在後面的圖片），回傳 (新的 parts, 略過幾行)。
-
-    找不到聊天紀錄的結尾、一行都對不上時回傳 None，不動。
-    """
-    # 每段是一串 part：第一段是模板開頭，之後每段是一行聊天和跟在後面的圖片
-    segments: List[List[Dict[str, Any]]] = [[]]
-    for part in parts:
-        if part.get("type") != "text":
-            segments[-1].append(part)
-            continue
-        pieces = _LINE.split(str(part.get("text") or ""))
-        if pieces[0]:
-            segments[-1].append({**part, "text": pieces[0]})
-        segments.extend([{**part, "text": "\n" + piece}] for piece in pieces[1:])
-    last = segments[-1]
-    found = next(
-        ((index, match) for index in reversed(range(len(last))) if last[index].get("type") == "text"
-         for match in reversed(list(_TAIL.finditer(last[index]["text"])))),
-        None,
-    )
-    if len(segments) < 2 or found is None:
-        return None
-    index, match = found
-    text = last[index]["text"]
-    tail = [{**last[index], "text": text[match.start():]}, *last[index + 1:]]
-    segments[-1] = [*last[:index], *([{**last[index], "text": text[:match.start()]}] if match.start() else [])]
-    kept, dropped = [], 0
-    for segment in segments[1:]:
-        head = _HEAD.match(segment[0]["text"].lstrip("\n")) if segment and segment[0].get("type") == "text" else None
-        if head is None or f"{head.group(1)}|{head.group(2) or ''}" in heads:
-            kept.append(segment)
-        else:
-            dropped += 1
-    if not dropped or len(kept) == 0:
-        return None
-    merged: List[Dict[str, Any]] = []
-    for part in [*segments[0], *(part for segment in kept for part in segment), *tail]:
-        if merged and part.get("type") == "text" and merged[-1].get("type") == "text":
-            merged[-1] = {**merged[-1], "text": merged[-1]["text"] + part["text"]}
-        else:
-            merged.append(part)
-    return merged, dropped

@@ -11,7 +11,9 @@ MaiBot 的 Discord 插件，跑在 MaiBot 的插件 Runner 裡（`maibot_sdk`）
 - `src/recv_handler/`：Discord → MaiBot；`src/send_handler/`：MaiBot → Discord（含 OpenCC 轉繁體）。
 - `src/voice/`：語音頻道、VAD、STT/TTS 服務商；`src/life/`：日常生活、主動話題、共用的狀態讀寫；`src/decision.py`：決策模型與統計。
 - `src/emote.py`（`EmoteMixin`）：表情情境判斷、只按表情／只發圖、回覆後附圖、`discord_emote` 工具與決策模型頁 API；`src/emote_library.py`：MaiBot 表情庫的向量檢索。
-- `../MaiBot`：MaiBot 本體，只讀參考（hook 載荷、capability 實作、WebUI 頁面 schema）。
+- `../MaiBot`：MaiBot 本體，用 fork `banana2556/MaiBot` 的 `custom` 分支（遠端 `fork`）：上游正式版加上我們的修改，正式機也跑這個分支。
+  平常只讀參考（hook 載荷、capability 實作、WebUI 頁面 schema）；要改主程式先請求許可，改了提交到 `custom`。
+  目前的修改：記憶檢索的實體查詢不用刪除索引、replyer 照 `reply_tool_args["_keep_message_ids"]` 過濾聊天紀錄（回覆前文用）。
 
 ## 測試
 

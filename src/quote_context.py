@@ -11,7 +11,7 @@ MaiBot 的 planner 上下文只用 ``quote="msg_id"`` 標出回覆了哪則、�
 開了「回覆前文」（決策模型設定）時，再做兩件事，前文怎麼找見 reply_links.py：
 
 - 「有人在找你」的每則標出它在接哪幾則；
-- replyer 的聊天紀錄只留要回那則所在的話題串（話題串見 topics.py），其他話題的行和圖片都拿掉：
+- replyer 的聊天紀錄只留要回那則所在的話題串（話題串見 topics.py），其他話題的訊息和圖片都不給（要 MaiBot 的 custom 分支）：
   提示詞叫模型「別混在一起」常常沒用，直接不給它看才混不進去。planner 看過全部，它寫給 replyer 的 chat_anlyze 照樣帶著。
 """
 
@@ -24,7 +24,7 @@ from maibot_sdk import HookHandler
 from .emote import display_message_id, planner_messages, tool_names
 from .life.common import readable_chat
 from .reply_links import context_ids
-from .topics import keep_thread_lines, topic_heads
+from .topics import topic_members
 
 # 被回覆的那則連同它之前一共給幾則；往前最多找多久
 CONTEXT_MESSAGES = 8
@@ -160,35 +160,33 @@ class QuoteContextMixin:
         return {"action": "continue", "modified_kwargs": kwargs}
 
     @HookHandler(
-        "maisaka.replyer.before_model_request",
+        "maisaka.replyer.before_request",
         name="discord_reply_context",
         mode="blocking",
-        # 在其他插件往系統提示詞加字之前先刪聊天訊息
-        order="early",
         timeout_ms=1000,
     )
     async def keep_reply_context(self, **kwargs: Any) -> Dict[str, Any]:
-        """replyer 的聊天紀錄只留要回那則所在的話題串（topics.py 分好的），其他話題的行和圖片都拿掉。
+        """replyer 的聊天紀錄只留要回那則所在的話題串（topics.py 分好的），加上分完話題之後才進來的訊息。
 
-        MaiBot 1.4.6 起 replyer 的請求是系統提示加一則 user 訊息，聊天紀錄整段在裡面、沒有 msg_id，
-        所以照話題串記下的「時間｜發話人」逐行對（topics.keep_thread_lines）。那則還沒分到話題串、對不上時不動。
+        把要留的 msg_id 放進 ``reply_tool_args["_keep_message_ids"]``，MaiBot 在組提示詞、挑表達和分圖片名額之前照它過濾
+        （banana2556/MaiBot 的 custom 分支才有，原版 MaiBot 會忽略這個參數）。那則還沒分到話題串時不動。
         """
         session_id = str(kwargs.get("session_id") or "")
-        items = kwargs.get("items")
         store = getattr(self, "_topics", {}).get(session_id)
         if not (
             store
             and self._load_settings().decision.reply_context_enabled
             and self._latest_inbound.get(session_id, {}).get("group_id")
-            and isinstance(items, list)
         ):
             return {"action": "continue"}
         target_id = display_message_id(str(kwargs.get("reply_message_id") or ""))
-        heads = topic_heads(store, target_id)
-        user = next((item for item in reversed(items) if item.get("item_type") == "UserMessageItem"), None)
-        result = keep_thread_lines(user["parts"], heads) if heads and user else None
-        if result is None:
+        members = topic_members(store, target_id)
+        if not members:
             return {"action": "continue"}
-        user["parts"], dropped = result
-        self.ctx.logger.info(f"回覆前文 [{session_id}]：msg_id={target_id} 只留話題串 {len(heads)} 則，略過 {dropped} 行")
+        # 最後一則分過話題的之後才進來的訊息還沒分，可能正是在接這串，先留著
+        arrived = list(self._inbound.get(session_id, {}))
+        last = max((index for index, msg_id in enumerate(arrived) if msg_id in store["of"]), default=len(arrived) - 1)
+        keep = [*members, *arrived[last + 1 :]]
+        kwargs["reply_tool_args"] = {**(kwargs.get("reply_tool_args") or {}), "_keep_message_ids": keep}
+        self.ctx.logger.info(f"回覆前文 [{session_id}]：msg_id={target_id} 只留話題串 {len(members)} 則和新進的 {len(keep) - len(members)} 則")
         return {"action": "continue", "modified_kwargs": kwargs}
