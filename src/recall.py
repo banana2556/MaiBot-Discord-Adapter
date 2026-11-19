@@ -34,7 +34,10 @@ MAX_PEOPLE = 4
 JARGON_LIMIT = 8
 # 人物畫像快取多久；給 planner 的畫像、記憶最多幾個字
 PROFILE_TTL_SECONDS = 1800
-PROFILE_CHARS = 120
+PROFILE_CHARS = 160
+# 人物畫像取哪幾段（照 MaiBot 自己注入畫像時的段落）；黑話的意思最多幾個字
+PROFILE_SECTIONS = ("身份设定", "关系设定", "稳定了解", "相处偏好", "近期互动")
+TERM_CHARS = 60
 NOTE_MEMORY_CHARS = 160
 # 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
 FOCUS_WAIT_SECONDS = 5
@@ -97,16 +100,38 @@ def tidy(memory: str, limit: int = NOTE_MEMORY_CHARS) -> str:
     return clip(f"{date} {line}" if date else line, limit)
 
 
-def whole_terms(jargons: Sequence[Mapping[str, str]], texts: Sequence[str]) -> List[Dict[str, str]]:
-    """黑話比對是字串包含：英數詞要整個詞對上才算（「FF14」裡的 FF、「T1000」裡的 T1 不算）。"""
+def whole_terms(jargons: Sequence[Mapping[str, str]], texts: Sequence[str], names: Sequence[str] = ()) -> List[Dict[str, str]]:
+    """黑話比對是字串包含：英數詞要整個詞對上才算（「FF14」裡的 FF、「T1000」裡的 T1 不算）；
+    參與者的暱稱（「五星」是「五星爛卡」）不算，人物那段已經有。意思只留第一句。"""
     joined = "\n".join(texts)
     kept = []
     for item in jargons:
         term = str(item.get("content") or "")
         if _ASCII_TERM.fullmatch(term) and not re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", joined, re.I):
             continue
-        kept.append({"content": term, "meaning": str(item.get("meaning") or "")})
+        if any(term in name for name in names):
+            continue
+        meaning = re.split(r"(?<=[。！？!?])", str(item.get("meaning") or "").strip(), maxsplit=1)[0]
+        kept.append({"content": term, "meaning": clip(meaning, TERM_CHARS)})
     return kept
+
+
+def profile_brief(profile: str) -> str:
+    """人物畫像（A_memorix 的結構化畫像「# 人物画像 / 人物ID / 别名 / ## 段落」）縮成一行：
+    只取身份、關係、穩定了解、相處偏好和最近兩筆互動，跳過「暂无」和開頭的 ID、別名；不是結構化的就整段截短。"""
+    text = str(profile or "").strip()
+    if not text.startswith("# 人物画像"):
+        return clip(text, PROFILE_CHARS)
+    sections: Dict[str, List[str]] = {}
+    title = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("## "):
+            title = line[3:].strip()
+        elif title and line.startswith("- ") and line != "- 暂无":
+            sections.setdefault(title, []).append(line[2:].strip())
+    facts = [fact for section in PROFILE_SECTIONS for fact in sections.get(section, [])[: 2 if section == "近期互动" else None]]
+    return clip("；".join(facts), PROFILE_CHARS)
 
 
 def thread_messages(window: Sequence[Mapping[str, Any]], members: Sequence[str]) -> List[Mapping[str, Any]]:
@@ -285,13 +310,16 @@ class RecallMixin:
         if not isinstance(result, Mapping) or not result.get("success"):
             person["missed"] = "1"
             return
-        traits = "、".join(str(trait) for trait in result.get("traits") or [] if str(trait).strip())
         summary = str(result.get("summary") or "").strip()
-        text = clip(summary + (f"（{traits}）" if traits else ""), PROFILE_CHARS)
+        traits = "、".join(str(trait) for trait in result.get("traits") or [] if str(trait).strip())
+        if summary.startswith("# 人物画像"):
+            text = profile_brief(summary)  # 結構化畫像已經包含特徵
+        else:
+            text = clip(summary + (f"（{traits}）" if traits else ""), PROFILE_CHARS)
         self._profiles[person_id] = (time.monotonic(), text)
         person["profile"] = text
 
-    async def _terms(self, session_id: str, texts: Sequence[str]) -> List[Dict[str, str]]:
+    async def _terms(self, session_id: str, texts: Sequence[str], names: Sequence[str]) -> List[Dict[str, str]]:
         """這串的文字裡出現的、這個群學過的黑話；能力不存在或失敗時是空清單。"""
         try:
             result = await self.ctx.call_capability("jargon.match", session_id=session_id, texts=list(texts), limit=JARGON_LIMIT)
@@ -300,7 +328,7 @@ class RecallMixin:
         if not isinstance(result, Mapping) or not result.get("success"):
             self.ctx.logger.debug(f"聯想：比對黑話失敗：{result.get('error') if isinstance(result, Mapping) else result}")
             return []
-        return whole_terms(result.get("jargons") or [], texts)
+        return whole_terms(result.get("jargons") or [], texts, names)
 
     async def _run_recall(
         self,
@@ -362,7 +390,7 @@ class RecallMixin:
             person["person_id"] = person_id
         hits, terms, *_ = await asyncio.gather(
             self._search_memory(session_id, query),
-            self._terms(session_id, [message["text"] for message in said]),
+            self._terms(session_id, [message["text"] for message in said], [person["name"] for person in people]),
             *(self._profile(session_id, person) for person in people),
         )
         return {

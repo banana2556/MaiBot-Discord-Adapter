@@ -98,6 +98,18 @@ def test_pieces() -> None:
     assert recall.tidy("x" * 200, 10) == "x" * 9 + "…"
     terms = recall.whole_terms(JARGONS["jargons"] + [{"content": "FF", "meaning": "開拓動漫祭"}], ["羚羊拿MP5打盾牌", "FF14 好玩"])
     assert [term["content"] for term in terms] == ["MP5", "羚羊"], "英數詞要整個詞對上：MP5 裡的 P5、FF14 裡的 FF 不算"
+    long = [{"content": "T1", "meaning": "「T1」指韓國英雄聯盟戰隊。上下文在討論選手與陣容，例如宙斯、Oner。"}, {"content": "五星", "meaning": "某人的暱稱"}]
+    terms = recall.whole_terms(long, ["T1 又換人", "五星說的"], ["五星爛卡"])
+    assert terms == [{"content": "T1", "meaning": "「T1」指韓國英雄聯盟戰隊。"}], "意思只留第一句；參與者的暱稱不當黑話"
+    profile = (
+        "# 人物画像\n人物ID: 01e0bd\n主称呼: 糖奶\n别名: 「糖奶」、糖奶\n\n## 身份设定\n- 糖奶从事优化工程方法相关工作。\n\n"
+        "## 关系设定\n- 糖奶要求资讯科全员通过其面试。\n\n## 稳定了解\n- 暂无\n\n## 相处偏好\n- 暂无\n\n"
+        "## 近期互动\n- 一\n- 二\n- 三\n\n## 不确定信息\n- 可能是学生\n\n## 维护备注\n- 自动画像仅供内部参考。"
+    )
+    assert recall.profile_brief(profile) == "糖奶从事优化工程方法相关工作。；糖奶要求资讯科全员通过其面试。；一；二", (
+        "不要開頭的人物 ID 和別名，跳過暂无、不確定和維護備註，近期互動只取兩筆"
+    )
+    assert recall.profile_brief("# 人物画像\n人物ID: x\n## 身份设定\n- 暂无") == "", "全部暂无就當沒有畫像"
     window = [
         {"msg_id": "a", "user": "「A」", "self": False, "text": "x"},
         {"msg_id": "b", "user": "「B」", "self": False, "text": "x"},
