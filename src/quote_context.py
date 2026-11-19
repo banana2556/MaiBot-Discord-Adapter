@@ -11,8 +11,8 @@ MaiBot 的 planner 上下文只用 ``quote="msg_id"`` 標出回覆了哪則、�
 開了「回覆前文」（決策模型設定）時，再做兩件事，前文怎麼找見 reply_links.py：
 
 - 「有人在找你」的每則標出它在接哪幾則；
-- replyer 只看要回那則的前文、最近 KEEP_RECENT 則和她自己說過的話，其他交錯的訊息先略過：
-  提示詞叫模型「別混在一起」常常沒用，直接不給它看才混不進去。planner 看過全部，它寫給 replyer 的回覆方向照樣帶著。
+- replyer 的聊天紀錄只留要回那則所在的話題串（話題串見 topics.py），其他話題的行和圖片都拿掉：
+  提示詞叫模型「別混在一起」常常沒用，直接不給它看才混不進去。planner 看過全部，它寫給 replyer 的 chat_anlyze 照樣帶著。
 """
 
 from collections import OrderedDict
@@ -24,6 +24,7 @@ from maibot_sdk import HookHandler
 from .emote import display_message_id, planner_messages, tool_names
 from .life.common import readable_chat
 from .reply_links import context_ids
+from .topics import keep_thread_lines, topic_heads
 
 # 被回覆的那則連同它之前一共給幾則；往前最多找多久
 CONTEXT_MESSAGES = 8
@@ -43,8 +44,6 @@ PLANNER_NOTE = (
     "這是被回覆的那則和它之前的對話，用來理解對方為什麼這樣回：\n"
 )
 REPLYER_NOTE = "被回覆的那則已經不在聊天紀錄裡，這是它（最後一則）和之前的對話：\n"
-# replyer 不管前文，最後幾則都留著，群裡當下在聊什麼還看得到
-KEEP_RECENT = 5
 
 
 class QuoteContextMixin:
@@ -169,42 +168,27 @@ class QuoteContextMixin:
         timeout_ms=1000,
     )
     async def keep_reply_context(self, **kwargs: Any) -> Dict[str, Any]:
-        """replyer 只看要回那則的前文、最近幾則和她自己說的話，其他交錯的訊息略過，再用一句話說它在接哪幾則。
+        """replyer 的聊天紀錄只留要回那則所在的話題串（topics.py 分好的），其他話題的行和圖片都拿掉。
 
-        replyer 的上下文只有系統提示、聊天訊息（她說的是不帶訊息頭的 assistant 文字）和幾段指示，
-        沒有工具呼叫，刪掉部分聊天訊息不會破壞請求格式。要回的那則不在上下文裡時不動。
+        MaiBot 1.4.6 起 replyer 的請求是系統提示加一則 user 訊息，聊天紀錄整段在裡面、沒有 msg_id，
+        所以照話題串記下的「時間｜發話人」逐行對（topics.keep_thread_lines）。那則還沒分到話題串、對不上時不動。
         """
         session_id = str(kwargs.get("session_id") or "")
         items = kwargs.get("items")
+        store = getattr(self, "_topics", {}).get(session_id)
         if not (
-            self._load_settings().decision.reply_context_enabled
+            store
+            and self._load_settings().decision.reply_context_enabled
             and self._latest_inbound.get(session_id, {}).get("group_id")
             and isinstance(items, list)
         ):
             return {"action": "continue"}
-        messages = planner_messages(items)
         target_id = display_message_id(str(kwargs.get("reply_message_id") or ""))
-        target = next((message for message in messages if message["msg_id"] == target_id), None)
-        if target is None:
+        heads = topic_heads(store, target_id)
+        user = next((item for item in reversed(items) if item.get("item_type") == "UserMessageItem"), None)
+        result = keep_thread_lines(user["parts"], heads) if heads and user else None
+        if result is None:
             return {"action": "continue"}
-        context = self._context_of(session_id, messages, target_id)
-        keep = {target_id, *context, *(message["msg_id"] for message in messages[-KEEP_RECENT:])}
-        kept = [item for item in items if all(m["msg_id"] in keep for m in planner_messages([item]))]
-        dropped = len(items) - len(kept)
-        if not context and not dropped:
-            return {"action": "continue"}
-        kwargs["items"] = kept
-        by_id = {message["msg_id"]: message for message in messages}
-        note = f"【回覆前文】你要回的 msg_id={target_id}（{target['user']}）"
-        if context:
-            note += "在接：\n" + "\n".join(
-                f"- msg_id={msg_id}（{'你' if by_id[msg_id]['self'] else by_id[msg_id]['user']}）：{by_id[msg_id]['text']}"
-                for msg_id in context
-            )
-        else:
-            note += "看不出在接前面哪一則，照最近的聊天回。"
-        if dropped:
-            note += f"\n群裡同時在聊的其他話題（{dropped} 則）這次先略過，回覆只接這段。"
-        self._append_system_text(kwargs, note)
-        self.ctx.logger.info(f"回覆前文 [{session_id}]：msg_id={target_id} 在接 {len(context)} 則，略過 {dropped} 則")
+        user["parts"], dropped = result
+        self.ctx.logger.info(f"回覆前文 [{session_id}]：msg_id={target_id} 只留話題串 {len(heads)} 則，略過 {dropped} 行")
         return {"action": "continue", "modified_kwargs": kwargs}

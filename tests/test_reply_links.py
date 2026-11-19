@@ -105,50 +105,67 @@ def test_calling_note_marks_what_each_message_continues(monkeypatch) -> None:
     assert f"msg_id={alias(LATEST)}（小美）：真的假的（在接 msg_id={alias(FUNNY)}（小明））" in note
 
 
-def _item(msg_id, user, text, quote=""):
-    attrs = f'msg_id="{msg_id}"' + (f' quote="{quote}"' if quote else "")
-    head = f'<message {attrs} time="15:11:30" user="{user}">\n'
-    return {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": head + text}]}
+topics = _load_adapter_module("src.topics")
+
+
+def _at(clock):
+    from datetime import datetime
+
+    return datetime.fromisoformat(f"2026-11-19T{clock}.218").timestamp()
 
 
 def _replyer_items():
+    """MaiBot 1.4.6 的 replyer 請求：系統提示加一則 user 訊息，聊天紀錄整段在裡面，圖片跟在那行後面。"""
+    image = {"type": "image", "image_format": "gif", "image_base64": "R0lG"}
     return [
         {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]},
-        _item("100", "小明", "週末去爬山嗎"),
-        _item("101", "老王", "顯卡又漲了"),
-        _item("102", "阿強", "真的貴", quote="101"),
-        _item("103", "阿花", "好啊", quote="100"),
-        {"item_type": "AssistantMessageItem", "meta": {}, "parts": [{"type": "text", "text": "我也想去"}]},
-        _item("104", "老王", "4090 要三萬"),
-        _item("105", "阿強", "瘋了"),
-        _item("106", "老王", "等明年吧"),
-        _item("107", "阿強", "也是"),
-        _item("108", "老王", "嗯"),
-        {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": "你想要回复的消息是…"}]},
+        {
+            "item_type": "UserMessageItem",
+            "meta": {},
+            "parts": [
+                {"type": "text", "text": "\n".join([HEAD, PS5, "[09:00:28] 「老王」说：<a:dissolve:1>[表情包]"])},
+                image,
+                {"type": "text", "text": "\n" + "\n".join([LINK, CARD, "[09:19:21] 「Clover」说：<a:pet:2>[表情包]"])},
+                image,
+                {"type": "text", "text": "\n" + "\n".join([TARGET, MINE]) + TAIL},
+            ],
+        },
     ]
 
 
-def test_replyer_only_sees_the_targets_context_and_recent_messages(monkeypatch) -> None:
+HEAD = "你正在群里聊天，下面是群里正在聊的内容:\n当前时间：2026-11-19 09:25:42"
+PS5 = "[08:59:12] 「阿強」说：為什麼PS5不是每個人都有的東西"
+LINK = "[09:06:36] 「海苔」说：https://www.plurk.com/p/x"
+CARD = "[09:06:36] 「ermiana」[回复了「海苔」的消息: https://www.plurk.com/p/x] 说：[卡片: 要入坑FF14\n\n買房要打高難嗎]"
+TARGET = "[09:23:33] 「ODST」说：國際服用定型話就能溝通了"
+MINE = "[09:24:26] Claude醬(你)说：買房不用打高難"
+TAIL = "\n\n现在「ODST」说的：國際服用定型話就能溝通了 引起了你的注意。\n现在，你说："
+
+
+def test_replyer_only_sees_the_targets_topic_thread(monkeypatch) -> None:
     env = _env(monkeypatch, decision={"reply_context_enabled": True})
     env.plugin._remember_inbound("s1", _inbound("103"))
+    store = topics.new_store()
+    thread = None
+    for msg_id, user, clock, me in (("101", "海苔", "09:06:36", False), ("102", "ermiana", "09:06:36", False),
+                                    ("103", "ODST", "09:23:33", False), ("104", "Claude醬", "09:24:26", True)):
+        thread = topics.add_member(store, thread, {"msg_id": msg_id, "user": user, "time": _at(clock), "self": me}, "")
+    topics.add_member(store, None, {"msg_id": "100", "user": "阿強", "time": _at("08:59:12"), "self": False}, "")
+    env.plugin._topics = {"s1": store}
     kwargs = {"items": _replyer_items(), "session_id": "s1", "reply_message_id": "103"}
     result = asyncio.run(env.plugin.keep_reply_context(**kwargs))
-    items = result["modified_kwargs"]["items"]
-    kept = [item["parts"][0]["text"].split('"')[1] for item in items if item["parts"][0]["text"].startswith("<message")]
-    assert kept == ["100", "103", "104", "105", "106", "107", "108"], "顯卡那段較早的兩則略過"
-    assert items[3]["item_type"] == "AssistantMessageItem", "她說過的話留著"
-    assert items[-1]["parts"][0]["text"].startswith("你想要回复"), "不是聊天訊息的指示留著"
-    assert items[0]["parts"][-1]["text"] == (
-        "【回覆前文】你要回的 msg_id=103（阿花）在接：\n- msg_id=100（小明）：週末去爬山嗎\n"
-        "群裡同時在聊的其他話題（2 則）這次先略過，回覆只接這段。"
+    parts = result["modified_kwargs"]["items"][1]["parts"]
+    assert parts == [{"type": "text", "text": "\n".join([HEAD, LINK, CARD, TARGET, MINE]) + TAIL}], (
+        "別的話題和只有表情的行連同圖片都拿掉，她在這串說的話留著"
     )
 
-    # 要回的那則不在上下文、沒開回覆前文：都不動
+    # 要回的那則沒分到話題串、沒開回覆前文：都不動
     assert asyncio.run(env.plugin.keep_reply_context(**{**kwargs, "items": _replyer_items(), "reply_message_id": "999"})) == {
         "action": "continue"
     }
     off = _env(monkeypatch)
     off.plugin._remember_inbound("s1", _inbound("103"))
+    off.plugin._topics = {"s1": store}
     assert asyncio.run(off.plugin.keep_reply_context(**{**kwargs, "items": _replyer_items()})) == {"action": "continue"}
 
 
