@@ -1,22 +1,17 @@
-"""表情：planner 啟動時判斷這輪要用文字、文字＋附圖、只按表情還是只發圖參與群聊，並挑表情送出。
+"""話題分析的入口和 discord_emote 工具。
 
-- 收到新的 Discord 訊息後第一次進 planner 時，拿 planner 這輪看到的同一份上下文（hook 的 items），
-  取最後幾則別人的訊息當可以表態的對象，一次問決策模型：情境、最值得表態的是哪一則、什麼情緒。
-  送幾則、提示詞、情境說明和情緒選項都在「DC生活 → 決策模型」頁面調整（DecisionConfig）。
-  群聊裡真正好笑的那則常常已經被別人接了幾句，所以表態對象不一定是最新一則。
-- 不動 planner 的工具：拿掉工具時 planner 會把回覆或表情直接寫在自己的正文裡，打亂 reply / replyer 的流程。
-  決策結果只用一句系統提示告訴 planner 已經做了什麼、這輪該怎麼收尾。
-- 只按表情／只發圖：替她做，並提醒 planner 這輪不用再說話（MaiBot 不讓插件跳過 planner）；
-  多久表態一次由 planner 的啟動頻率決定。
-- 文字＋附圖：等她的文字送出、停 APPEND_DELAY_SECONDS 秒沒再送，再附一張圖（回覆可能被拆成好幾則）。
-- 不限制連續發圖：替她發過之後，planner 想再發也可以。
-- 只挑這個伺服器能直接發的貼圖和自訂表情（MaiBot 表情庫裡的一般圖片送出去會變成圖片附件，不挑），
-  用「名字：描述」的向量相似度挑（EmoteLibrary），不經過 LLM：排除這個聊天最近用過的，
+- 群聊收到新訊息後第一次進 planner 時，拿 planner 這輪看到的同一份上下文：
+  1. 問決策模型把還沒分配的訊息分到話題串（topics.py）；
+  2. 選焦點：她上次說話之後叫她的最新一則，沒有就是最新一則別人說的；
+  3. 聯想（recall.py）。
+  之後 planner、表達方式選擇和 replyer 都只看焦點那串（quote_context.py 過濾）；要不要說話、按不按表情、
+  回哪一則都由 planner 自己決定。
+- planner 的上下文拿掉自訂表情的 ID 和圖，也拿掉 MaiBot 原生的 send_emoji（discord_emote 也能發貼圖，兩個都留就是兩套決定）。
+- discord_emote 工具照情緒用向量挑伺服器的表情或貼圖（EmoteLibrary），不經過 LLM：排除這個聊天最近用過的，
   再從前 PICK_POOL 名照相似度加權抽一張，免得每次都發同一張。
-- 決策模型沒開時偶爾照 chat.emote_chance 提醒 planner 可以用 discord_emote；那個工具挑圖一樣用向量，不經過 LLM。
+- 決策模型沒開時偶爾照 chat.emote_chance 提醒 planner 可以用 discord_emote。
 """
 
-import asyncio
 import base64
 import hashlib
 import html
@@ -25,7 +20,7 @@ import random
 import re
 import time
 from collections import OrderedDict, deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -37,66 +32,34 @@ from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import TIMEOUT_SECONDS
 from .decision import ask as ask_decision
-from .life.common import sent_text, short_time
-from .reply_links import EMOTE_ONLY, link_questions, parse_links, plain
-from .topics import apply_topics, new_store, topic_questions, with_card
+from .life.common import short_time
+from .reply_links import EMOTE_ONLY, plain
+from .topics import apply_topics, focus_message, new_store, numbered, topic_questions, with_card
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
     "【表情】這一輪如果有值得表態的訊息（好笑、好消息、附和、驚訝、無語），"
     "可以用 discord_emote 在那則訊息按個 reaction；可以和 reply 同一輪一起呼叫，也可以只按表情不說話。沒有合適的就略過。"
 )
-# 決策結果用系統提示告訴 planner；不動它的工具
-QUICK_NOTE = (
-    "【表情】你已經用{what}回應了「{user}」那則訊息。"
-    "如果沒有人在問你或叫你，這輪就不用再說話，直接呼叫 stop() 結束。"
-)
-QUICK_ADDRESSED_NOTE = (
-    "【表情】你已經用{what}回應了「{user}」那則訊息。有人在跟你說話，需要的話照常回覆。"
-)
-APPEND_NOTE = "【表情】這輪你回覆送出後，會自動附上一張符合情緒的表情或貼圖。"
 # 插件替她送的表情和文字同步進 planner 歷史時標成她自己說的；不給的話主程式記成 plugin_send，
 # planner 上下文裡就沒有 is_self_message，會當成一個也叫她名字的群友在說話
 SELF_SENT = "guided_reply"
-# 決策模型能選的情境（說明在設定裡，可在頁面改）
-SCENES = ("text", "text_emote", "quick_reaction", "quick_sticker")
-SCENE_LABELS = {
-    "text": "只要文字",
-    "text_emote": "文字＋附圖",
-    "quick_reaction": "只按表情",
-    "quick_sticker": "只發圖",
-    "failed": "請求失敗（planner 自己決定）",
+SEND_KIND_LABELS = {"tool": "planner 工具"}
+# 頁面「測試連線」送的範例聊天和題目
+DECISION_TEST_STATE = "最近的群聊（越下面越新，# 是訊息編號）：\n#1 「小明」：我終於抽到限定角色了！！！\n#2 「阿華」：笑死 歐皇"
+DECISION_TEST_QUESTIONS = {
+    "topic_2": {
+        "type": "choice",
+        "instructions": "#2 這則在接哪一串話題？",
+        "criteria": {"m1": "跟 #1 同一串：小明抽到限定角色", "none": "開了新話題"},
+    }
 }
-SEND_KIND_LABELS = {"reaction": "按表情", "sticker": "只發圖", "append": "回覆後附圖", "tool": "planner 工具"}
-# 頁面「測試連線」送的範例聊天
-DECISION_TEST_TARGETS = {"1": "「小明」：我終於抽到限定角色了！！！", "2": "「阿華」：笑死 歐皇", "3": "「小美」：羨慕"}
-DECISION_TEST_STATE = "你是「麥麥」，在 Discord 群組聊天。上次之後沒有人 @ 你。\n\n最近的群聊（越下面越新，# 是可以表態的訊息）：\n" + "\n".join(
-    f"#{number} {text}" for number, text in DECISION_TEST_TARGETS.items()
-)
 # 頁面只列最近幾筆判斷與送出，全部的紀錄還是照 decision.py 的上限保存
 PAGE_RECENT = 10
-# 頁面「恢復預設」會重設的欄位：提示詞、情境說明、情緒選項、送出的則數
-PROMPT_FIELDS = (
-    "context_messages",
-    "target_candidates",
-    "scene_instructions",
-    "scene_text",
-    "scene_text_emote",
-    "scene_quick_reaction",
-    "scene_quick_sticker",
-    "target_instructions",
-    "emotion_instructions",
-    "emotions",
-)
-# 決策模型（vLLM-SR）的選擇題至少要兩個選項，少於兩個整個請求回 422
-MIN_EMOTIONS = 2
 # MaiBot 的暱稱與別名（bot.nickname / bot.alias_names）多久重讀一次，用來判斷訊息是不是在叫她
 BOT_NAMES_REFRESH_SECONDS = 600
 # 每個聊天記住最近幾則收到的訊息（planner 上下文裡只有 msg_id 別名，靠這裡換回 Discord 訊息 ID）
 INBOUND_REMEMBERED = 60
-# 回覆後附圖：她的文字最後一則送出後等幾秒；決定附圖後多久內沒回覆就作廢
-APPEND_DELAY_SECONDS = 1.5
-APPEND_TTL = timedelta(minutes=2)
 # 挑表情：向量排序取前 PICK_POOL 名，越接近越容易抽中（溫度越小越偏向最接近的）；
 # 同一個聊天最近 RECENT_PICKS 次用過的先排除，剩不到 MIN_FRESH 個才放回來
 PICK_POOL = 8
@@ -147,14 +110,6 @@ def strip_emotes(items: Any) -> None:
 def named(name: str, description: Optional[str]) -> str:
     """向量比對用的文字：名字放前面，才找得到「叫名字」的貼圖或表情。"""
     return f"{name}：{description}" if description else name
-
-
-def decision_questions(decision: Any) -> Dict[str, Dict[str, Any]]:
-    """情境題和情緒題，提示詞和選項照設定；對象題的選項是每輪的訊息，另外組。"""
-    return {
-        "scene": {"type": "choice", "instructions": decision.scene_instructions, "criteria": decision.scene_criteria()},
-        "emotion": {"type": "choice", "instructions": decision.emotion_instructions, "criteria": decision.emotion_options()},
-    }
 
 
 def display_message_id(message_id: str) -> str:
@@ -215,12 +170,10 @@ def first_image(message: Mapping[str, Any]) -> str:
     return ""
 
 
-def quoted(message: Mapping[str, Any]) -> Tuple[str, str, str]:
-    """入站訊息回覆的是哪則：(原始訊息 ID, 「名字」說：內容, 回覆「名字」：內容開頭)；沒有回覆時都是空字串。
+def quoted(message: Mapping[str, Any]) -> str:
+    """入站訊息回覆了誰：「回覆「名字」：內容開頭」（回覆她時寫「回覆你」）；沒有回覆時是空字串。
 
-    後兩個是插件收訊時從 Discord 拉的內容。第二個在 MaiBot 沒收過那則（例如別的 bot 說的）時頂替上下文；
-    第三個標在這則正文前面：planner 上下文只用 quote 屬性標出回覆哪則，
-    沒主詞的回覆（「開金口很厲害」）她會以為在跟她說。回覆的是她時寫「回覆你」。
+    標在這則正文前面：planner 上下文只用 quote 屬性標出回覆哪則，沒主詞的回覆（「開金口很厲害」）她會以為在跟她說。
     """
     info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
     extra = info.get("additional_config") if isinstance(info.get("additional_config"), Mapping) else {}
@@ -232,8 +185,8 @@ def quoted(message: Mapping[str, Any]) -> Tuple[str, str, str]:
             content = " ".join(str(data.get("target_message_content") or "").split())
             who = "你" if extra.get("discord_replies_to_bot") else name or "一則訊息"
             label = f"回覆{who}：{content[:30]}{'…' if len(content) > 30 else ''}" if content else f"回覆{who}"
-            return str(data["target_message_id"]), f"{name}說：{content}" if content else "", label
-    return "", "", ""
+            return label
+    return ""
 
 
 def _at_segments(message: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -243,11 +196,6 @@ def _at_segments(message: Mapping[str, Any]) -> List[Mapping[str, Any]]:
         for segment in (raw if isinstance(raw, list) else [])
         if isinstance(segment, Mapping) and segment.get("type") == "at" and isinstance(segment.get("data"), Mapping)
     ]
-
-
-def mentioned_names(message: Mapping[str, Any]) -> List[str]:
-    """入站訊息 @ 的人：每個人的伺服器暱稱和名字。"""
-    return [str(data[key]) for data in _at_segments(message) for key in ("target_user_cardname", "target_user_nickname") if data.get(key)]
 
 
 def mentioned_people(message: Mapping[str, Any]) -> Dict[str, str]:
@@ -274,26 +222,20 @@ def _avg(total: int, count: int) -> int:
 
 
 class EmoteMixin:
-    """表情決策與送出；需要主插件提供 ctx、_load_settings、_append_system_text、_thread_routing、
+    """話題分析與 discord_emote；需要主插件提供 ctx、_load_settings、_append_system_text、_thread_routing、
     _client_manager、_message_handler、_native_emoji、_decision_stats、_emote_library。"""
 
     def _init_emote_state(self) -> None:
-        # 有新的 Discord 訊息、還沒問過決策模型的聊天；一回合 planner 會請求好幾次，只有第一次問
-        self._emote_unjudged: set[str] = set()
-        # 每個聊天最近收到的訊息：msg_id（別名與原始 ID 都記）-> 原始 ID、有沒有在跟她說話、能不能按表情
+        # 有新的 Discord 訊息、還沒分析過話題的聊天；一回合 planner 會請求好幾次，只有第一次分析
+        self._unanalyzed: set[str] = set()
+        # 每個聊天最近收到的訊息（照收到的順序）：msg_id（planner 上下文顯示的別名）-> 原始 ID、有沒有在跟她說話、能不能按表情
         self._inbound: Dict[str, "OrderedDict[str, Dict[str, Any]]"] = {}
         # 每個聊天最新一則的頻道與發話人，送出時找頻道和訊息用
         self._latest_inbound: Dict[str, Dict[str, Any]] = {}
-        # 上次問決策模型的時間（time.monotonic）；之後收到的才算「新訊息」
-        self._judged_at: Dict[str, float] = {}
-        # 決策模型判斷的回覆前文：每個聊天 {msg_id: 它在接的 msg_id}，見 reply_links.py
-        self._reply_links: Dict[str, "OrderedDict[str, List[str]]"] = {}
-        self._pending_append: Dict[str, Dict[str, Any]] = {}
-        self._append_tasks: Dict[str, asyncio.Task[None]] = {}
-        # 只按表情／只發圖的背景任務；要留著引用，沒人引用的 Task 可能被回收
-        self._emote_tasks: set[asyncio.Task[None]] = set()
         # 每個聊天的話題串（topics.py）；插件重啟就清空
         self._topics: Dict[str, Dict[str, Any]] = {}
+        # 每個聊天這輪的焦點 msg_id：planner、表達方式選擇和 replyer 只看它那串
+        self._focus: Dict[str, str] = {}
         # 每個聊天最近挑過的表情 key，下次先排除
         self._recent_picks: Dict[str, "deque[str]"] = {}
         # MaiBot 設定的暱稱與別名，和它的「被提及必回覆」用同一份
@@ -304,7 +246,7 @@ class EmoteMixin:
 
     def _is_calling_her(self, message: Mapping[str, Any]) -> bool:
         """這則是不是在叫她；和 MaiBot 判斷「被提及」一樣：@ 她、回覆她的訊息、私訊，
-        或提到 bot.nickname / bot.alias_names 裡的名字。睡覺被吵醒和表情決策共用這一個判斷。"""
+        或提到 bot.nickname / bot.alias_names 裡的名字。睡覺被吵醒和選焦點共用這一個判斷。"""
         info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
         extra = info.get("additional_config") if isinstance(info.get("additional_config"), Mapping) else {}
         text = str(message.get("processed_plain_text") or "")
@@ -320,31 +262,21 @@ class EmoteMixin:
         group = info.get("group_info") if isinstance(info.get("group_info"), Mapping) else {}
         user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
         message_id = str(message.get("message_id") or "")
-        self._emote_unjudged.add(session_id)
+        self._unanalyzed.add(session_id)
         self._latest_inbound[session_id] = {
             "group_id": str(group.get("group_id") or ""),
             "user_id": str(user.get("user_id") or ""),
         }
         if not message_id:
             return
-        quote, quote_text, quote_label = quoted(message)
         entry = {
-            "id": message_id,
-            # 回覆了哪則（原始 ID）和收訊時拉到的那則內容；被回覆那則滑出 planner 上下文時補給她看
-            "quote": quote,
-            "quote_text": quote_text,
             # 「回覆「名字」：…」，標在 planner 上下文裡這則的正文前面
-            "quote_label": quote_label,
+            "quote_label": quoted(message),
             "addressed": self._is_calling_her(message),
-            # @ 了誰（伺服器暱稱和名字都記，對得上 planner 上下文的發話人）；回覆前文用
-            "mentions": mentioned_names(message),
             # 發話人和 @ 的人的 ID：聯想時換成 MaiBot 的人物 ID 查他們的記憶
             "platform": str(message.get("platform") or DEFAULT_PLATFORM_NAME),
             "user_id": str(user.get("user_id") or ""),
             "mentioned": mentioned_people(message),
-            # 只有真的 Discord 訊息（數字 ID）按得了表情；語音轉文字（voice-…）也會進 planner 上下文，但不是訊息
-            "targetable": message_id.isdigit(),
-            "at": time.monotonic(),
             # 第一張圖片（base64）：分話題時直接附給決策模型看，不等主程式寫圖片描述
             "image": first_image(message),
         }
@@ -358,21 +290,17 @@ class EmoteMixin:
 
     @HookHandler(
         "maisaka.planner.before_request",
-        name="discord_emote_decision",
+        name="discord_topic_analysis",
         mode="blocking",
-        # 比回覆上下文（quote_context，late）早：「有人在找你」要用到這次順便判斷的回覆前文
+        # 比 quote_context（late）早：那邊照這裡選的焦點過濾聊天
         order="normal",
-        # 開了聯想時還要等：決策模型兩次、寫關鍵字、記憶檢索（recall.SEARCH_TIMEOUT_SECONDS）兩輪，
-        # 看不懂的話題再加上網查（recall.LOOKUP_TIMEOUT_SECONDS）
+        # 決策模型兩次、寫關鍵字、記憶檢索（recall.SEARCH_TIMEOUT_SECONDS）兩輪，看不懂的話題再加上網查（recall.LOOKUP_TIMEOUT_SECONDS）
         timeout_ms=150000,
     )
-    async def decide_emote_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """Discord 聊天裡拿掉 MaiBot 原生的 send_emoji 和聊天裡的表情 ID、表情圖；新訊息後第一次進 planner 時問決策模型，
-        結果用系統提示告訴 planner。
-
-        開了聯想、她這輪要用文字參與時，接著跑聯想（見 recall.py），聯想接在系統提示詞後面，這回合後面的請求也帶著。
-        """
-        # 沒有這個工具：不是 Discord 聊天，或睡覺時段只剩 stop
+    async def analyze_in_planner(self, **kwargs: Any) -> Dict[str, Any]:
+        """Discord 聊天拿掉 MaiBot 原生的 send_emoji 和聊天裡的表情 ID、表情圖；群聊有新訊息後第一次進 planner 時
+        分話題、選焦點、聯想（_analyze）。"""
+        # 沒有這個工具：不是 Discord 聊天、睡覺時段只剩 stop，或是表達方式選擇這類沒有工具的子請求
         if "discord_emote" not in tool_names(kwargs):
             return {"action": "continue"}
         # discord_emote 也能發貼圖，兩個都留就是兩套「要不要發表情包」的決定；
@@ -386,274 +314,82 @@ class EmoteMixin:
         decision = settings.decision
         session_id = str(kwargs.get("session_id") or "")
         if not (decision.enabled and decision.api_key.strip() and session_id):
+            self._focus.pop(session_id, None)
             if random.random() < settings.chat.emote_chance:
                 self._append_system_text(kwargs, EMOTE_NUDGE)
             return result
-        # 同一回合後面的請求、沒有新訊息的回合（主動話題、提醒、逾時）不問
-        if session_id not in self._emote_unjudged:
-            self._add_recall_note(kwargs, session_id)
-            return result
-        self._emote_unjudged.discard(session_id)
-        outcome = await self._decide_scene(decision, session_id, planner_messages(kwargs.get("items")))
-        self._add_recall_note(kwargs, session_id)
-        if outcome is None or outcome["scene"] == "text":
-            return result
-        if outcome["scene"] == "text_emote":
-            self._append_system_text(kwargs, APPEND_NOTE)
-            return result
-        what = "表情" if outcome["scene"] == "quick_reaction" else "一張圖"
-        note = QUICK_ADDRESSED_NOTE if outcome["addressed"] else QUICK_NOTE
-        self._append_system_text(kwargs, note.format(what=what, user=outcome["target"]["user"]))
+        # 同一回合後面的請求、沒有新訊息的回合（主動話題、提醒、逾時）照上次的焦點，不再分析
+        if session_id in self._unanalyzed:
+            self._unanalyzed.discard(session_id)
+            if self._latest_inbound.get(session_id, {}).get("group_id"):
+                await self._analyze(decision, session_id, planner_messages(kwargs.get("items")))
         return result
 
-    async def _decide_scene(
-        self, decision: Any, session_id: str, messages: Sequence[Mapping[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """問決策模型情境、表態對象與情緒，套上安全條件；只按表情／只發圖在背景送出，文字＋附圖記下等她回完。
-
-        Returns:
-            ``{"scene", "target", "addressed"}``；planner 上下文裡沒有可以表態的訊息或請求失敗時回傳 None。
-        """
+    async def _analyze(self, decision: Any, session_id: str, messages: Sequence[Mapping[str, Any]]) -> None:
+        """分話題、選焦點、聯想；焦點記在 _focus，聯想記在 _recalls，給 quote_context 和 recall 的 hook 用。"""
         now = datetime.now()
-        remembered = self._inbound.get(session_id, {})
         window = list(messages)[-decision.context_messages :]
-        # 要回的那則只有網址、卡片還沒到時等一下（最多 recall.FOCUS_WAIT_SECONDS）；其他的照常，晚點再分話題
+        # 焦點只有網址、卡片還沒到時等一下（最多 recall.FOCUS_WAIT_SECONDS）；其他的照常，晚點再分話題
         await self._wait_for_focus_card(session_id, window)
         remembered = self._inbound.get(session_id, {})
         # 卡片晚到時插件補記的文字接在正文後面
         window = [{**message, "text": with_card(message, remembered.get(message["msg_id"]) or {})} for message in window]
         # 用回覆功能回的，正文前面標「[回覆「名字」：…]」：planner 看到的回覆標籤要等 quote_context 那個 late hook 才加，
-        # 這裡不補的話決策模型和聯想不知道它在回誰，被回覆那則滑出上下文時連前文都沒有
+        # 這裡不補的話決策模型和聯想不知道它在回誰
         window = [
             {**message, "text": f"[{label}]{message['text']}"}
             if (label := (remembered.get(message["msg_id"]) or {}).get("quote_label"))
             else message
             for message in window
         ]
-        # 別人的訊息都編號（表態題和前文題共用），她自己的標「（你）」
+        focus = focus_message(window, remembered)
+        if focus is None:
+            self._focus.pop(session_id, None)
+            return
+        # 別人的訊息都編號，她自己的標「（你）」
         numbers = {id(message): str(index) for index, message in enumerate((m for m in window if not m["self"]), 1)}
-        # 能表態的：別人說的、換得回真的 Discord 訊息；取最後幾則
-        targets = [
-            message
-            for message in window
-            if not message["self"] and message["msg_id"] in remembered and remembered[message["msg_id"]]["targetable"]
-        ][-decision.target_candidates :]
-        if not targets:
-            self.ctx.logger.info(f"表情決策 [{session_id}]：planner 上下文裡沒有可以表態的訊息，這輪 planner 自己決定")
-            return None
-        target_numbers = {numbers[id(message)] for message in targets}
-        reactions = self._reaction_summaries([remembered[message["msg_id"]]["id"] for message in targets])
-        lines = []
-        for message in window:
-            if message["self"]:
-                lines.append(f"（你）：{message['text']}")
-                continue
-            number = numbers[id(message)]
-            extra = reactions.get(remembered[message["msg_id"]]["id"], "") if number in target_numbers else ""
-            lines.append(f"#{number} 「{message['user']}」：{message['text']}{extra}")
-        judged_at = self._judged_at.get(session_id, 0.0)
-        self._judged_at[session_id] = time.monotonic()
-        addressed = any(entry["addressed"] and entry["at"] > judged_at for entry in remembered.values())
-        state = (
-            f"你是「{self._bot_name()}」，在 Discord 群組聊天。"
-            + ("上次之後有人 @ 你、回覆你或私訊你。" if addressed else "上次之後沒有人 @ 你。")
-            + "\n\n最近的群聊（越下面越新，# 是訊息編號）：\n"
-            + "\n".join(lines)
-        )
-        questions = decision_questions(decision)
-        # 只有一則可選時不問：vLLM-SR 的選擇題至少要兩個選項，一個選項會回 422（question_malformed），
-        # 整個請求失敗、連情境也拿不到。插件只記得啟動後收到的訊息，剛重啟時常常只有一則
-        if len(targets) > 1:
-            questions["target"] = {
-                "type": "choice",
-                "instructions": decision.target_instructions,
-                "criteria": {numbers[id(message)]: f"「{message['user']}」：{message['text']}" for message in targets},
-            }
-        link_keys: Dict[str, Dict[str, Any]] = {}
-        if decision.reply_context_enabled:
-            link_asks, link_keys = link_questions(window, numbers, remembered)
-            questions.update(link_asks)
-        started = time.monotonic()
-        # 話題串（topics.py）：開了聯想的群聊，這輪還沒分配的訊息同一次請求一起問；圖片直接附上
+        lines = [numbered(message, numbers) for message in window]
+        state = f"你是「{self._bot_name()}」，在 Discord 群組聊天。\n\n最近的群聊（越下面越新，# 是訊息編號）：\n" + "\n".join(lines)
         store = self._topics.setdefault(session_id, new_store())
-        topic_asks, topic_keys, images = {}, {}, []
-        if decision.recall_enabled and self._latest_inbound.get(session_id, {}).get("group_id"):
-            topic_asks, topic_keys, images = topic_questions(store, window, numbers, remembered, time.time())
-        questions.update(topic_asks)
-        answers = await ask_decision(
-            decision, state, questions, self.ctx.logger, images=images or None, timeout=IMAGE_TIMEOUT_SECONDS if images else TIMEOUT_SECONDS
+        questions, keys, images = topic_questions(store, window, numbers, remembered, time.time())
+        started = time.monotonic()
+        answers = (
+            await ask_decision(
+                decision,
+                state,
+                questions,
+                self.ctx.logger,
+                images=images or None,
+                timeout=IMAGE_TIMEOUT_SECONDS if images else TIMEOUT_SECONDS,
+            )
+            if questions
+            else {}
         )
-        topic_summary = apply_topics(store, topic_keys, answers)
-        link_summary_extra = f"；話題 {topic_summary}" if topic_summary else ""
         latency_ms = round((time.monotonic() - started) * 1000)
-        judged_links, link_summary = parse_links(answers, link_keys, decision.link_threshold)
-        link_summary = (link_summary + link_summary_extra).lstrip("；")
-        links = self._reply_links.setdefault(session_id, OrderedDict())
-        for msg_id, linked in judged_links.items():
-            links[msg_id] = linked
-            links.move_to_end(msg_id)
-        while len(links) > INBOUND_REMEMBERED:
-            links.popitem(last=False)
-        scene_answer = (answers or {}).get("scene") or {}
-        requested = str(scene_answer.get("choice") or "")
-        target_choice = str(((answers or {}).get("target") or {}).get("choice") or "")
-        by_number = {numbers[id(message)]: message for message in targets}
-        picked = by_number.get(target_choice, targets[-1])
-        target = {**picked, "id": remembered[picked["msg_id"]]["id"]}
-        summary = f"「{target['user']}」：{target['text']}"
-        if requested not in SCENES:
-            self.ctx.logger.warning(
-                f"表情決策 [{session_id}]：沒拿到有效的情境（可表態 {len(targets)} 則），這輪 planner 自己決定"
-            )
-            self._decision_stats.record_decision(
-                now, session_id, summary, "failed", latency_ms, links=link_summary, context="\n".join(lines)
-            )
-            return None
-        probabilities = scene_answer.get("probabilities") if isinstance(scene_answer.get("probabilities"), dict) else {}
-        probability = float(probabilities.get(requested) or 0)
-        emotion = str(((answers or {}).get("emotion") or {}).get("choice") or "")
-        emotions = decision.emotion_options()
-        emotion = emotion if emotion in emotions else next(iter(emotions), "開心")
-        scene = self._guard_scene(decision, requested, probability, target, session_id)
-        # 聯想（recall.py）：群聊裡她這輪要用文字參與時，用這次判斷的前文往回找話題、想起相關的記憶和人，再問決策模型
-        recall_summary, recall_detail, recall_columns = "", "", {}
-        if decision.recall_enabled and scene in ("text", "text_emote") and self._latest_inbound.get(session_id, {}).get("group_id"):
-            recall_summary, recall_detail, recall_columns = await self._run_recall(
-                decision, session_id, window, remembered, numbers, state, scene
-            )
+        failed = answers is None
+        topic_summary = apply_topics(store, keys, answers)
+        self._focus[session_id] = focus["msg_id"]
+        recall_summary, recall_detail, columns = await self._run_recall(
+            decision, session_id, window, remembered, numbers, state, focus
+        )
         self.ctx.logger.info(
-            f"表情決策 [{session_id}]：{SCENE_LABELS[scene]}，對象 #{numbers[id(picked)]}（可表態 {len(targets)} 則）{summary[:40]}"
-            f"（模型選「{SCENE_LABELS[requested]}」{probability:.2f}，情緒「{emotion}」，"
-            f"門檻 {decision.emote_threshold:.2f}，{latency_ms} ms）"
-            + (f"；前文 {link_summary}" if link_summary else "")
+            f"話題分析 [{session_id}]：焦點 #{numbers[id(focus)]}「{focus['user']}」{focus['text'][:30]}（{latency_ms} ms）"
+            + (f"；話題 {topic_summary}" if topic_summary else "")
+            + ("；分話題的請求失敗" if failed else "")
             + (f"；聯想 {recall_summary}" if recall_summary else "")
         )
         self._decision_stats.record_decision(
             now,
             session_id,
-            summary,
-            scene,
+            f"「{focus['user']}」：{focus['text']}",
             latency_ms,
-            requested=requested,
-            emotion=emotion,
-            probability=probability,
-            links=link_summary,
+            failed=failed,
+            topics=topic_summary,
             recall=recall_summary,
             context="\n".join(lines),
             recall_detail=recall_detail,
-            columns=recall_columns,
+            columns=columns,
         )
-        if scene in ("quick_reaction", "quick_sticker"):
-            task = asyncio.create_task(self._quick_send(session_id, scene, emotion, target))
-            self._emote_tasks.add(task)
-            task.add_done_callback(self._emote_tasks.discard)
-        elif scene == "text_emote":
-            self._pending_append[session_id] = {"emotion": emotion, "expires": now + APPEND_TTL, "reply": ""}
-        return {"scene": scene, "target": target, "addressed": addressed}
-
-    def _reaction_summaries(self, message_ids: Sequence[str]) -> Dict[str, str]:
-        """從 discord.py 的訊息快取讀別人已經按了什麼（不打 API），給決策模型當「大家都在笑哪則」的線索。"""
-        client = getattr(self._client_manager, "client", None)
-        wanted = set(message_ids)
-        summaries: Dict[str, str] = {}
-        for cached in getattr(client, "cached_messages", None) or []:
-            if str(cached.id) not in wanted or not cached.reactions:
-                continue
-            shown = "、".join(f"{reaction.emoji}×{reaction.count}" for reaction in cached.reactions[:4])
-            mine = "，你也按了" if any(reaction.me for reaction in cached.reactions) else ""
-            summaries[str(cached.id)] = f"（已有人按 {shown}{mine}）"
-        return summaries
-
-    def _guard_scene(
-        self,
-        decision: Any,
-        requested: str,
-        probability: float,
-        target: Mapping[str, Any],
-        session_id: str,
-    ) -> str:
-        """模型選的情境要過門檻；只按表情／只發圖還要有地方按、有東西可發，否則降成文字＋附圖。
-
-        有人在叫她時（例如「幫這則按個讚」）也照做，只是那輪 planner 照常可以說話，不會被限制成只能 stop。
-        """
-        if requested == "text" or probability < decision.emote_threshold:
-            return "text"
-        if requested.startswith("quick_"):
-            guild = self._guild_of(self._latest_inbound.get(session_id, {}).get("group_id"))
-            usable = guild is not None and (
-                any(emoji.is_usable() for emoji in guild.emojis)
-                if requested == "quick_reaction"
-                else bool(self._sticker_items(guild) or self._emoji_items(guild))
-            )
-            if decision.quick_enabled and usable:
-                return requested
-            requested = "text_emote"
-        return "text_emote" if decision.append_enabled else "text"
-
-    # ===== 送出 =====
-
-    async def _quick_send(self, session_id: str, scene: str, emotion: str, target: Mapping[str, Any]) -> None:
-        """只按表情：按在表態對象上；只發圖：在聊天裡發一張。背景執行，planner 不用等。"""
-        started = time.monotonic()
-        query = f"{emotion}：{target.get('text') or ''}"
-        kind = "reaction" if scene == "quick_reaction" else "sticker"
-        latest = self._latest_inbound.get(session_id, {})
-        picked, score, ok = "", 0.0, False
-        try:
-            guild = self._guild_of(latest.get("group_id"))
-            if kind == "reaction":
-                message = await self._thread_routing.find_message(
-                    str(target.get("id") or ""), str(latest.get("group_id") or ""), str(latest.get("user_id") or "")
-                )
-                found = await self._pick_custom_emoji(guild, query, session_id) if message is not None else None
-                if found:
-                    emoji, score = found
-                    await message.add_reaction(emoji)
-                    picked, ok = str(emoji), True
-            else:
-                found_image = await self._pick_image(guild, query, session_id)
-                if found_image:
-                    picked, image_b64, score = found_image
-                    ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True, maisaka_source_kind=SELF_SENT))
-        except Exception as exc:  # 背景任務：沒接住只會變成沒人看的 Task 例外
-            self.ctx.logger.warning(f"{SEND_KIND_LABELS[kind]}失敗：{exc!r}")
-        self._record_send(session_id, kind, started, picked, score, ok)
-
-    def _schedule_append(self, message: Mapping[str, Any]) -> None:
-        """她的文字送出後（send_service.after_send）重設附圖計時；圖本身送出時不算。"""
-        session_id = str(message.get("session_id") or "")
-        pending = self._pending_append.get(session_id)
-        if not pending:
-            return
-        if datetime.now() > pending["expires"]:
-            self._pending_append.pop(session_id, None)
-            return
-        text = sent_text(message)
-        if not text:
-            return
-        pending["reply"] += text
-        running = self._append_tasks.get(session_id)
-        if running is not None and not running.done():
-            running.cancel()
-        self._append_tasks[session_id] = asyncio.create_task(self._append_after_reply(session_id))
-
-    async def _append_after_reply(self, session_id: str) -> None:
-        await asyncio.sleep(APPEND_DELAY_SECONDS)
-        pending = self._pending_append.pop(session_id, None)
-        if not pending:
-            return
-        started = time.monotonic()
-        latest = self._latest_inbound.get(session_id, {})
-        guild = self._guild_of(latest.get("group_id"))
-        picked, score, ok = "", 0.0, False
-        try:
-            found = await self._pick_image(guild, f"{pending['emotion']}：{pending['reply'][-200:]}", session_id)
-            if found:
-                picked, image_b64, score = found
-                ok = bool(await self.ctx.send.emoji(image_b64, session_id, sync_to_maisaka_history=True, maisaka_source_kind=SELF_SENT))
-        except Exception as exc:  # 背景任務：沒接住只會變成沒人看的 Task 例外
-            self.ctx.logger.warning(f"回覆後附圖失敗：{exc!r}")
-        self._record_send(session_id, "append", started, picked, score, ok)
 
     def _record_send(self, session_id: str, kind: str, started: float, picked: str, score: float, ok: bool) -> None:
         latency_ms = round((time.monotonic() - started) * 1000)
@@ -774,14 +510,14 @@ class EmoteMixin:
         return getattr(channel, "guild", None)
 
     async def _ask_decision(self, decision: Any, state: str, questions: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """給聯想（recall.py）用的決策模型請求，和表情決策同一個設定。"""
+        """給聯想（recall.py）用的決策模型請求，和話題分析同一個設定。"""
         return await ask_decision(decision, state, questions, self.ctx.logger)
 
     def _bot_name(self) -> str:
         user = getattr(getattr(self._client_manager, "client", None), "user", None)
         return str(getattr(user, "display_name", "") or "麥麥")
 
-    # ===== planner 工具（決策模型沒開或失敗時才給 planner）=====
+    # ===== planner 工具 =====
 
     _EMOTE_FORMS = {"reaction": "表情回應", "emoji": "表情", "sticker": "貼圖"}
 
@@ -869,19 +605,19 @@ class EmoteMixin:
             return {"success": False, "error": f"發送{label}失敗"}
         return {"success": True, "content": f"已用{label} {picked} 回應訊息 {msg_id}"}
 
-    # ===== 「DC生活 → 決策模型」頁面 =====
+    # ===== 「DC生活 → 話題分析」頁面 =====
 
-    @API("webui_decision", description="讀取決策模型的設定與判斷統計", version="1")
+    @API("webui_decision", description="讀取話題分析的設定與紀錄", version="1")
     async def webui_decision(self) -> Dict[str, Any]:
-        """決策模型頁：今天的判斷與送出、近 14 天走勢、最近的判斷與送出；沒啟用或沒填 Key 時用 notice 說明。"""
+        """話題分析頁：今天的分析與送出的表情、近 14 天走勢、最近的紀錄；沒啟用或沒填 Key 時用 notice 說明。"""
         config = self._load_settings().decision
         state = self._decision_stats.state
         days = state.get("days") or {}
         today = days.get(datetime.now().date().isoformat()) or {}
         if not config.enabled:
-            notice = "決策模型未啟用，在下方「設定」開啟；沒開時表情由 planner 自己用 discord_emote 決定。"
+            notice = "決策模型未啟用，在下方「設定」開啟；沒開時 planner、replyer 看完整的聊天。"
         elif not config.api_key:
-            notice = "還沒填 API Key（在插件設定「聊天與過濾 → 決策模型」），現在表情由 planner 自己決定。"
+            notice = "還沒填 API Key（在插件設定「聊天與過濾 → 決策模型」），現在 planner、replyer 看完整的聊天。"
         else:
             notice = ""
         last_test = state.get("last_test")
@@ -896,17 +632,11 @@ class EmoteMixin:
             "notice": notice,
             "provider": config.base_url,
             "model": config.model,
-            "settings": self._setting_rows(
-                "decision", [field for field in PAGE_FIELDS["decision"] if field not in PROMPT_FIELDS[2:]]
-            ),
-            "prompts": self._setting_rows("decision", PROMPT_FIELDS[2:-1]),
             # 設定分頁每一列旁邊顯示的目前的值
             "current": {
                 field: row["value"]
                 for field, row in zip(PAGE_FIELDS["decision"], self._setting_rows("decision", PAGE_FIELDS["decision"]), strict=True)
             },
-            "emotions": [{"name": name, "description": text} for name, text in config.emotion_options().items()],
-            "threshold": f"{config.emote_threshold:.2f}",
             "last_test": (
                 f"{short_time(last_test['time'])} {'✅' if last_test['ok'] else '❌'} {last_test['detail']}"
                 if last_test
@@ -915,10 +645,6 @@ class EmoteMixin:
             "today_calls": today.get("calls", 0),
             "today_latency": f"{_avg(today.get('latency_ms', 0), judged(today))} ms" if judged(today) else "—",
             "today_failed": today.get("failed", 0),
-            "today_scenes": "・".join(
-                f"{SCENE_LABELS[scene]} {today.get(scene, 0)}"
-                for scene in ("text", "text_emote", "quick_reaction", "quick_sticker")
-            ),
             "today_sends": f"送出 {today.get('sends', 0)}・沒送成 {today.get('send_failed', 0)}",
             "today_send_latency": (
                 f"{_avg(today.get('send_latency_ms', 0), today.get('sends', 0))} ms" if today.get("sends") else "—"
@@ -927,9 +653,6 @@ class EmoteMixin:
                 {
                     "date": day[5:],
                     "calls": counts.get("calls", 0),
-                    "emotes": counts.get("text_emote", 0)
-                    + counts.get("quick_reaction", 0)
-                    + counts.get("quick_sticker", 0),
                     "sends": counts.get("sends", 0),
                     "latency": _avg(counts.get("latency_ms", 0), judged(counts)),
                 }
@@ -939,14 +662,11 @@ class EmoteMixin:
                 {
                     "time": short_time(item["time"]),
                     "chat": names.get(item["chat"], item["chat"]),
-                    "scene": SCENE_LABELS.get(item["scene"], item["scene"]),
-                    "requested": SCENE_LABELS.get(item["requested"], "—") if item["requested"] else "—",
-                    "emotion": item["emotion"] or "—",
-                    "probability": f"{item['probability']:.2f}" if item["scene"] != "failed" else "—",
                     "latency": f"{item['latency_ms']} ms",
                     "message": item["message"],
-                    # 舊紀錄沒有這幾欄
-                    "links": item.get("links") or "—",
+                    "result": "分話題失敗" if item.get("failed") or item.get("scene") == "failed" else "—",
+                    # 舊紀錄的欄位名不同或沒有
+                    "topics": item.get("topics") or item.get("links") or "—",
                     "recall": item.get("recall") or "—",
                     "context": item.get("context") or "—",
                     "recall_detail": item.get("recall_detail") or "—",
@@ -978,61 +698,21 @@ class EmoteMixin:
             raise ValueError("還沒填 API Key")
         errors: List[str] = []
         started = time.monotonic()
-        questions = decision_questions(config)
-        questions["target"] = {
-            "type": "choice",
-            "instructions": config.target_instructions,
-            "criteria": DECISION_TEST_TARGETS,
-        }
-        answers = await ask_decision(config, DECISION_TEST_STATE, questions, SimpleNamespace(warning=errors.append))
+        answers = await ask_decision(config, DECISION_TEST_STATE, DECISION_TEST_QUESTIONS, SimpleNamespace(warning=errors.append))
         latency_ms = round((time.monotonic() - started) * 1000)
-        scene = str(((answers or {}).get("scene") or {}).get("choice") or "")
-        if scene in SCENES:
-            emotion = str(((answers or {}).get("emotion") or {}).get("choice") or "—")
-            target = str(((answers or {}).get("target") or {}).get("choice") or "—")
-            detail = f"{latency_ms} ms，範例判斷成「{SCENE_LABELS[scene]}」、對象 #{target}、情緒「{emotion}」"
+        choice = str(((answers or {}).get("topic_2") or {}).get("choice") or "")
+        if choice:
+            detail = f"{latency_ms} ms，範例判斷 #2 " + ("在接 #1" if choice == "m1" else "是新話題")
             self._decision_stats.set_last_test(datetime.now(), True, detail)
             return {"ok": True, "detail": detail}
         detail = errors[-1] if errors else "回應裡沒有判斷結果，檢查模型名稱"
         self._decision_stats.set_last_test(datetime.now(), False, detail)
         raise ValueError(f"決策模型測試失敗：{detail}")
 
-    @API("webui_decision_save", description="儲存決策模型的設定與提示詞", version="1")
+    @API("webui_decision_save", description="儲存話題分析的設定", version="1")
     async def webui_decision_save(self, **fields: Optional[str]) -> Dict[str, Any]:
-        """只改有填的項目；留空不改，免得把提示詞或情境說明清空（空的選項說明會讓決策模型回 422）。"""
-        fields.pop("emotions", None)  # 情緒選項用下面的新增／刪除
+        """只改有填的項目；留空不改。"""
         return {"saved": self._save_page_fields("decision", fields)}
-
-    @API("webui_decision_save_emotion", description="新增或修改一個情緒選項", version="1")
-    async def webui_decision_save_emotion(
-        self, emotion_name: str = "", emotion_description: str = ""
-    ) -> Dict[str, Any]:
-        """標籤已經有就改說明，沒有就加在最後；說明沒填就用標籤本身。"""
-        name = emotion_name.strip()
-        if not name or "：" in name:
-            raise ValueError("要填情緒標籤（不能含全形冒號「：」），例如：傻眼")
-        options = self._load_settings().decision.emotion_options()
-        options[name] = emotion_description.strip() or options.get(name) or name
-        self._save_page_setting("decision", "emotions", [f"{key}：{text}" for key, text in options.items()])
-        return {"saved": name}
-
-    @API("webui_decision_remove_emotion", description="刪除一個情緒選項", version="1")
-    async def webui_decision_remove_emotion(self, emotion_name: str = "") -> Dict[str, Any]:
-        options = self._load_settings().decision.emotion_options()
-        if emotion_name not in options:
-            raise ValueError("找不到這個情緒，請重新整理頁面")
-        if len(options) <= MIN_EMOTIONS:
-            raise ValueError(f"至少要留 {MIN_EMOTIONS} 個情緒：選項少於兩個時決策模型會拒絕整個請求")
-        del options[emotion_name]
-        self._save_page_setting("decision", "emotions", [f"{key}：{text}" for key, text in options.items()])
-        return {"removed": emotion_name}
-
-    @API("webui_decision_reset_prompts", description="提示詞、情境說明、情緒選項與送出的則數恢復預設", version="1")
-    async def webui_decision_reset_prompts(self) -> Dict[str, Any]:
-        defaults = type(self._load_settings().decision)()
-        for field in PROMPT_FIELDS:
-            self._save_page_setting("decision", field, getattr(defaults, field))
-        return {"reset": list(PROMPT_FIELDS)}
 
     @API("webui_decision_reset", description="清除決策模型的判斷統計", version="1")
     async def webui_decision_reset(self) -> Dict[str, Any]:

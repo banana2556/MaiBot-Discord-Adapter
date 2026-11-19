@@ -5,12 +5,13 @@
 用 2026-11-18 正式機 12:50～14:52 的 77 則測過：選項給每串的開頭那則、最近兩則和距離幾分鐘，
 比往回一則一則問少很多請求，有時間間隔的換話題也分得出來。
 
-- 每輪表情決策那次請求順便問：這輪還沒分配的訊息，各出一題選擇題（選項：開著的話題串、這輪前面剛問的那幾則、新話題）。
+- 每輪新訊息後第一次進 planner 時問：這輪還沒分配的訊息，各出一題選擇題（選項：開著的話題串、這輪前面剛問的那幾則、新話題）。
+- 分完後焦點（叫她的優先，否則最新一則別人說的）所在那串就是 planner、表達方式選擇和 replyer 唯一看得到的聊天（focus_ids）。
 - 用回覆功能回的直接跟被回覆那則同一串；她自己說的跟她回的那則（沒有就是她說之前最近叫她的那則）同一串；只有表情的不分。
 - 自己上傳的圖片直接附給決策模型看（連結預覽的圖不附，用預覽文字；表情和貼圖不附）。
 - 只有網址、卡片還沒到，或只有圖片的訊息：卡片晚到時插件會補記（emote._remember_card）；圖片直接附給決策模型看，
   不等主程式寫圖片描述。卡片沒到的先等（PENDING_SECONDS 內不問），不擋住這輪。
-- 話題串留 TOPIC_TTL_SECONDS；插件重啟就清空，聯想照舊往回找（recall._walk_thread）。
+- 話題串留 TOPIC_TTL_SECONDS；插件重啟就清空，第一輪會把 planner 上下文裡的訊息重新分一次。
 """
 
 import re
@@ -31,6 +32,8 @@ MAX_TOPICS = 60
 PENDING_SECONDS = 20
 GAP_HINT = "隔了很久（10 分鐘以上）才出現的通常是新話題，除非內容明顯接得上那一串。"
 NEW_TOPIC = "開了新話題，不屬於上面任何一串"
+# 叫她的訊息常常隔很久才接著她上次說的（「C醬做點什麼吧」接一天前她說的話）
+CALLING_HINT = "這則在叫你（@ 你、回覆你或喊你名字），常常是在接你最近說過話的那一串，就算隔了很久。"
 _URL = re.compile(r"https?://\S+")
 _LABEL = re.compile(r"\[[^\]]*\]")
 _CARD = ("[卡片", "[链接预览", "[連結預覽")
@@ -57,6 +60,25 @@ def clock(stamp: Optional[float]) -> str:
 def topic_line(message: Mapping[str, Any], entry: Mapping[str, Any]) -> str:
     who = "（你）" if message["self"] else f"「{message['user']}」"
     return f"[{clock(message.get('time'))}] {who}：{with_card(message, entry)}"
+
+
+def numbered(message: Mapping[str, Any], numbers: Mapping[int, str]) -> str:
+    """決策模型 state 裡那一行的寫法：別人的有 # 編號，她的標「（你）」。"""
+    if message["self"]:
+        return f"（你）：{message['text']}"
+    return f"#{numbers[id(message)]} 「{message['user']}」：{message['text']}"
+
+
+def focus_message(window: Sequence[Mapping[str, Any]], remembered: Mapping[str, Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """這輪的焦點：她上次說話之後叫她的最新一則，沒有就是最新一則別人的訊息；只有表情的不算（看不出在聊什麼）。"""
+    last_self = max((index for index, message in enumerate(window) if message["self"]), default=-1)
+    calling = [
+        message
+        for message in window[last_self + 1 :]
+        if not message["self"] and (remembered.get(message["msg_id"]) or {}).get("addressed")
+    ]
+    others = [message for message in window if not message["self"] and message["text"] != EMOTE_ONLY]
+    return (calling or others or [None])[-1]
 
 
 def new_store() -> Dict[str, Any]:
@@ -127,7 +149,17 @@ def topic_questions(
     keys: Dict[str, Dict[str, Any]] = {}
     images: List[str] = []
     asked: List[Mapping[str, Any]] = []
+    # 一輪最多問 ASSIGN_LIMIT 則，問最新的（焦點通常是最新的）；剛重啟時更早的就不分了
+    unasked = [
+        index
+        for index, message in enumerate(window)
+        if not message["self"] and message["text"] != EMOTE_ONLY and message["msg_id"] not in store["of"]
+        and message["quote"] not in store["of"]
+    ]
+    skipped = set(unasked[:-ASSIGN_LIMIT])
     for index, message in enumerate(window):
+        if index in skipped:
+            continue
         msg_id = message["msg_id"]
         if msg_id in store["of"] or message["text"] == EMOTE_ONLY:
             continue
@@ -142,8 +174,6 @@ def topic_questions(
         first = store["seen"].setdefault(msg_id, now)
         if lacks_content(with_card(message, entry)) and now - first < PENDING_SECONDS:
             continue  # 卡片可能還沒到，下一輪再分
-        if len(asked) >= ASSIGN_LIMIT:
-            break
         options: Dict[str, Tuple[str, Any]] = {}
         criteria: Dict[str, str] = {}
         for topic_id, topic in list(store["topics"].items())[-LIVE_TOPICS:]:
@@ -164,9 +194,10 @@ def topic_questions(
             picture = f"（這則的圖片是附圖第 {len(images)} 張）"
         number = numbers[id(message)]
         question_id = f"{TOPIC}{number}"
+        calling = CALLING_HINT if entry.get("addressed") else ""
         questions[question_id] = {
             "type": "choice",
-            "instructions": f"#{number} {line}{picture}\n#{number} 這則在接哪一串話題？{GAP_HINT}",
+            "instructions": f"#{number} {line}{picture}\n#{number} 這則在接哪一串話題？{GAP_HINT}{calling}",
             "criteria": criteria,
         }
         keys[question_id] = {"msg_id": msg_id, "line": line, "message": message, "options": options}
@@ -192,3 +223,19 @@ def topic_members(store: Mapping[str, Any], msg_id: str) -> List[str]:
     """這則所在那串的 msg_id；還沒分配時是空清單。"""
     topic_id = store["of"].get(msg_id)
     return list(store["topics"][topic_id]["members"]) if topic_id in store["topics"] else []
+
+
+def focus_ids(store: Mapping[str, Any], msg_id: str, arrived: Sequence[str]) -> List[str]:
+    """planner、表達方式選擇和 replyer 只看的 msg_id：msg_id 那串，加上最後一則分過話題的之後才收到、還沒分的。
+
+    Args:
+        arrived: 這個聊天收訊的順序（msg_id）。
+
+    Returns:
+        那則還沒分到話題串時是空清單（呼叫端就不過濾）。
+    """
+    members = topic_members(store, msg_id)
+    if not members:
+        return []
+    last = max((index for index, other in enumerate(arrived) if other in store["of"]), default=len(arrived) - 1)
+    return [*members, *(other for other in arrived[last + 1 :] if other not in members)]

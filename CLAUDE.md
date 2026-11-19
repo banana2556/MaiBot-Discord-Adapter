@@ -5,15 +5,15 @@ MaiBot 的 Discord 插件，跑在 MaiBot 的插件 Runner 裡（`maibot_sdk`）
 
 ## 結構
 
-- `plugin.py`：入口、訊息閘道器和大部分 Tool / Hook / `webui_*` API；按功能拆出去的 mixin 有定時提醒（`src/life/reminders.py` 的 `ReminderMixin`）、表情（`src/emote.py` 的 `EmoteMixin`）和回覆上下文（`src/quote_context.py` 的 `QuoteContextMixin`：回覆標籤、有人在找你、被回覆的舊訊息、回覆前文；前文怎麼找在 `src/reply_links.py`）和聯想（`src/recall.py` 的 `RecallMixin`：回覆前查記憶、看不懂時呼叫 linux 沙盒電腦插件的 `lookup` API 上網查；話題串在 `src/topics.py`，表情決策那次請求順便分配），新功能照這個方式拆，不要再往 `plugin.py` 加。
+- `plugin.py`：入口、訊息閘道器和大部分 Tool / Hook / `webui_*` API；按功能拆出去的 mixin 有定時提醒（`src/life/reminders.py` 的 `ReminderMixin`）、話題分析與表情工具（`src/emote.py` 的 `EmoteMixin`：每輪分話題串、選焦點）、焦點過濾（`src/quote_context.py` 的 `QuoteContextMixin`：planner、表達方式選擇和 replyer 只看焦點那串，加上回覆標籤、有人在找你）和聯想（`src/recall.py` 的 `RecallMixin`：用焦點那串查記憶、看不懂時呼叫 linux 沙盒電腦插件的 `lookup` API 上網查；話題串在 `src/topics.py`），新功能照這個方式拆，不要再往 `plugin.py` 加。
 - `config.py`：配置模型；`WEBUI_CONFIG_TABS` 決定設定頁分組，`PAGE_FIELDS` 是改到「DC生活」頁面設定的欄位（每頁一組，設定頁不再顯示，整節都搬走的設定節會整個隱藏）。
-- `webui.json`：「DC生活」工作區頁面（日常生活、主動話題、語音、定時提醒、話題分析（決策模型頁））。
+- `webui.json`：「DC生活」工作區頁面（日常生活、主動話題、語音、定時提醒、話題分析）。
 - `src/recv_handler/`：Discord → MaiBot；`src/send_handler/`：MaiBot → Discord（含 OpenCC 轉繁體）。
 - `src/voice/`：語音頻道、VAD、STT/TTS 服務商；`src/life/`：日常生活、主動話題、共用的狀態讀寫；`src/decision.py`：決策模型與統計。
-- `src/emote.py`（`EmoteMixin`）：表情情境判斷、只按表情／只發圖、回覆後附圖、`discord_emote` 工具與決策模型頁 API；`src/emote_library.py`：MaiBot 表情庫的向量檢索。
+- `src/emote.py`（`EmoteMixin`）：話題分析的入口（分話題、選焦點、跑聯想）、`discord_emote` 工具與話題分析頁 API；要不要說話、按不按表情由 planner 自己決定。`src/emote_library.py`：MaiBot 表情庫的向量檢索。
 - `../MaiBot`：MaiBot 本體，用 fork `banana2556/MaiBot` 的 `custom` 分支（遠端 `fork`）：上游正式版加上我們的修改，正式機也跑這個分支。
   平常只讀參考（hook 載荷、capability 實作、WebUI 頁面 schema）；要改主程式先請求許可，改了提交到 `custom`。
-  目前的修改：記憶檢索的實體查詢不用刪除索引、replyer 照 `reply_tool_args["_keep_message_ids"]` 過濾聊天紀錄（回覆前文用）。
+  目前的修改：記憶檢索的實體查詢不用刪除索引、replyer 照 `reply_tool_args["_keep_message_ids"]` 過濾聊天紀錄（焦點話題串用）。
 
 ## 測試
 

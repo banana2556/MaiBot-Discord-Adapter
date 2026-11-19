@@ -1,20 +1,19 @@
-"""聯想：回一則訊息之前，先想起這段在聊什麼、參與的人是誰，再交給 planner 自己判斷。
+"""聯想：回話之前，先想起這段在聊什麼、參與的人是誰，再交給 planner 自己判斷。
 
 人聽到「A：羚羊拿MP5打盾牌」時，文字（羚羊、MP5）和說話的人（A 平常打 R6）會一起喚起記憶，兩邊對得上就懂了；
-想錯時靠接下來的話修正，沒把握就用問的。照這個順序，在表情決策之後、她這輪要用文字參與時做（要回時才想，不邊聽邊想）：
+想錯時靠接下來的話修正，沒把握就用問的。每輪話題分析（emote._analyze）分完話題、選好焦點之後做：
 
-1. 找話題：從要回的那則（叫她的優先，否則最新一則）往回找。先用明確的前文（回覆、@、表情決策那次請求判斷的
-   「在接哪一則」；她自己說的接回她回的那則）當起點，再問決策模型前面幾則跟這串是不是同一件事。
-   前文判斷要等表情決策那次請求，所以聯想放在它之後。
+1. 話題：焦點所在的話題串（topics.py）；還沒分到串時只有焦點那一則。
 2. 喚起：把這串請小模型寫成檢索關鍵字（整段原文向量比對分數過不了門檻），查群記憶（文字聯想），
    每個參與者再用「名字＋關鍵字」限定這個人查（整體印象）。
    人物畫像沒開放給插件，用限定人物的記憶檢索代替。
-3. 整合：再問決策模型一次：看得懂這段在聊什麼嗎、哪一筆記憶最有關（可選都無關）。
-   記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），不直接取最像的那筆。
+3. 整合：問決策模型：看得懂這段在聊什麼嗎、哪一筆記憶最有關（可選都無關）。
+   記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），不直接取最像的那筆；
+   選了「都無關」時那些記憶和用同一組關鍵字查到的人物印象都不給。
 4. 看不懂時請「Linux 沙盒電腦」插件的 lookup API 上網查（十幾秒）。
 5. 用確定的話題（選中的記憶或查到的說明）再查參與者跟這個話題有關的記憶。
-6. 整理成一段「聯想」接在 planner 系統提示詞後面：同一回合每次請求都帶，換了要回的那則才換；
-   標明是聯想、把握多少，沒把握時要她用問的或保守地接。她回這則時 replyer 也看得到。
+6. 整理成一段「聯想」接在 planner 系統提示詞後面：同一回合每次請求都帶，換了焦點才換；
+   標明是聯想、把握多少，沒把握時要她用問的或保守地接。replyer 也看得到。
 """
 
 import asyncio
@@ -24,8 +23,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from maibot_sdk import HookHandler
 
 from .emote import display_message_id, planner_messages
-from .topics import lacks_content, topic_members, with_card
-from .reply_links import EMOTE_ONLY, NONE, context_ids, plain
+from .reply_links import NONE, plain
+from .topics import focus_message, lacks_content, numbered, topic_members, with_card
 
 LOOKUP_API = "luca.linux-computer.lookup"
 # 文字聯想取幾筆、每個人取幾筆、最多看幾個人
@@ -35,10 +34,6 @@ PERSON_HITS = 2
 MAX_PEOPLE = 3
 # 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
 FOCUS_WAIT_SECONDS = 5
-# 往回問幾則別人的訊息「是不是同一件事」；機率到 SAME_THRESHOLD 才算進這串
-WALK_BACK = 6
-SAME_THRESHOLD = 0.5
-SAME = "recall_same_"
 # 查詢字數上限（記憶檢索和整理話題用）
 QUERY_CHARS = 300
 # 正式機的記憶檢索常要好幾秒，4 秒時幾乎每次都逾時；等不到就這輪少一段聯想
@@ -79,41 +74,6 @@ def parse_hits(result: Any) -> List[str]:
     return [hit.strip() for hit in _HIT.split(body) if hit.strip()]
 
 
-def focus_message(window: Sequence[Mapping[str, Any]], remembered: Mapping[str, Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
-    """要回的那則：她上次說話之後叫她的最新一則，沒有就是最新一則別人的訊息；只有表情的不算（看不出在聊什麼）。"""
-    last_self = max((index for index, message in enumerate(window) if message["self"]), default=-1)
-    calling = [
-        message
-        for message in window[last_self + 1 :]
-        if not message["self"] and (remembered.get(message["msg_id"]) or {}).get("addressed")
-    ]
-    others = [message for message in window if not message["self"] and message["text"] != EMOTE_ONLY]
-    return (calling or others or [None])[-1]
-
-
-def thread_seed(
-    window: Sequence[Mapping[str, Any]], context: Sequence[str], remembered: Mapping[str, Mapping[str, Any]]
-) -> List[str]:
-    """往回找的起點：明確的前文，她自己說的再接回她回的那則（有 quote 用 quote，沒有就是她說之前最近叫她的那則）。"""
-    position = {message["msg_id"]: index for index, message in enumerate(window)}
-    seed = [msg_id for msg_id in context if msg_id in position]
-    for msg_id in list(seed):
-        message = window[position[msg_id]]
-        if not message["self"]:
-            continue
-        target = message["quote"] if message["quote"] in position else ""
-        if not target:
-            calling = [
-                earlier["msg_id"]
-                for earlier in window[: position[msg_id]]
-                if not earlier["self"] and (remembered.get(earlier["msg_id"]) or {}).get("addressed")
-            ]
-            target = calling[-1] if calling else ""
-        if target and target not in seed:
-            seed.append(target)
-    return sorted(seed, key=position.__getitem__)
-
-
 def thread_messages(window: Sequence[Mapping[str, Any]], members: Sequence[str]) -> List[Mapping[str, Any]]:
     """這串的訊息照時間排：成員，加上最早的成員到最後之間她自己說的。"""
     indexes = [index for index, message in enumerate(window) if message["msg_id"] in members]
@@ -125,29 +85,6 @@ def thread_messages(window: Sequence[Mapping[str, Any]], members: Sequence[str])
         for index, message in enumerate(window)
         if indexes[0] <= index <= indexes[-1] and (message["msg_id"] in members or message["self"])
     ]
-
-
-def numbered(message: Mapping[str, Any], numbers: Mapping[int, str]) -> str:
-    """決策模型 state 裡那一行的寫法：別人的有 # 編號，她的標「（你）」。"""
-    if message["self"]:
-        return f"（你）：{message['text']}"
-    return f"#{numbers[id(message)]} 「{message['user']}」：{message['text']}"
-
-
-def same_questions(
-    thread: Sequence[Mapping[str, Any]], candidates: Sequence[Mapping[str, Any]], numbers: Mapping[int, str]
-) -> Dict[str, Dict[str, Any]]:
-    """前面幾則各問一題：跟要回的這串是不是同一件事。"""
-    text = "\n".join(numbered(message, numbers) for message in thread)
-    return {
-        f"{SAME}{numbers[id(message)]}": {
-            "type": "choice",
-            "instructions": f"這段對話：\n{text}\n\n{numbered(message, numbers)}\n"
-            f"#{numbers[id(message)]} 和這段在聊同一件事嗎？",
-            "criteria": {"yes": "是同一件事，或是這段的開頭、前因", "no": "在聊別的事"},
-        }
-        for message in candidates
-    }
 
 
 def participants(
@@ -222,19 +159,22 @@ def recall_note(recall: Mapping[str, Any], picked: str, confidence: float, looku
         lines.append(f"- 上網查到：{lookup['summary']}（來源：{sources}）")
     if picked:
         lines.append(f"- 可能在聊：{picked}（把握 {confidence:.2f}）")
-    elif recall["hits"] and not lookup.get("summary"):
+    elif recall["hits"] and not recall.get("rejected") and not lookup.get("summary"):
+        # 決策模型沒給答案（請求失敗）時才給這段；它選了「都無關」就是真的無關
         lines.append("- 想起幾筆可能有關的記憶，但看不出是哪一筆：" + "；".join(recall["hits"]))
     remembered = False
     for person in recall["people"]:
-        memories = list(dict.fromkeys([*person.get("details", []), *person["impression"]]))[:3]
+        # 選了「都無關」時，用同一組關鍵字查到的印象也一樣不準，只留用確定的話題查到的
+        impression = [] if recall.get("rejected") else person["impression"]
+        memories = list(dict.fromkeys([*person.get("details", []), *impression]))[:3]
         remembered = remembered or bool(memories)
-        if not memories and person.get("missed"):
-            continue  # 沒等到結果不等於沒有記憶，別跟她說「沒有相關的記憶」
+        if not memories and (person.get("missed") or recall.get("rejected")):
+            continue  # 沒等到結果不等於沒有記憶；記憶都無關時也不用一個個說「沒有相關的記憶」
         lines.append(f"- 「{person['name']}」：" + ("；".join(memories) if memories else "沒有相關的記憶"))
     unsure = not lookup.get("summary") and confidence < CONFIDENT
     if unsure:
         lines.append(UNSURE)
-    elif not (lookup.get("summary") or recall["hits"] or remembered):
+    elif not (lookup.get("summary") or (recall["hits"] and not recall.get("rejected")) or remembered):
         return ""
     focus = recall["focus"]
     return NOTE_HEAD.format(msg_id=focus["msg_id"], user=focus["user"]) + "\n" + "\n".join(lines)
@@ -263,7 +203,7 @@ def recall_detail(recall: Mapping[str, Any], lookup: Mapping[str, Any], note: st
 
 
 class RecallMixin:
-    """需要主插件提供 ctx、_append_system_text、_client_manager，和 EmoteMixin 的 _reply_links。"""
+    """需要主插件提供 ctx、_append_system_text、_client_manager，和 EmoteMixin 的 _topics、_focus、_inbound。"""
 
     def _init_recall_state(self) -> None:
         # 每個聊天最近一次聯想：{"focus": msg_id, "note": 給 planner / replyer 的那段, "lookup": 上網查的結果}
@@ -319,100 +259,39 @@ class RecallMixin:
         remembered: Mapping[str, Mapping[str, Any]],
         numbers: Mapping[int, str],
         state: str,
-        scene: str,
+        focus: Mapping[str, Any],
     ) -> tuple[str, str, Dict[str, str]]:
-        """表情決策之後跑完整個聯想；回傳頁面「聯想」欄的摘要和判斷詳情的經過（沒有別人的訊息時都是空字串）。"""
-        recall = await self._recall(decision, session_id, window, remembered, numbers, state)
-        if recall is None:
-            return "", "", {}
+        """分完話題後跑完整個聯想；回傳頁面「聯想」欄的摘要、判斷詳情的經過和頁面欄位。"""
+        recall = await self._recall(session_id, window, remembered, numbers, focus)
         number = numbers[id(recall["focus"])]
         answers = await self._ask_decision(decision, state + recall_state(recall, number), recall_questions(recall, number))
-        return await self._finish_recall(decision, session_id, recall, answers, scene)
+        return await self._finish_recall(decision, session_id, recall, answers)
 
-    async def _walk_thread(
-        self,
-        decision: Any,
-        session_id: str,
-        window: Sequence[Mapping[str, Any]],
-        remembered: Mapping[str, Mapping[str, Any]],
-        numbers: Mapping[int, str],
-        state: str,
-        focus: Mapping[str, Any],
-    ) -> tuple[List[Mapping[str, Any]], List[str]]:
-        """要回的那則所在的話題串（topics.py）；還沒分到串時往回找：明確前文當起點，再問前面幾則是不是同一件事。
-
-        Returns:
-            這串的訊息（照時間排，最後是要回的那則）和判斷詳情裡的經過。
-        """
+    def _thread(
+        self, session_id: str, window: Sequence[Mapping[str, Any]], numbers: Mapping[int, str], focus: Mapping[str, Any]
+    ) -> tuple[List[Mapping[str, Any]], List[str], str]:
+        """焦點所在的話題串（照時間排）、判斷詳情裡的經過、頁面的話題串欄；還沒分到串時只有焦點那一則。"""
         store = getattr(self, "_topics", {}).get(session_id)
         members = topic_members(store, focus["msg_id"]) if store else []
-        if members:
-            thread = thread_messages(window, members)
-            topic_id = store["of"][focus["msg_id"]]
-            walk = [f"→ {numbered(focus, numbers)}（要回的這則，話題串 {topic_id}）"]
-            walk += [f"← {numbered(message, numbers)}（同一串）" for message in reversed(thread) if message is not focus]
-            opener = store["topics"][topic_id]["lines"][0].split("：", 1)[-1]
-            self._topic_label = f"串 {topic_id}「{opener[:16]}」・{len(members)} 則"
-            return thread, walk
-        links = self._reply_links.get(session_id, {})
-        inbound = remembered.get(focus["msg_id"]) or {}
-        context = context_ids(window, focus["msg_id"], inbound, links.get(focus["msg_id"], []), her_last_line=False)
-        seed = thread_seed(window, context, remembered)
-        # msg_id -> 這則在經過裡的說明；最後照聊天順序從要回的那則往回列
-        notes: Dict[str, str] = {focus["msg_id"]: "要回的這則", **{msg_id: "明確前文" for msg_id in seed}}
-        members = [*seed, focus["msg_id"]]
-        before = window[: next(index for index, message in enumerate(window) if message["msg_id"] == focus["msg_id"])]
-        candidates = [
-            message
-            for message in before
-            if not message["self"] and message["msg_id"] not in members and message["text"] != EMOTE_ONLY
-        ][-WALK_BACK:]
-        if candidates:
-            questions = same_questions(thread_messages(window, members), candidates, numbers)
-            answers = await self._ask_decision(decision, state, questions) or {}
-            for message in candidates:
-                answer = answers.get(f"{SAME}{numbers[id(message)]}")
-                if not isinstance(answer, Mapping):
-                    notes[message["msg_id"]] = "✕沒拿到判斷，不算"
-                    continue
-                same = probability(answer, "yes")
-                if same >= SAME_THRESHOLD:
-                    members.append(message["msg_id"])
-                    notes[message["msg_id"]] = f"同一件事 {same:.2f}"
-                else:
-                    notes[message["msg_id"]] = f"✕同一件事 {same:.2f}，不算"
-        # 回覆或在接這串裡某一則的也算（例如問「Tc 還是國際服」算進來，回答「國際」那則單獨問時常被判成不相關）
-        for message in candidates:
-            if message["msg_id"] not in members and any(
-                target in members for target in [message["quote"], *links.get(message["msg_id"], [])]
-            ):
-                members.append(message["msg_id"])
-                notes[message["msg_id"]] = notes[message["msg_id"]].lstrip("✕").replace("，不算", "") + "，但在接這串，算"
-        walk = []
-        for message in reversed(window):
-            note = notes.get(message["msg_id"])
-            if note is None:
-                continue
-            mark = "✕" if note.startswith("✕") else "→" if message["msg_id"] == focus["msg_id"] else "←"
-            walk.append(f"{mark} {numbered(message, numbers)}（{note.lstrip('✕')}）")
-        return thread_messages(window, members), walk
+        if not members:
+            return [focus], [f"→ {numbered(focus, numbers)}（焦點，還沒分到話題串）"], "沒分到串"
+        thread = thread_messages(window, members)
+        topic_id = store["of"][focus["msg_id"]]
+        walk = [f"→ {numbered(focus, numbers)}（焦點，話題串 {topic_id}）"]
+        walk += [f"← {numbered(message, numbers)}（同一串）" for message in reversed(thread) if message is not focus]
+        opener = store["topics"][topic_id]["lines"][0].split("：", 1)[-1]
+        return thread, walk, f"串 {topic_id}「{opener[:16]}」・{len(members)} 則"
 
     async def _recall(
         self,
-        decision: Any,
         session_id: str,
         window: Sequence[Mapping[str, Any]],
         remembered: Mapping[str, Mapping[str, Any]],
         numbers: Mapping[int, str],
-        state: str,
-    ) -> Optional[Dict[str, Any]]:
-        """找出要回的那則、它所在的這串和參與者，同時查文字聯想和每個人的整體印象；沒有別人的訊息時回傳 None。"""
-        focus = focus_message(window, remembered)
-        if focus is None:
-            return None
-        self._topic_label = ""
-        said, walk = await self._walk_thread(decision, session_id, window, remembered, numbers, state, focus)
-        topic_label = self._topic_label or f"往回找・{len(said)} 則"
+        focus: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """焦點所在的這串和參與者，同時查文字聯想和每個人的整體印象。"""
+        said, walk, topic_label = self._thread(session_id, window, numbers, focus)
         context = [message["msg_id"] for message in said if message["msg_id"] != focus["msg_id"]]
         # 叫她的 @ 換成「@你」：她的 Discord 暱稱會被小模型和上網查當成要查的詞
         bot = self._bot_name()
@@ -482,7 +361,7 @@ class RecallMixin:
         return "" if keywords == NOTHING else keywords
 
     async def _finish_recall(
-        self, decision: Any, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]], scene: str
+        self, decision: Any, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]]
     ) -> tuple[str, str, Dict[str, str]]:
         """第 2～5 步：照決策模型的答案挑記憶、看不懂就上網查、用話題查參與者，記下給 planner 的那段。
 
@@ -494,6 +373,7 @@ class RecallMixin:
         choice = str(pick.get("choice") or "")
         index = int(choice[1:]) if re.fullmatch(r"m\d+", choice) else 0
         picked = recall["hits"][index - 1] if 0 < index <= len(recall["hits"]) else ""
+        recall["rejected"] = choice == NONE
         # 請求失敗沒拿到判斷時不當作沒把握，免得每次失敗都叫她別把話說死
         confidence = probability(pick, choice) if picked else probability(understand, "yes") if understand else 1.0
         lost = understand.get("choice") == "no"
@@ -501,7 +381,7 @@ class RecallMixin:
         lookup: Dict[str, Any] = {}
         if previous.get("focus") == recall["focus"]["msg_id"] and previous.get("lookup", {}).get("summary"):
             lookup = previous["lookup"]  # 同一則查過就不再查
-        elif lost and decision.lookup_enabled and scene in ("text", "text_emote"):
+        elif lost and decision.lookup_enabled:
             lookup = await self._lookup(session_id, recall["chat"], picked)
         topic = picked or str(lookup.get("summary") or "")
         if topic:
@@ -566,10 +446,12 @@ class RecallMixin:
         timeout_ms=1000,
     )
     async def add_recall_to_replyer(self, **kwargs: Any) -> Dict[str, Any]:
-        """她回的正是聯想的那則時，replyer 也看到同一段聯想（它看不到 planner 的系統提示詞）。"""
-        recall = self._recalls.get(str(kwargs.get("session_id") or "")) or {}
+        """她回的是焦點那串（或沒指定回哪則）時，replyer 也看到同一段聯想（它看不到 planner 的系統提示詞）。"""
+        session_id = str(kwargs.get("session_id") or "")
+        recall = self._recalls.get(session_id) or {}
         target = display_message_id(str(kwargs.get("reply_message_id") or ""))
-        if not recall.get("note") or recall["focus"] != target:
+        store = getattr(self, "_topics", {}).get(session_id) or {"of": {}, "topics": {}}
+        if not recall.get("note") or (target and target not in topic_members(store, recall["focus"]) and target != recall["focus"]):
             return {"action": "continue"}
         kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{recall['note']}".strip()
         return {"action": "continue", "modified_kwargs": kwargs}

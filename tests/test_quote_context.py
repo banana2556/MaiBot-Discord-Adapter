@@ -1,9 +1,10 @@
-"""回覆和叫她的訊息：標出每則回覆在回誰、列出叫她的訊息、被回覆的舊訊息補上它和之前的對話。"""
+"""planner 看到的聊天：標出每則回覆在回誰、列出叫她的訊息；只留焦點那串（keep_focus_items）。"""
 
 import asyncio
 from types import SimpleNamespace
 
 from test_emote import FUNNY, _env, _inbound, _message_item
+from test_typing_indicator import _load_adapter_module
 
 # 兩小時前她說的話（早就不在 planner 上下文），和剛剛有人回覆那則的訊息
 OLD, REPLY = "1567700000000000001", "1567799999999999999"
@@ -62,35 +63,10 @@ def _planner(env, *chat, tools=()):
         "tool_definitions": [{"type": "function", "function": {"name": name}} for name in tools],
         "session_id": "s1",
     }
-    result = asyncio.run(env.plugin.add_quote_context_to_planner(**kwargs))
+    result = asyncio.run(env.plugin.keep_focus_thread(**kwargs))
     items = result.get("modified_kwargs", {}).get("items") or kwargs["items"]
     note = "".join(part["text"] for part in items[0]["parts"][1:])
     return result, note, [item["parts"][0]["text"].split("\n", 1)[1] for item in items[1:]]
-
-
-def test_planner_and_replyer_get_the_conversation_before_an_old_quoted_message(monkeypatch) -> None:
-    env, calls = _setup(monkeypatch)
-    _, note, texts = _planner(env)
-    alias = env.module.display_message_id
-    assert note.startswith("【被回覆的舊訊息】") and f"msg_id={alias(REPLY)}（小美）" in note
-    assert "明天要不要去看展" in note, "planner 看得到被回覆那則之前在聊什麼"
-    assert texts == ["我剛剛跌倒了哈哈哈", "[回覆你：好啊，明天見]真的嗎"]
-    assert calls["get_by_id"] == [(OLD, "s1")]
-    assert calls["readable"][0]["end_time"] == OLD_TIME and calls["readable"][0]["chat_id"] == "s1"
-
-    # 同一輪後面的請求不再查
-    _planner(env)
-    assert len(calls["get_by_id"]) == 1
-
-    # replyer 回這則時也拿得到；回別則不加
-    reply = asyncio.run(
-        env.plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=REPLY, extra_prompt="原本的要求")
-    )
-    prompt = reply["modified_kwargs"]["extra_prompt"]
-    assert prompt.startswith("原本的要求\n你要回覆的這則訊息是在回覆你：好啊，明天見。\n")
-    assert "明天要不要去看展" in prompt
-    other = asyncio.run(env.plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=FUNNY))
-    assert other == {"action": "continue"}
 
 
 def test_reply_between_others_is_labelled_so_she_does_not_take_it_as_hers(monkeypatch) -> None:
@@ -121,7 +97,7 @@ def test_planner_is_told_who_is_calling_her_until_she_answers(monkeypatch) -> No
     _, note, _ = _planner(env, mine, replying, chatting, tools=("reply", "stop"))
     assert note.startswith("【有人在找你】")
     assert f"msg_id={alias(REPLY)}（小美）：[回覆你：好啊，明天見]真的嗎" in note
-    assert "跌倒" not in note and "【被回覆的舊訊息】" not in note and calls["get_by_id"] == []
+    assert "跌倒" not in note and "【被回覆的舊訊息】" not in note and calls["get_by_id"] == [], "被回覆的舊訊息不再另外補"
 
     # 她回過話之後就不再提；睡覺時段只剩 stop 也不提
     answered = _message_item("mself", "麥麥", "對啊", self_message=True)
@@ -129,22 +105,18 @@ def test_planner_is_told_who_is_calling_her_until_she_answers(monkeypatch) -> No
     assert _planner(env, mine, replying, chatting, tools=("stop",))[1] == ""
 
 
-def test_quote_maibot_never_saw_falls_back_to_the_quoted_text(monkeypatch) -> None:
-    # 例如別的 bot 說的話：MaiBot 沒收過（SDK 回 None），只能給收訊時帶的那一則
-    env, calls = _setup(monkeypatch, found=None)
-    _, note, _ = _planner(env)
-    assert "「麥麥」說：好啊，明天見" in note and calls["readable"] == []
-
-
-def test_failed_lookup_adds_nothing_and_retries_later(monkeypatch) -> None:
-    env, _ = _setup(monkeypatch, found={"success": False, "error": "資料庫忙"})
-    _, note, texts = _planner(env)
-    assert note == "" and texts[-1] == "[回覆你：好啊，明天見]真的嗎", "查不到舊對話，還是標出在回覆誰"
-    assert any("資料庫忙" in str(line) for line in env.ctx.logs)
-    assert env.plugin._quote_contexts == {}, "失敗不記，下一輪再查"
-
-
 def test_nothing_remembered_leaves_the_request_alone(monkeypatch) -> None:
     env, _ = _setup(monkeypatch)
     env.plugin._inbound.clear()
     assert _planner(env)[0] == {"action": "continue"}
+
+
+def test_keep_focus_items_drops_other_topics_but_not_newer_messages_or_tool_calls(monkeypatch) -> None:
+    quote = _load_adapter_module("src.quote_context")
+    system = {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]}
+    a, b, c, d = (_message_item(f"m{n}", "x", "t") for n in "abcd")
+    b["meta"] = {"item_id": "ib"}
+    reminder = {"item_type": "UserMessageItem", "meta": {"item_id": "link-reminder-ib"}, "parts": [{"type": "text", "text": "提醒"}]}
+    call = {"item_type": "FunctionCallItem", "meta": {}, "tool_call": {}}
+    kept, dropped = quote.keep_focus_items([system, a, b, reminder, call, c, d], {"ma"}, {"ma", "mb", "mc"})
+    assert kept == [system, a, call, d] and dropped == 2, "其他話題的 b、c 和 b 的連結提醒拿掉；分完話題之後才出現的 d 留著"

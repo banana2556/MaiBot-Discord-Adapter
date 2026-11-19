@@ -995,25 +995,8 @@ class LifeConfig(PluginConfigBase):
         return _normalize_string(value) or "00:00"
 
 
-# 決策模型的情緒選項預設值，每項「標籤：說明」
-DEFAULT_EMOTIONS = (
-    "好笑：覺得好笑、笑翻",
-    "開心：開心、興奮",
-    "讚同：認同、按讚、說得對",
-    "恭喜：恭喜、替對方高興",
-    "驚訝：驚訝、不敢相信",
-    "無語：無言、傻眼、尷尬",
-    "疑惑：疑問、聽不懂",
-    "心疼：安慰、抱抱、心疼",
-    "害羞：害羞、不好意思",
-    "生氣：不滿、生氣、抗議",
-    "難過：難過、哭哭",
-    "收到：知道了、收到、OK",
-)
-
-
 class DecisionConfig(PluginConfigBase):
-    """決策模型：Jev、vLLM-SR Decision 這類只回機率、不寫文字的模型，用來判斷這則訊息要用文字、表情還是兩者回應。挑哪張表情不用模型，用 MaiBot 表情庫描述的向量相似度。"""
+    """決策模型：Jev、vLLM-SR Decision 這類只回機率、不寫文字的模型，用來把群聊分成話題串、判斷看不看得懂和哪筆記憶有關（話題分析與聯想）。"""
 
     __ui_label__: ClassVar[str] = "決策模型"
     __ui_order__: ClassVar[int] = 5
@@ -1021,8 +1004,9 @@ class DecisionConfig(PluginConfigBase):
     enabled: bool = Field(
         default=False,
         description=(
-            "收到新訊息後第一次進 planner 時，先問決策模型這輪該怎麼參與：只要文字、文字＋附圖、只按表情或只發圖。"
-            "結果只用一句提示告訴 planner，不會拿掉它的工具；請求失敗的那輪 planner 照舊自己決定。"
+            "群聊收到新訊息後第一次進 planner 時，先問決策模型把訊息分到話題串，選出這輪的焦點（叫她的優先，否則最新一則）所在那串，"
+            "再聯想（查記憶、看不懂就上網查）。planner、表達方式選擇和 replyer 都只看這一串；"
+            "要不要說話、要不要按表情由 planner 自己決定。replyer 的過濾要用 banana2556/MaiBot 的 custom 分支。"
         ),
         json_schema_extra={"label": "啟用決策模型", "order": 0},
     )
@@ -1042,7 +1026,7 @@ class DecisionConfig(PluginConfigBase):
             "label": "API Key",
             "input_type": "password",
             "order": 2,
-            "hint": "決策模型的其他設定、提示詞和情緒選項在「DC生活 → 決策模型」頁面。",
+            "hint": "決策模型的其他設定在「DC生活 → 話題分析」頁面。",
         },
     )
     model: str = Field(
@@ -1050,131 +1034,18 @@ class DecisionConfig(PluginConfigBase):
         description="模型名稱。",
         json_schema_extra={"label": "模型", "order": 3, "hint": "vLLM-SR：vllm-sr/d3-flash 或 d3-ultra；Jev：jev-latest"},
     )
-    quick_enabled: bool = Field(
-        default=True,
-        description=(
-            "決策模型判斷這輪只需要快速表態（在某則訊息按個表情或回一張圖）時，直接替她做，"
-            "並提醒 planner 沒人在問她的話這輪就不用再說話；有人 @ 她、回覆她、私訊或叫她暱稱和別名（和 MaiBot 判斷被提及用同一份）時照常可以回覆。"
-        ),
-        json_schema_extra={
-            "label": "純快速反應",
-            "order": 4,
-            "hint": "MaiBot 不讓插件跳過 planner，所以那次 planner 請求仍會發生；說不說話由 planner 決定。",
-        },
-    )
-    append_enabled: bool = Field(
-        default=True,
-        description="決策模型判斷適合「文字回覆＋一張圖」時，等她的文字送出後自動附一張符合情緒的表情或貼圖。",
-        json_schema_extra={"label": "回覆後附圖", "order": 5},
-    )
-    emote_threshold: float = Field(
-        default=0.5,
-        ge=0,
-        le=1,
-        description="決策模型選的情境機率要高過這個值才照做，否則當成只要文字回覆；越高越少用表情。",
-        json_schema_extra={"label": "表情情境門檻", "order": 6, "step": 0.05},
-    )
     context_messages: int = Field(
         default=15,
         ge=3,
         le=30,
-        description="送給決策模型看的聊天則數：planner 這輪上下文的最後幾則。",
-        json_schema_extra={"label": "送出的聊天則數", "order": 7, "step": 1},
-    )
-    target_candidates: int = Field(
-        default=8,
-        ge=1,
-        le=15,
-        description="其中最後幾則別人的訊息可以當表態對象（按表情、發圖的對象）。",
-        json_schema_extra={"label": "可表態的訊息數", "order": 8, "step": 1},
-    )
-    reply_context_enabled: bool = Field(
-        default=False,
-        description=(
-            "回覆前文：麥麥回一則訊息時，回覆模型只看那則所在的話題串（要開聯想才會分話題串；要用 banana2556/MaiBot 的 custom 分支），其他話題的訊息和圖片都略過，避免把不同話題混在一起。"
-            "前文先看回覆、@、同一人連發；都沒有時，問決策模型時順便判斷那則在接哪一則（不多打一次請求）。"
-            "planner 的「有人在找你」也會標出每則在接什麼。"
-        ),
-        json_schema_extra={"label": "回覆前文", "order": 9},
-    )
-    link_threshold: float = Field(
-        default=0.3,
-        ge=0,
-        le=1,
-        description="決策模型判斷「在接哪一則」的機率要高過這個值才算前文；看頁面「最近的判斷」的前文欄來調。",
-        json_schema_extra={"label": "前文判斷門檻", "order": 18, "step": 0.05},
-    )
-    recall_enabled: bool = Field(
-        default=False,
-        description=(
-            "聯想：群聊裡回一則訊息前，先用它和前文查群記憶、查參與者的記憶，問決策模型時順便判斷看不看得懂、哪一筆記憶有關，"
-            "整理成一段給 planner 判斷（標明是聯想、把握多少，沒把握時要她用問的）。每次多幾次記憶檢索，planner 開始前慢一點。"
-        ),
-        json_schema_extra={"label": "聯想", "order": 19},
+        description="分話題時看 planner 上下文的最後幾則。",
+        json_schema_extra={"label": "送出的聊天則數", "order": 4, "step": 1},
     )
     lookup_enabled: bool = Field(
         default=False,
-        description="聯想時看不懂話題、這輪又要用文字參與，就請「Linux 沙盒電腦」插件上網查（十幾秒）；要先裝好並啟用那個插件。",
-        json_schema_extra={"label": "看不懂就上網查", "order": 20},
+        description="聯想時看不懂話題，就請「Linux 沙盒電腦」插件上網查（十幾秒）；要先裝好並啟用那個插件。",
+        json_schema_extra={"label": "看不懂就上網查", "order": 5},
     )
-    scene_instructions: str = Field(
-        default="看最近的群聊，你這輪要怎麼參與最自然？快速表態可以針對前面任何一則 # 訊息，不一定是最新的。",
-        description="問「這輪怎麼參與」的提示詞。",
-        json_schema_extra={"label": "情境題提示詞", "order": 10},
-    )
-    scene_text: str = Field(
-        default="用文字參與：在聊話題、有人在問問題或在跟你說話、要給意見或資訊",
-        description="情境「只要文字」的說明。",
-        json_schema_extra={"label": "情境說明：只要文字", "order": 11},
-    )
-    scene_text_emote: str = Field(
-        default="用文字參與，說完再附一張表情或貼圖讓語氣更生動",
-        description="情境「文字＋附圖」的說明。",
-        json_schema_extra={"label": "情境說明：文字＋附圖", "order": 12},
-    )
-    scene_quick_reaction: str = Field(
-        default="不用說話，在某則訊息上按個表情就好：附和、按讚、跟著大家笑、小小的驚訝",
-        description="情境「只按表情」的說明。",
-        json_schema_extra={"label": "情境說明：只按表情", "order": 13},
-    )
-    scene_quick_sticker: str = Field(
-        default="不用說話，回一張表情或貼圖就好：現在的話題很好笑或情緒很強烈，用圖比打字自然",
-        description="情境「只發圖」的說明。",
-        json_schema_extra={"label": "情境說明：只發圖", "order": 14},
-    )
-    target_instructions: str = Field(
-        default="如果要按表情或發圖表態，最值得回應的是哪一則 # 訊息？真正好笑或有梗的那則，常常已經被別人接了幾句。",
-        description="問「對哪一則表態」的提示詞。",
-        json_schema_extra={"label": "對象題提示詞", "order": 15},
-    )
-    emotion_instructions: str = Field(
-        default="表態或回應時，你最想表達的情緒是哪一個？",
-        description="問「要表達什麼情緒」的提示詞。",
-        json_schema_extra={"label": "情緒題提示詞", "order": 16},
-    )
-    emotions: List[str] = Field(
-        default_factory=lambda: list(DEFAULT_EMOTIONS),
-        description="情緒選項，每項「標籤：說明」；挑表情時用「標籤＋那則訊息」比對表情庫描述。",
-        json_schema_extra={"label": "情緒選項", "order": 17},
-    )
-
-    def scene_criteria(self) -> Dict[str, str]:
-        """情境題的選項 {情境: 說明}；情境本身固定，說明可以改。"""
-        return {
-            "text": self.scene_text,
-            "text_emote": self.scene_text_emote,
-            "quick_reaction": self.scene_quick_reaction,
-            "quick_sticker": self.scene_quick_sticker,
-        }
-
-    def emotion_options(self) -> Dict[str, str]:
-        """情緒選項 {標籤: 說明}，照設定的順序。"""
-        options: Dict[str, str] = {}
-        for item in self.emotions:
-            name, _, description = str(item).partition("：")
-            if name.strip():
-                options[name.strip()] = description.strip() or name.strip()
-        return options
 
 
 class TopicConfig(PluginConfigBase):
@@ -1279,28 +1150,7 @@ PAGE_FIELDS: Dict[str, tuple[str, ...]] = {
         "share_instructions",
     ),
     "reminder": ("enabled", "drift_minutes", "max_per_chat", "followup_enabled", "followup_max_per_chat"),
-    "decision": (
-        "enabled",
-        "base_url",
-        "model",
-        "quick_enabled",
-        "append_enabled",
-        "emote_threshold",
-        "reply_context_enabled",
-        "link_threshold",
-        "recall_enabled",
-        "lookup_enabled",
-        "context_messages",
-        "target_candidates",
-        "scene_instructions",
-        "scene_text",
-        "scene_text_emote",
-        "scene_quick_reaction",
-        "scene_quick_sticker",
-        "target_instructions",
-        "emotion_instructions",
-        "emotions",
-    ),
+    "decision": ("enabled", "base_url", "model", "context_messages", "lookup_enabled"),
     "voice": (
         "voice_mode",
         "fixed_channel_id",

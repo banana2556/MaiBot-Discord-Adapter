@@ -2,8 +2,8 @@
 
 import asyncio
 
-from test_emote import FUNNY, LAUGH, LATEST, _answer, _message_item
-from test_recall import _item, _planner, _setup
+from test_emote import FUNNY, LAUGH, LATEST, _message_item, _topics
+from test_recall import _item, _planner, _run, _setup
 from test_typing_indicator import _load_adapter_module
 
 topics = _load_adapter_module("src.topics")
@@ -50,11 +50,25 @@ def test_rules_pending_links_images_and_answers() -> None:
     assert none == []
 
 
-def test_recall_reads_the_topic_thread_instead_of_walking_back(monkeypatch) -> None:
-    """表情決策那次請求順便分好話題，聯想直接拿要回那則所在的串，不用再一則一則往回問。"""
-    scene = {**_answer("text", 0.8), "topic_2": {"choice": "none"}, "topic_3": {"choice": "t1"}, "topic_4": {"choice": "m2"}}
+def test_newest_messages_are_assigned_first_and_focus_ids_keep_later_arrivals() -> None:
+    """剛重啟時上下文裡全是沒分過的：一輪只問最新的 ASSIGN_LIMIT 則，焦點（最新的）一定分得到。"""
+    window = [_msg(f"m{n}", "小明", f"第 {n} 句", 1000.0 + n) for n in range(10)]
+    numbers = {id(m): str(n) for n, m in enumerate(window, 1)}
+    store = topics.new_store()
+    questions, _, _ = topics.topic_questions(store, window, numbers, {}, now=2000.0)
+    assert list(store["of"]) == ["m4"] and list(questions) == [f"topic_{n}" for n in range(6, 11)], (
+        "最舊的 4 則不分；第 5 則還沒有任何串，直接開一串"
+    )
+    store = {"of": {"m8": 1, "m9": 1}, "topics": {1: {"members": ["m8", "m9"], "lines": [], "last": 0.0}}}
+    assert topics.focus_ids(store, "m9", ["m7", "m8", "m9", "x", "y"]) == ["m8", "m9", "x", "y"], "之後才收到、還沒分的也留"
+    assert topics.focus_ids(store, "m7", ["m8"]) == [], "沒分到串就不過濾"
+
+
+def test_recall_reads_the_focus_thread(monkeypatch) -> None:
+    """分好話題後聯想直接拿焦點所在的串：火鍋那串不拿去寫關鍵字。"""
+    split = _topics(topic_1="none", topic_2="none", topic_3="m1", topic_4="m2")
     understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
-    env, calls = _setup(monkeypatch, [scene, understood], {"recall_enabled": True})
+    env, calls = _setup(monkeypatch, [split, understood], {})
     planner = _planner()
     old = "1567700000000000009"
     env.plugin._remember_inbound("s1", {"platform": "discord", "session_id": "s1", "message_id": old, "message_info": {
@@ -65,18 +79,19 @@ def test_recall_reads_the_topic_thread_instead_of_walking_back(monkeypatch) -> N
         _item(alias(LAUGH), "小美", "麻辣的可以嗎"),
         _item(alias(LATEST), "阿凱", "風扇有轉但沒畫面"),
     ]
-    asyncio.run(env.plugin.decide_emote_in_planner(**planner))
+    result = _run(env, planner)
 
-    assert len(env.asked) == 2 and "recall_same_1" not in env.asked[1][1], "分好話題就不用再問「是不是同一件事」"
-    assert set(env.asked[0][1]) >= {"topic_2", "topic_3", "topic_4"}
+    assert len(env.asked) == 2 and set(env.asked[0][1]) == {"topic_1", "topic_2", "topic_3", "topic_4"}
     detail = env.plugin._decision_stats.state["decisions"][0]["recall_detail"]
-    assert "（要回的這則，話題串 2）" in detail and "← #2 「阿傑」：我顯卡燒了（同一串）" in detail and "火鍋" not in detail
+    assert "（焦點，話題串 3）" in detail and "← #2 「阿傑」：我顯卡燒了（同一串）" in detail and "火鍋" not in detail
     prompt = next(kwargs["prompt"] for name, kwargs in calls if name == "llm.generate")
     assert "顯卡燒了" in prompt and "火鍋" not in prompt
+    texts = [message["text"] for message in _load_adapter_module("src.emote").planner_messages(result["items"])]
+    assert texts == ["我顯卡燒了", "風扇有轉但沒畫面"], "planner 也只看這串"
 
 
 def test_late_link_card_is_remembered_and_shown(monkeypatch) -> None:
-    env, _ = _setup(monkeypatch, [_answer("text", 0.8)], {})
+    env, _ = _setup(monkeypatch, [], {})
     env.plugin._remember_card(LATEST, "[卡片: Suica 新角色是兔子]")
     assert env.plugin._inbound["s1"][alias(LATEST)]["card"] == "[卡片: Suica 新角色是兔子]"
     window = [_message_item(alias(LATEST), "小美", "https://x.com/abc")]
@@ -85,15 +100,15 @@ def test_late_link_card_is_remembered_and_shown(monkeypatch) -> None:
 
 
 def test_topic_page_shows_thread_understanding_memory_and_current_settings(monkeypatch) -> None:
-    scene = {**_answer("text", 0.8), "topic_2": {"choice": "none"}, "topic_3": {"choice": "t1"}}
+    split = _topics(topic_1="none", topic_2="none", topic_3="m1")
     understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
-    env, _ = _setup(monkeypatch, [scene, understood], {"recall_enabled": True})
+    env, _ = _setup(monkeypatch, [split, understood], {})
     planner = _planner()
     planner["items"][2:] = [_item(alias(FUNNY), "阿傑", "我顯卡燒了"), _item(alias(LAUGH), "海苔", "週六吃火鍋"),
                             _item(alias(LATEST), "阿凱", "風扇有轉但沒畫面")]
-    asyncio.run(env.plugin.decide_emote_in_planner(**planner))
+    _run(env, planner)
     page = asyncio.run(env.plugin.webui_decision())
     row = page["decisions"][0]
     assert row["topic"].startswith("串 ") and row["topic"].endswith(" 則") and row["understood"] == "懂 0.90"
-    assert row["memory"].endswith("・人 1/1") or row["memory"].endswith("/2") or "筆" in row["memory"]
-    assert page["current"]["recall_enabled"] == "開" and "lookup_enabled" in page["current"]
+    assert "筆" in row["memory"]
+    assert set(page["current"]) == {"enabled", "base_url", "model", "context_messages", "lookup_enabled"}

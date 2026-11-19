@@ -1595,7 +1595,7 @@
     {
       "id": "decision",
       "title": "話題分析",
-      "description": "她回話前怎麼讀懂這段在聊什麼：訊息分到哪個話題串、看不看得懂、想起什麼記憶，最後用文字還是表情反應。",
+      "description": "她回話前怎麼讀懂這段在聊什麼：新訊息分到哪個話題串、這輪的焦點是哪一串、看不看得懂、想起什麼記憶。planner、表達方式選擇和 replyer 都只看焦點那串。",
       "icon": "chart",
       "queries": {
         "decision": {
@@ -1631,7 +1631,7 @@
                   "children": [
                     {
                       "type": "stat",
-                      "label": "今天判斷",
+                      "label": "今天分析",
                       "value": {
                         "source": "decision",
                         "field": "today_calls"
@@ -1668,7 +1668,7 @@
                 },
                 {
                   "type": "table",
-                  "label": "最近 10 次她要回話時（新的在前；點一列看整串）",
+                  "label": "最近 10 次話題分析（新的在前；點一列看整串）",
                   "value": {
                     "source": "decision",
                     "field": "decisions"
@@ -1689,7 +1689,7 @@
                     },
                     {
                       "field": "message",
-                      "label": "要回的那則"
+                      "label": "焦點"
                     },
                     {
                       "field": "topic",
@@ -1704,8 +1704,8 @@
                       "label": "想起的記憶"
                     },
                     {
-                      "field": "scene",
-                      "label": "她怎麼反應"
+                      "field": "latency",
+                      "label": "延遲"
                     }
                   ]
                 }
@@ -1713,28 +1713,12 @@
             },
             {
               "type": "stack",
-              "label": "表情反應",
+              "label": "送出的表情",
               "children": [
                 {
                   "type": "grid",
-                  "columns": 4,
+                  "columns": 2,
                   "children": [
-                    {
-                      "type": "stat",
-                      "label": "情境門檻",
-                      "value": {
-                        "source": "decision",
-                        "field": "threshold"
-                      }
-                    },
-                    {
-                      "type": "stat",
-                      "label": "今天的情境",
-                      "value": {
-                        "source": "decision",
-                        "field": "today_scenes"
-                      }
-                    },
                     {
                       "type": "stat",
                       "label": "今天送出的表情",
@@ -1755,7 +1739,7 @@
                 },
                 {
                   "type": "table",
-                  "label": "最近 10 筆送出的表情（新的在前）",
+                  "label": "最近 10 筆 planner 用 discord_emote 送的表情（新的在前）",
                   "value": {
                     "source": "decision",
                     "field": "sends"
@@ -1797,120 +1781,6 @@
                       "label": "結果"
                     }
                   ]
-                },
-                {
-                  "type": "collapsible",
-                  "label": "情緒選項",
-                  "children": [
-                    {
-                      "type": "text",
-                      "value": "決策模型從這些情緒挑一個；挑表情時用「標籤：那則訊息」比對表情庫描述。至少要留兩個。點一列可刪除。"
-                    },
-                    {
-                      "type": "table",
-                      "value": {
-                        "source": "decision",
-                        "field": "emotions"
-                      },
-                      "selection": "emotionRow",
-                      "detail": "emotionDetails",
-                      "columns": [
-                        {
-                          "field": "name",
-                          "label": "標籤"
-                        },
-                        {
-                          "field": "description",
-                          "label": "說明"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "input",
-                      "name": "emotion_name",
-                      "label": "情緒標籤（已經有的會改說明，沒有的加在最後）"
-                    },
-                    {
-                      "type": "input",
-                      "name": "emotion_description",
-                      "label": "說明（例：無言、傻眼、尷尬）"
-                    },
-                    {
-                      "type": "button",
-                      "label": "新增或修改情緒",
-                      "action": "save_emotion"
-                    },
-                    {
-                      "type": "button",
-                      "label": "提示詞、情境說明、情緒選項和則數全部恢復預設",
-                      "action": "reset_prompts",
-                      "variant": "danger"
-                    }
-                  ]
-                },
-                {
-                  "type": "collapsible",
-                  "label": "提示詞與情境說明（只填要改的項目；留空不會清掉）",
-                  "children": [
-                    {
-                      "type": "table",
-                      "label": "目前的值",
-                      "value": {
-                        "source": "decision",
-                        "field": "prompts"
-                      },
-                      "columns": [
-                        {
-                          "field": "item",
-                          "label": "項目"
-                        },
-                        {
-                          "field": "value",
-                          "label": "目前的值"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "input",
-                      "name": "scene_instructions",
-                      "label": "情境題提示詞（問這輪怎麼參與）"
-                    },
-                    {
-                      "type": "input",
-                      "name": "scene_text",
-                      "label": "情境說明：只要文字"
-                    },
-                    {
-                      "type": "input",
-                      "name": "scene_text_emote",
-                      "label": "情境說明：文字＋附圖"
-                    },
-                    {
-                      "type": "input",
-                      "name": "scene_quick_reaction",
-                      "label": "情境說明：只按表情"
-                    },
-                    {
-                      "type": "input",
-                      "name": "scene_quick_sticker",
-                      "label": "情境說明：只發圖"
-                    },
-                    {
-                      "type": "input",
-                      "name": "target_instructions",
-                      "label": "對象題提示詞（問對哪一則 # 訊息表態）"
-                    },
-                    {
-                      "type": "input",
-                      "name": "emotion_instructions",
-                      "label": "情緒題提示詞（問要表達什麼情緒）"
-                    },
-                    {
-                      "type": "button",
-                      "label": "儲存提示詞",
-                      "action": "save_prompts"
-                    }
-                  ]
                 }
               ]
             },
@@ -1926,39 +1796,6 @@
                   "type": "card",
                   "label": "話題分析",
                   "children": [
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
-                          "value": "聯想（回一則訊息前先想起在聊什麼、參與的人，交給 planner 判斷；看下面「最近的判斷」的聯想欄）"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.recall_enabled"
-                          }
-                        },
-                        {
-                          "type": "select",
-                          "name": "recall_enabled",
-                          "label": "改成",
-                          "options": [
-                            {
-                              "label": "開",
-                              "value": "true"
-                            },
-                            {
-                              "label": "關",
-                              "value": "false"
-                            }
-                          ]
-                        }
-                      ]
-                    },
                     {
                       "type": "grid",
                       "columns": 3,
@@ -1998,63 +1835,7 @@
                       "children": [
                         {
                           "type": "text",
-                          "value": "回覆前文（回一則訊息時只看它在接的前文和最近幾則，其他交錯的話題先略過）"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.reply_context_enabled"
-                          }
-                        },
-                        {
-                          "type": "select",
-                          "name": "reply_context_enabled",
-                          "label": "改成",
-                          "options": [
-                            {
-                              "label": "開",
-                              "value": "true"
-                            },
-                            {
-                              "label": "關",
-                              "value": "false"
-                            }
-                          ]
-                        }
-                      ]
-                    },
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
-                          "value": "前文判斷門檻（0～1；看下面「最近的判斷」的前文欄來調）"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.link_threshold"
-                          }
-                        },
-                        {
-                          "type": "input",
-                          "name": "link_threshold",
-                          "label": "改成"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
-                          "value": "送出的聊天則數（3～30；planner 這輪上下文的最後幾則）"
+                          "value": "分話題時看的聊天則數（3～30；planner 這輪上下文的最後幾則）"
                         },
                         {
                           "type": "text",
@@ -2067,124 +1848,6 @@
                         {
                           "type": "input",
                           "name": "context_messages",
-                          "label": "改成"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "type": "card",
-                  "label": "表情反應",
-                  "children": [
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
-                          "value": "純快速反應：判斷成只按表情／只發圖時直接替她做"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.quick_enabled"
-                          }
-                        },
-                        {
-                          "type": "select",
-                          "name": "quick_enabled",
-                          "label": "改成",
-                          "options": [
-                            {
-                              "label": "開",
-                              "value": "true"
-                            },
-                            {
-                              "label": "關",
-                              "value": "false"
-                            }
-                          ]
-                        }
-                      ]
-                    },
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
-                          "value": "回覆後附圖：判斷成文字＋附圖時，她回完自動附一張"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.append_enabled"
-                          }
-                        },
-                        {
-                          "type": "select",
-                          "name": "append_enabled",
-                          "label": "改成",
-                          "options": [
-                            {
-                              "label": "開",
-                              "value": "true"
-                            },
-                            {
-                              "label": "關",
-                              "value": "false"
-                            }
-                          ]
-                        }
-                      ]
-                    },
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
-                          "value": "表情情境門檻（0～1；模型選的情境機率要高過這個值才照做，越高越少用表情）"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.emote_threshold"
-                          }
-                        },
-                        {
-                          "type": "input",
-                          "name": "emote_threshold",
-                          "label": "改成"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
-                          "value": "可表態的訊息數（1～15；其中最後幾則別人的訊息可以當表態對象）"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.target_candidates"
-                          }
-                        },
-                        {
-                          "type": "input",
-                          "name": "target_candidates",
                           "label": "改成"
                         }
                       ]
@@ -2302,7 +1965,7 @@
               "children": [
                 {
                   "type": "chart",
-                  "label": "每天判斷次數",
+                  "label": "每天話題分析次數",
                   "chart_type": "bar",
                   "value": {
                     "source": "decision",
@@ -2320,25 +1983,7 @@
                 },
                 {
                   "type": "chart",
-                  "label": "每天判斷要用表情的次數",
-                  "chart_type": "bar",
-                  "value": {
-                    "source": "decision",
-                    "field": "daily"
-                  },
-                  "x": "date",
-                  "y": "emotes",
-                  "when": {
-                    "reference": {
-                      "source": "decision",
-                      "field": "daily"
-                    },
-                    "operator": "not_empty"
-                  }
-                },
-                {
-                  "type": "chart",
-                  "label": "每天送出的表情",
+                  "label": "每天 planner 送出的表情",
                   "chart_type": "bar",
                   "value": {
                     "source": "decision",
@@ -2385,7 +2030,7 @@
         {
           "type": "dialog",
           "name": "decisionDetails",
-          "label": "判斷詳情",
+          "label": "話題分析詳情",
           "children": [
             {
               "type": "text",
@@ -2407,47 +2052,11 @@
             },
             {
               "type": "text",
-              "label": "最新那則訊息",
+              "label": "焦點",
               "value": {
                 "scope": "selection",
                 "source": "decisionRow",
                 "field": "message"
-              }
-            },
-            {
-              "type": "text",
-              "label": "採用",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "scene"
-              }
-            },
-            {
-              "type": "text",
-              "label": "模型原本選",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "requested"
-              }
-            },
-            {
-              "type": "text",
-              "label": "情緒",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "emotion"
-              }
-            },
-            {
-              "type": "text",
-              "label": "機率",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "probability"
               }
             },
             {
@@ -2461,7 +2070,16 @@
             },
             {
               "type": "text",
-              "label": "當時的群聊（# 是訊息編號，和前文判斷對得上）",
+              "label": "結果",
+              "value": {
+                "scope": "selection",
+                "source": "decisionRow",
+                "field": "result"
+              }
+            },
+            {
+              "type": "text",
+              "label": "當時的群聊（# 是訊息編號，和話題分配對得上）",
               "value": {
                 "scope": "selection",
                 "source": "decisionRow",
@@ -2470,11 +2088,11 @@
             },
             {
               "type": "text",
-              "label": "前文判斷",
+              "label": "話題分配",
               "value": {
                 "scope": "selection",
                 "source": "decisionRow",
-                "field": "links"
+                "field": "topics"
               }
             },
             {
@@ -2496,37 +2114,6 @@
               }
             }
           ]
-        },
-        {
-          "type": "dialog",
-          "name": "emotionDetails",
-          "label": "情緒選項",
-          "children": [
-            {
-              "type": "text",
-              "label": "標籤",
-              "value": {
-                "scope": "selection",
-                "source": "emotionRow",
-                "field": "name"
-              }
-            },
-            {
-              "type": "text",
-              "label": "說明",
-              "value": {
-                "scope": "selection",
-                "source": "emotionRow",
-                "field": "description"
-              }
-            },
-            {
-              "type": "button",
-              "label": "刪除這個情緒",
-              "action": "remove_emotion",
-              "variant": "danger"
-            }
-          ]
         }
       ],
       "actions": {
@@ -2537,7 +2124,7 @@
         "reset": {
           "api": "webui_decision_reset",
           "version": "1",
-          "confirmation": "會清掉所有判斷紀錄和每日統計，不影響設定。確定？"
+          "confirmation": "會清掉所有話題分析紀錄和每日統計，不影響設定。確定？"
         },
         "save": {
           "api": "webui_decision_save",
@@ -2558,42 +2145,7 @@
               "required": false,
               "max_length": 200
             },
-            "quick_enabled": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
-            "append_enabled": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
-            "emote_threshold": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
             "context_messages": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
-            "target_candidates": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
-            "reply_context_enabled": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
-            "link_threshold": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
-            "recall_enabled": {
               "type": "string",
               "required": false,
               "max_length": 200
@@ -2604,87 +2156,6 @@
               "max_length": 200
             }
           }
-        },
-        "save_prompts": {
-          "api": "webui_decision_save",
-          "version": "1",
-          "parameters": {
-            "scene_instructions": {
-              "type": "string",
-              "required": false,
-              "max_length": 1000
-            },
-            "scene_text": {
-              "type": "string",
-              "required": false,
-              "max_length": 1000
-            },
-            "scene_text_emote": {
-              "type": "string",
-              "required": false,
-              "max_length": 1000
-            },
-            "scene_quick_reaction": {
-              "type": "string",
-              "required": false,
-              "max_length": 1000
-            },
-            "scene_quick_sticker": {
-              "type": "string",
-              "required": false,
-              "max_length": 1000
-            },
-            "target_instructions": {
-              "type": "string",
-              "required": false,
-              "max_length": 1000
-            },
-            "emotion_instructions": {
-              "type": "string",
-              "required": false,
-              "max_length": 1000
-            }
-          }
-        },
-        "save_emotion": {
-          "api": "webui_decision_save_emotion",
-          "version": "1",
-          "parameters": {
-            "emotion_name": {
-              "type": "string",
-              "required": false,
-              "max_length": 20
-            },
-            "emotion_description": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            }
-          }
-        },
-        "remove_emotion": {
-          "api": "webui_decision_remove_emotion",
-          "version": "1",
-          "parameters": {
-            "emotion_name": {
-              "type": "string",
-              "required": true,
-              "max_length": 20
-            }
-          },
-          "arguments": {
-            "emotion_name": {
-              "scope": "selection",
-              "source": "emotionRow",
-              "field": "name"
-            }
-          },
-          "confirmation": "刪除這個情緒選項？"
-        },
-        "reset_prompts": {
-          "api": "webui_decision_reset_prompts",
-          "version": "1",
-          "confirmation": "提示詞、情境說明、情緒選項和送出的則數都會恢復預設，其他設定不變。確定？"
         }
       }
     }

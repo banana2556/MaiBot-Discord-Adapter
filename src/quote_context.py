@@ -1,144 +1,131 @@
-"""回覆和叫她的訊息：告訴 planner 誰在找她，被回覆的舊訊息補上它和之前的對話。
+"""planner、表達方式選擇和 replyer 看到的聊天：只留焦點那串，標出回覆誰、誰在找她。
 
-MaiBot 的 planner 上下文只用 ``quote="msg_id"`` 標出回覆了哪則、不附內容，replyer 也一樣；
-有人 @ 她或回覆她時 MaiBot 會強制開一輪 planner，但觸發原因只寫進日誌，planner 不知道這輪是為誰開的，
-常常接著聊最新的話題、把找她的人晾著；別人之間的回覆沒主詞時（「開金口很厲害」），她又會以為在跟她說。所以 planner 開始前：
+話題分析（emote._analyze）選好焦點之後：
 
-- 每則回覆的正文前面標出回覆誰：``[回覆「小明」：…]``、``[回覆你：…]``；replyer 也告訴它要回的那則在回覆誰；
-- 她上次說話之後叫她的訊息（@、回覆她、喊她名字），列出來要她先回應；
-- 被回覆的那則早就滑出上下文時，從 MaiBot 的聊天紀錄找出那則和它之前的幾則接在提示詞後面（還在上下文裡就不補）。
-
-開了「回覆前文」（決策模型設定）時，再做兩件事，前文怎麼找見 reply_links.py：
-
-- 「有人在找你」的每則標出它在接哪幾則；
-- replyer 的聊天紀錄只留要回那則所在的話題串（話題串見 topics.py），其他話題的訊息和圖片都不給（要 MaiBot 的 custom 分支）：
-  提示詞叫模型「別混在一起」常常沒用，直接不給它看才混不進去。planner 看過全部，它寫給 replyer 的 chat_anlyze 照樣帶著。
+- planner 和表達方式選擇（MaiBot 的子請求，也走 planner.before_request）的聊天訊息只留焦點那串，
+  加上分完話題之後才出現的（新進來的、她剛說的）；其他話題的訊息和它們的連結提醒都拿掉。
+  提示詞叫模型「別混在一起」常常沒用，直接不給它看才混不進去。要不要說話、回哪一則由 planner 自己決定。
+- replyer 的聊天紀錄照同一串過濾：把要留的 msg_id 放進 ``reply_tool_args["_keep_message_ids"]``，
+  MaiBot（banana2556/MaiBot 的 custom 分支）在組提示詞、挑表達和分圖片名額之前照它過濾；原版 MaiBot 會忽略。
+- 她送出的話直接加進焦點那串，同一回合後面的請求和 replyer 都看得到自己剛說過什麼。
+- MaiBot 的上下文只用 ``quote="msg_id"`` 標出回覆了哪則、不附內容：每則回覆的正文前面標出回覆誰
+  （``[回覆「小明」：…]``、``[回覆你：…]``），replyer 也告訴它要回的那則在回覆誰。
+- 有人 @ 她或回覆她時 MaiBot 會強制開一輪 planner，但觸發原因只寫進日誌：她上次說話之後叫她的訊息列出來要她先回應。
 """
 
-from collections import OrderedDict
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Mapping, Sequence
+import time
+from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
 
 from maibot_sdk import HookHandler
 
-from .emote import display_message_id, planner_messages, tool_names
-from .life.common import readable_chat
-from .reply_links import context_ids
-from .topics import topic_members
+from .emote import display_message_id, planner_messages, strip_emotes, tool_names
+from .life.common import sent_text
+from .topics import add_member, clock, focus_ids
 
-# 被回覆的那則連同它之前一共給幾則；往前最多找多久
-CONTEXT_MESSAGES = 8
-CONTEXT_SPAN = timedelta(hours=12)
-# 一輪 planner 最多補幾則回覆（從最新的往前）
-PLANNER_LIMIT = 2
-# 查過的上下文記幾筆（聊天紀錄不會變，查過就不用再查）
-CACHED = 50
 # 叫她的訊息最多列幾則（取最新的）
 CALLING_LIMIT = 3
 CALLING_NOTE = (
     "【有人在找你】你上次說話之後，下面這幾則在叫你（@ 你、回覆你的訊息或喊你名字），這輪就是因為它們才開始的。"
-    "先回應它們（reply 帶那則的 msg_id）；其他人正在聊的只是背景，別只顧著接最新的話題、把找你的人晾著：\n"
+    "先回應它們（reply 帶那則的 msg_id）：\n"
 )
-PLANNER_NOTE = (
-    "【被回覆的舊訊息】下面這幾則回覆了更早、已經不在上面聊天紀錄裡的訊息（quote 指向的那則）。"
-    "這是被回覆的那則和它之前的對話，用來理解對方為什麼這樣回：\n"
-)
-REPLYER_NOTE = "被回覆的那則已經不在聊天紀錄裡，這是它（最後一則）和之前的對話：\n"
+# linux 沙盒電腦插件在含連結的訊息後面插的提醒（item_id 是「這個前綴＋那則訊息的 item_id」）
+LINK_REMINDER = "link-reminder-"
+
+
+def keep_focus_items(items: List[Dict[str, Any]], keep: Set[str], assigned: Set[str]) -> Tuple[List[Dict[str, Any]], int]:
+    """聊天訊息只留 keep 裡的，和最後一則分過話題的之後才出現的；其他 item（系統、工具呼叫與結果、時間標記…）照留。
+
+    Returns:
+        (留下的 items, 拿掉幾則聊天訊息)。
+    """
+    chat = [(index, found[0]["msg_id"]) for index, item in enumerate(items) if (found := planner_messages([item]))]
+    last = max((index for index, msg_id in chat if msg_id in assigned), default=-1)
+    gone = {index for index, msg_id in chat if index <= last and msg_id not in keep}
+    def item_id(item: Mapping[str, Any]) -> str:
+        return str((item.get("meta") or {}).get("item_id") or "")
+
+    gone_items = {item_id(items[index]) for index in gone} - {""}
+    kept = [
+        item
+        for index, item in enumerate(items)
+        if index not in gone
+        and not (item_id(item).startswith(LINK_REMINDER) and item_id(item)[len(LINK_REMINDER) :] in gone_items)
+    ]
+    return kept, len(gone)
 
 
 class QuoteContextMixin:
-    """需要主插件提供 ctx、_load_settings、_append_system_text，和 EmoteMixin 收訊時記下的
-    _inbound（quote、addressed、mentions）、_latest_inbound 與決策模型判斷的 _reply_links。"""
+    """需要主插件提供 ctx、_append_system_text、_add_recall_note，和 EmoteMixin 的 _inbound、_latest_inbound、_topics、_focus。"""
 
-    def _context_of(self, session_id: str, messages: Sequence[Mapping[str, Any]], msg_id: str) -> List[str]:
-        """這則在接的 msg_id；沒開「回覆前文」時是空清單。"""
-        if not self._load_settings().decision.reply_context_enabled:
+    def _focus_keep(self, session_id: str, msg_id: str = "") -> List[str]:
+        """要留的 msg_id：msg_id 所在那串（沒給或沒分到串就用這輪的焦點），加上之後才收到、還沒分的；沒有焦點時是空清單。"""
+        store = self._topics.get(session_id)
+        focus = self._focus.get(session_id, "")
+        if not store or not focus:
             return []
-        inbound = self._inbound.get(session_id, {}).get(msg_id) or {}
-        judged = self._reply_links.get(session_id, {}).get(msg_id, [])
-        return context_ids(messages, msg_id, inbound, judged)
+        anchor = msg_id if msg_id in store["of"] else focus
+        return focus_ids(store, anchor, list(self._inbound.get(session_id, {})))
 
-    def _init_quote_state(self) -> None:
-        self._quote_contexts: "OrderedDict[str, str]" = OrderedDict()
+    def _join_focus(self, message: Mapping[str, Any]) -> None:
+        """她送出的話加進焦點那串（send_service.after_send）；同一回合後面的請求和 replyer 才看得到她剛說過什麼。"""
+        session_id = str(message.get("session_id") or "")
+        store = self._topics.get(session_id)
+        focus = self._focus.get(session_id, "")
+        msg_id = display_message_id(str(message.get("message_id") or ""))
+        if not store or focus not in store["of"] or not msg_id or msg_id in store["of"]:
+            return
+        now = time.time()
+        line = f"[{clock(now)}] （你）：{sent_text(message)[:120]}"
+        add_member(store, store["of"][focus], {"msg_id": msg_id, "user": "", "self": True, "time": now}, line)
 
-    async def _quote_context(self, session_id: str, entry: Mapping[str, Any]) -> str:
-        """被回覆的那則和它之前的對話；MaiBot 沒有那則時只給收訊時帶的那一則，讀取失敗回傳空字串。"""
-        quote = entry["quote"]
-        if quote in self._quote_contexts:
-            return self._quote_contexts[quote]
-        found = await self.ctx.message.get_by_id(quote, chat_id=session_id)
-        # SDK 成功時直接回訊息（找不到是 None），失敗才回 {"success": False, "error": ...}
-        if isinstance(found, Mapping) and not found.get("timestamp"):
-            self.ctx.logger.warning(f"讀取被回覆的訊息失敗：{found.get('error')}")
-            return ""
-        text = ""
-        if isinstance(found, Mapping):
-            at = datetime.fromtimestamp(float(found["timestamp"]))
-            text = await readable_chat(self.ctx, session_id, at - CONTEXT_SPAN, at, CONTEXT_MESSAGES)
-        text = text or entry.get("quote_text") or ""
-        if text:
-            self._quote_contexts[quote] = text
-            while len(self._quote_contexts) > CACHED:
-                self._quote_contexts.popitem(last=False)
-        return text
-
-    def _calling_note(self, session_id: str, messages: List[Dict[str, Any]], remembered: Mapping[str, Any]) -> str:
+    def _calling_note(self, session_id: str, messages: Sequence[Mapping[str, Any]], remembered: Mapping[str, Any]) -> str:
         """她上次說話之後叫她的訊息；私訊每則都在跟她說話，不用特別提。"""
         if not self._latest_inbound.get(session_id, {}).get("group_id"):
             return ""
         last_self = max((index for index, message in enumerate(messages) if message["self"]), default=-1)
-        speakers = {message["msg_id"]: "你" if message["self"] else message["user"] for message in messages}
         lines = []
         for message in messages[last_self + 1 :]:
             entry = remembered.get(message["msg_id"])
             if entry and entry["addressed"]:
                 label = f"[{entry['quote_label']}]" if entry.get("quote_label") else ""
-                line = f"- msg_id={message['msg_id']}（{message['user']}）：{label}{message['text']}"
-                if context := self._context_of(session_id, messages, message["msg_id"]):
-                    line += "（在接 " + "、".join(f"msg_id={msg_id}（{speakers[msg_id]}）" for msg_id in context) + "）"
-                lines.append(line)
+                lines.append(f"- msg_id={message['msg_id']}（{message['user']}）：{label}{message['text']}")
         return CALLING_NOTE + "\n".join(lines[-CALLING_LIMIT:]) if lines else ""
 
     @HookHandler(
         "maisaka.planner.before_request",
-        name="discord_quote_context",
+        name="discord_focus_thread",
         mode="blocking",
+        # 在話題分析（normal）之後：照它選的焦點過濾
         order="late",
         timeout_ms=3000,
     )
-    async def add_quote_context_to_planner(self, **kwargs: Any) -> Dict[str, Any]:
-        """每則回覆標出回覆誰；列出叫她的訊息（這輪能回覆時）；被回覆那則已經不在上下文的，補上它和之前的對話。"""
+    async def keep_focus_thread(self, **kwargs: Any) -> Dict[str, Any]:
+        """planner 和表達方式選擇只看焦點那串；每則回覆標出回覆誰；planner 再加上叫她的訊息和聯想。"""
         session_id = str(kwargs.get("session_id") or "")
         remembered = self._inbound.get(session_id)
-        if not remembered:
+        items = kwargs.get("items")
+        if not remembered or not isinstance(items, list):
             return {"action": "continue"}
-        messages = planner_messages(kwargs.get("items"))
-        labeled = False
+        # 表達方式選擇不經過話題分析那個 hook，表情 ID 和表情圖在這裡拿掉
+        strip_emotes(items)
+        if keep := self._focus_keep(session_id):
+            store = self._topics[session_id]
+            items, dropped = keep_focus_items(items, set(keep), set(store["of"]))
+            kwargs["items"] = items
+            if dropped:
+                self.ctx.logger.debug(f"焦點話題串 [{session_id}]：拿掉其他話題 {dropped} 則")
+        messages = planner_messages(items)
         for message in messages:
             entry = remembered.get(message["msg_id"])
             if entry and entry.get("quote_label"):
                 part, end = message["head"]
                 part["text"] = f"{part['text'][:end]}[{entry['quote_label']}]{part['text'][end:]}"
-                labeled = True
-        # 睡覺時段只剩 stop，不用叫她回
-        notes = [self._calling_note(session_id, messages, remembered)] if "reply" in tool_names(kwargs) else []
-        visible = {message["msg_id"] for message in messages}
-        blocks = []
-        for message in reversed(messages):
-            entry = remembered.get(message["msg_id"])
-            if not entry or not entry.get("quote") or display_message_id(entry["quote"]) in visible:
-                continue
-            context = await self._quote_context(session_id, entry)
-            if context:
-                blocks.append(f"msg_id={message['msg_id']}（{message['user']}）回覆的是這段的最後一則：\n{context}")
-            if len(blocks) >= PLANNER_LIMIT:
-                break
-        if blocks:
-            notes.append(PLANNER_NOTE + "\n\n".join(reversed(blocks)))
-        notes = [note for note in notes if note]
-        if notes:
-            self._append_system_text(kwargs, "\n\n".join(notes))
-        return {"action": "continue", "modified_kwargs": kwargs} if notes or labeled else {"action": "continue"}
+        # 有 reply 才是 planner 本身（表達方式選擇沒有工具；睡覺時段只剩 stop，不用叫她回）
+        if "reply" in tool_names(kwargs):
+            if note := self._calling_note(session_id, messages, remembered):
+                self._append_system_text(kwargs, note)
+            self._add_recall_note(kwargs, session_id)
+        return {"action": "continue", "modified_kwargs": kwargs}
 
     @HookHandler(
         "maisaka.replyer.before_request",
@@ -148,45 +135,16 @@ class QuoteContextMixin:
         timeout_ms=1000,
     )
     async def add_quote_context_to_replyer(self, **kwargs: Any) -> Dict[str, Any]:
-        """replyer 也只看得到 quote 的 ID：要回的那則是回覆時，告訴它在回覆誰；被回覆那則是舊訊息時，把 planner 那輪查到的對話一起給它。"""
-        remembered = self._inbound.get(str(kwargs.get("session_id") or ""), {})
-        entry = remembered.get(display_message_id(str(kwargs.get("reply_message_id") or "")))
-        if not entry or not entry.get("quote_label"):
-            return {"action": "continue"}
-        note = f"你要回覆的這則訊息是在{entry['quote_label']}。"
-        if context := self._quote_contexts.get(entry["quote"]):
-            note += f"\n{REPLYER_NOTE}{context}"
-        kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{note}".strip()
-        return {"action": "continue", "modified_kwargs": kwargs}
-
-    @HookHandler(
-        "maisaka.replyer.before_request",
-        name="discord_reply_context",
-        mode="blocking",
-        timeout_ms=1000,
-    )
-    async def keep_reply_context(self, **kwargs: Any) -> Dict[str, Any]:
-        """replyer 的聊天紀錄只留要回那則所在的話題串（topics.py 分好的），加上分完話題之後才進來的訊息。
-
-        把要留的 msg_id 放進 ``reply_tool_args["_keep_message_ids"]``，MaiBot 在組提示詞、挑表達和分圖片名額之前照它過濾
-        （banana2556/MaiBot 的 custom 分支才有，原版 MaiBot 會忽略這個參數）。那則還沒分到話題串時不動。
-        """
+        """replyer 只看焦點那串（_keep_message_ids）；要回的那則是回覆時，告訴它在回覆誰。"""
         session_id = str(kwargs.get("session_id") or "")
-        store = getattr(self, "_topics", {}).get(session_id)
-        if not (
-            store
-            and self._load_settings().decision.reply_context_enabled
-            and self._latest_inbound.get(session_id, {}).get("group_id")
-        ):
-            return {"action": "continue"}
-        target_id = display_message_id(str(kwargs.get("reply_message_id") or ""))
-        members = topic_members(store, target_id)
-        if not members:
-            return {"action": "continue"}
-        # 最後一則分過話題的之後才進來的訊息還沒分，可能正是在接這串，先留著
-        arrived = list(self._inbound.get(session_id, {}))
-        last = max((index for index, msg_id in enumerate(arrived) if msg_id in store["of"]), default=len(arrived) - 1)
-        keep = [*members, *arrived[last + 1 :]]
-        kwargs["reply_tool_args"] = {**(kwargs.get("reply_tool_args") or {}), "_keep_message_ids": keep}
-        self.ctx.logger.info(f"回覆前文 [{session_id}]：msg_id={target_id} 只留話題串 {len(members)} 則和新進的 {len(keep) - len(members)} 則")
-        return {"action": "continue", "modified_kwargs": kwargs}
+        target = display_message_id(str(kwargs.get("reply_message_id") or ""))
+        changed = False
+        if keep := self._focus_keep(session_id, target):
+            kwargs["reply_tool_args"] = {**(kwargs.get("reply_tool_args") or {}), "_keep_message_ids": keep}
+            self.ctx.logger.info(f"回覆只看焦點那串 [{session_id}]：{len(keep)} 則")
+            changed = True
+        entry = self._inbound.get(session_id, {}).get(target)
+        if entry and entry.get("quote_label"):
+            kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n你要回覆的這則訊息是在{entry['quote_label']}。".strip()
+            changed = True
+        return {"action": "continue", "modified_kwargs": kwargs} if changed else {"action": "continue"}

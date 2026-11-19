@@ -1,6 +1,6 @@
 """決策模型（System One 格式）：Jev（TypeSafe）和 vLLM-SR Decision 都用同一個 ``POST /v1/systemone``。
 
-只回每個選項的機率、不生成文字，適合「值不值得」「挑哪一個」這類快速判斷。
+只回每個選項的機率、不生成文字，適合「這則在接哪一串」「哪筆記憶有關」這類快速判斷。
 請求 ``{"model", "state": 文字, "questions": {問題ID: {"type", "instructions", "criteria"}}, "images": [data URL]}``，
 回應 ``{"answers": {問題ID: {"type": "choice", "choice", "probabilities", "confidence"}}}``。
 """
@@ -18,19 +18,8 @@ TIMEOUT_SECONDS = 2.5
 # 統計頁保留幾天的每日計數、最近幾次的明細
 HISTORY_DAYS = 14
 RECENT_LIMIT = 50
-# 判斷：calls 次數、failed 請求失敗，其餘是最後採用的情境；送出：sends 成功、send_failed 沒送成
-DAY_COUNTERS = (
-    "calls",
-    "failed",
-    "text",
-    "text_emote",
-    "quick_reaction",
-    "quick_sticker",
-    "latency_ms",
-    "sends",
-    "send_failed",
-    "send_latency_ms",
-)
+# 判斷：calls 次數、failed 請求失敗、latency_ms 延遲總和；送出（planner 用 discord_emote）：sends 成功、send_failed 沒送成
+DAY_COUNTERS = ("calls", "failed", "latency_ms", "sends", "send_failed", "send_latency_ms")
 
 
 async def ask(
@@ -77,7 +66,7 @@ async def ask(
 
 
 class DecisionStats:
-    """決策模型的紀錄：每天的計數、最近的判斷與送出，供「DC生活 → 決策模型」頁面顯示。
+    """決策模型的紀錄：每天的計數、最近的話題分析與送出的表情，供「DC生活 → 話題分析」頁面顯示。
 
     ``state = {"days": {日期: {計數}}, "decisions": [新的在前], "sends": [新的在前], "last_test": {...}}``；
     path 為 None 時只放記憶體。
@@ -92,34 +81,31 @@ class DecisionStats:
         now: datetime,
         chat: str,
         message: str,
-        scene: str,
         latency_ms: int,
         *,
-        requested: str = "",
-        emotion: str = "",
-        probability: float = 0.0,
-        links: str = "",
+        failed: bool = False,
+        topics: str = "",
         recall: str = "",
         context: str = "",
         recall_detail: str = "",
         columns: Optional[Dict[str, str]] = None,
     ) -> None:
-        """記一次情境判斷；失敗的請求不算進平均延遲（多半是逾時，會把平均拉歪）。
+        """記一次話題分析；失敗的請求不算進平均延遲（多半是逾時，會把平均拉歪）。
 
         Args:
-            scene: 最後採用的情境（text / text_emote / quick_reaction / quick_sticker），請求失敗是 failed。
-            requested: 模型原本選的情境；被安全條件降級時和 scene 不同。
-            emotion: 模型選的情緒。
-            probability: 模型原本選的那個情境的機率。
-            links: 順便判斷的回覆前文摘要（reply_links.parse_links）；沒問時是空字串。
-            recall: 聯想的摘要（recall.py）：看不看得懂、想到哪筆記憶、幾個人有記憶、有沒有上網；沒開時是空字串。
-            context: 決策模型看到的群聊（# 編號和前文欄對得上），給判斷詳情看。
+            message: 這輪的焦點（要回的那則）。
+            failed: 分話題的請求失敗。
+            topics: 這次分配的摘要（topics.apply_topics），例如「#3→串2」。
+            recall: 聯想的摘要：看不看得懂、想到哪筆記憶、幾個人有記憶、有沒有上網。
+            context: 決策模型看到的群聊（# 編號和分配摘要對得上），給判斷詳情看。
             recall_detail: 聯想的經過（用什麼關鍵字查、查到什麼、給 planner 什麼），給判斷詳情看。
+            columns: 話題分析頁的欄位：話題串、看得懂嗎、想起的記憶。
         """
         day = self._day(now.date().isoformat())
         day["calls"] += 1
-        day[scene] += 1
-        if scene != "failed":
+        if failed:
+            day["failed"] += 1
+        else:
             day["latency_ms"] += latency_ms
         self._push(
             "decisions",
@@ -127,16 +113,12 @@ class DecisionStats:
                 "time": now.isoformat(timespec="seconds"),
                 "chat": chat,
                 "message": message,
-                "scene": scene,
-                "requested": requested,
-                "emotion": emotion,
-                "probability": round(probability, 3),
+                "failed": failed,
                 "latency_ms": latency_ms,
-                "links": links,
+                "topics": topics,
                 "recall": recall,
                 "context": context,
                 "recall_detail": recall_detail,
-                # 話題分析頁的欄位：話題串、看得懂嗎、想起的記憶
                 "columns": dict(columns or {}),
             },
         )
@@ -147,7 +129,7 @@ class DecisionStats:
         """記一次挑表情並送出。
 
         Args:
-            kind: reaction（按表情）、sticker（只發圖）、append（回覆後附圖）或 tool（planner 自己用工具）。
+            kind: 目前只有 tool（planner 用 discord_emote）。
             picked: 選中的表情或貼圖名稱。
             score: 向量相似度；沒用向量挑時為 0。
             ok: 有沒有送出去。

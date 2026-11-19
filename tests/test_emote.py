@@ -1,4 +1,4 @@
-"""表情：planner 啟動時決策模型判斷情境與表態對象，向量挑表情送出，不經過 LLM。"""
+"""話題分析的入口（分話題、選焦點）和 discord_emote 工具：向量挑表情送出，不經過 LLM。"""
 
 from datetime import datetime
 from types import SimpleNamespace
@@ -158,17 +158,33 @@ def _env(monkeypatch, answers=None, decision=None, chat=None):
     # 抽籤固定取第一名（最接近的），結果才穩定
     monkeypatch.setattr(emote_module.random, "choice", lambda items: items[0])
     monkeypatch.setattr(emote_module.random, "choices", lambda population, weights=None, k=1: [population[0]])
+    recalled: list = []
+
+    async def fake_recall(decision, session_id, window, remembered, numbers, state, focus):
+        recalled.append(focus["msg_id"])
+        return "看得懂 0.90", "經過", {"topic": "串"}
+
+    # 聯想另外在 test_recall.py 測；這裡只確認分完話題後用焦點跑
+    plugin._run_recall = fake_recall
     return SimpleNamespace(
-        plugin=plugin, ctx=ctx, module=emote_module, reactions=reactions, asked=asked, emojis=emojis, guild=guild
+        plugin=plugin,
+        ctx=ctx,
+        module=emote_module,
+        reactions=reactions,
+        asked=asked,
+        emojis=emojis,
+        guild=guild,
+        recalled=recalled,
     )
 
 
-def _answer(scene, probability=0.9, emotion="好笑", target="1"):
-    return {
-        "scene": {"type": "choice", "choice": scene, "probabilities": {scene: probability}},
-        "target": {"type": "choice", "choice": target},
-        "emotion": {"type": "choice", "choice": emotion},
-    }
+def _topics(**choices):
+    """決策模型對話題題目的回答：題目 ID -> 選項。"""
+    return {question: {"type": "choice", "choice": choice} for question, choice in choices.items()}
+
+
+# 她說的「大家在幹嘛」先自己開一串（t1）；#1、#2 同一串（t2），#3 另開（t3）
+SPLIT = _topics(topic_1="none", topic_2="m1", topic_3="none")
 
 
 def _inbound(message_id, mentions_bot=False, group=True, text=""):
@@ -218,7 +234,7 @@ def _planner(emote_module, tools=("reply", "discord_emote", "send_emoji", "stop"
 async def _decide(env):
     """跑一次 planner hook，回傳 MaiBot 實際會用的工具名稱與系統提示詞（hook 收到的是 kwargs 的副本）。"""
     kwargs = _planner(env.module)
-    result = await env.plugin.decide_emote_in_planner(**kwargs)
+    result = await env.plugin.analyze_in_planner(**kwargs)
     used = result.get("modified_kwargs") or kwargs
     return [tool["function"]["name"] for tool in used["tool_definitions"]], used["items"][0]["parts"][-1]["text"]
 
@@ -291,141 +307,96 @@ def test_background_warm_up_embeds_server_emotes_before_the_first_pick(monkeypat
     asyncio.run(run())
 
 
-# ===== planner 啟動時的情境判斷 =====
+# ===== 話題分析：新訊息後第一次進 planner 時分話題、選焦點 =====
 
 
 def test_without_decision_model_planner_keeps_tool_and_random_nudge(monkeypatch) -> None:
     env = _env(monkeypatch, decision={"enabled": False}, chat={"emote_chance": 1})
     kwargs = _planner(env.module)
-    asyncio.run(env.plugin.decide_emote_in_planner(**kwargs))
+    asyncio.run(env.plugin.analyze_in_planner(**kwargs))
     assert "discord_emote" in kwargs["items"][0]["parts"][-1]["text"]
-    assert asyncio.run(env.plugin.decide_emote_in_planner(**_planner(env.module, tools=("reply", "stop")))) == {
+    assert asyncio.run(env.plugin.analyze_in_planner(**_planner(env.module, tools=("reply", "stop")))) == {
         "action": "continue"
     }, "不是 Discord 聊天（或睡覺只剩 stop）不管"
 
 
-def test_decision_runs_once_per_new_message_and_never_touches_planner_tools(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("text", 0.8), None])
+def test_analysis_runs_once_per_new_message_and_never_touches_planner_tools(monkeypatch) -> None:
+    env = _env(monkeypatch, answers=[SPLIT])
+    alias = env.module.display_message_id
 
     async def scenario():
         _receive_all(env.plugin)
         first = await _decide(env)
-        second = await _decide(env)  # 同一回合後面的請求不再問
-        _receive_all(env.plugin)
-        failed = await _decide(env)
-        return first, second, failed
+        second = await _decide(env)  # 同一回合後面的請求不再分析
+        return first, second
 
-    first, second, failed = asyncio.run(scenario())
+    first, second = asyncio.run(scenario())
     # 拿掉工具時 planner 會把回覆直接寫進自己的正文，打亂 reply / replyer 的流程
-    assert first[0] == second[0] == failed[0] == KEPT_TOOLS
-    assert first[1] == "人設", "只要文字：不加提示"
-    assert len(env.asked) == 2, "每次 planner 啟動只問一次"
+    assert first[0] == second[0] == KEPT_TOOLS
+    assert first[1] == "人設", "表情、文字都由 planner 自己決定，不再加情境提示"
+    assert len(env.asked) == 1, "每次有新訊息只分析一次"
     state, questions = env.asked[0]
-    assert "你是「麥麥」" in state and "沒有人 @ 你" in state and "（你）：大家在幹嘛" in state
-    assert "#1 「小明」：我剛剛跌倒了哈哈哈（已有人按 😂×3）" in state, "別人已經按的表情是線索"
-    assert set(questions["target"]["criteria"]) == {"1", "2", "3"}, "她自己說的話不能當表態對象"
+    assert "你是「麥麥」" in state and "（你）：大家在幹嘛" in state and "#1 「小明」：我剛剛跌倒了哈哈哈" in state
+    assert set(questions) == {"topic_1", "topic_2", "topic_3"}, "只問話題，不再問情境、對象和情緒"
+    store = env.plugin._topics["s1"]
+    assert store["of"][alias(FUNNY)] == store["of"][alias(LAUGH)] != store["of"][alias(LATEST)]
+    assert env.plugin._focus["s1"] == alias(LATEST), "沒人叫她：焦點是最新一則"
+    assert env.recalled == [alias(LATEST)], "每輪都聯想，不管這輪會不會說話"
+    record = env.plugin._decision_stats.state["decisions"][0]
+    assert record["message"] == "「小美」：真的假的" and "#2→串2" in record["topics"] and not record["failed"]
 
 
-def test_quick_reaction_goes_to_the_funny_message_not_the_latest(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_reaction", 0.9, "好笑", target="1")])
-
-    async def scenario():
-        _receive_all(env.plugin)
-        decided = await _decide(env)
-        await _drain()
-        return decided
-
-    names, prompt = asyncio.run(scenario())
-    assert names == KEPT_TOOLS and "回應了「小明」那則訊息" in prompt and "直接呼叫 stop() 結束" in prompt
-    assert "不要再發" not in prompt, "不限制她接著再發圖"
-    assert env.reactions == [(FUNNY, env.emojis[0])], "按在被大家笑的那則，kekw 的描述是好笑"
-    stats = env.plugin._decision_stats.state
-    assert stats["decisions"][0]["scene"] == "quick_reaction" and "跌倒" in stats["decisions"][0]["message"]
-
-
-def test_sticker_is_sent_even_when_the_target_is_an_older_message(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_sticker", 0.9, "好笑", target="1")])
+def test_focus_thread_is_all_planner_selector_and_replyer_see(monkeypatch) -> None:
+    """阿華在叫她：焦點是阿華那則所在的串（小明、阿華），小美另開的話題和她之前說的都不給看。"""
+    env = _env(monkeypatch, answers=[SPLIT])
+    alias = env.module.display_message_id
+    for message_id in (FUNNY, LAUGH, LATEST):
+        env.plugin._remember_inbound("s1", _inbound(message_id, mentions_bot=message_id == LAUGH))
+    kwargs = _planner(env.module)
+    kwargs["items"][4]["meta"] = {"item_id": "x3"}
+    # linux 沙盒電腦插件替含連結的訊息插的提醒，跟著那則一起拿掉
+    kwargs["items"].append({"item_type": "UserMessageItem", "meta": {"item_id": "link-reminder-x3"}, "parts": [{"type": "text", "text": "提醒"}]})
 
     async def scenario():
-        _receive_all(env.plugin)
-        names, _ = await _decide(env)
-        await _drain()
-        return names
+        await env.plugin.analyze_in_planner(**kwargs)
+        planner = await env.plugin.keep_focus_thread(**kwargs)
+        selector = await env.plugin.keep_focus_thread(**_planner(env.module, tools=()))
+        no_target = await env.plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id="", reply_tool_args={"x": 1})
+        other = await env.plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=LATEST)
+        return planner["modified_kwargs"], selector["modified_kwargs"], no_target["modified_kwargs"], other["modified_kwargs"]
 
-    assert asyncio.run(scenario()) == KEPT_TOOLS
-    assert env.reactions == [] and len(env.ctx.sent) == 1 and env.ctx.sent[0][0] == "emoji", "對象較早也照樣發圖，不改成按表情"
-    assert env.ctx.sent_options[0] == {"sync_to_maisaka_history": True, "maisaka_source_kind": "guided_reply"}, (
-        "記進 planner 歷史時標成她自己發的，不然會被當成另一個也叫她名字的人"
+    planner, selector, no_target, other = asyncio.run(scenario())
+    assert env.plugin._focus["s1"] == alias(LAUGH), "叫她的優先"
+    assert [m["msg_id"] for m in env.module.planner_messages(planner["items"])] == [alias(FUNNY), alias(LAUGH)]
+    assert all(item["meta"].get("item_id") != "link-reminder-x3" for item in planner["items"])
+    assert "【有人在找你】" in planner["items"][0]["parts"][-1]["text"]
+    assert [m["msg_id"] for m in env.module.planner_messages(selector["items"])] == [alias(FUNNY), alias(LAUGH)], (
+        "表達方式選擇也只看這串"
     )
+    assert selector["items"][0]["parts"][-1]["text"] == "人設", "表達方式選擇沒有工具，不加提示"
+    assert no_target["reply_tool_args"] == {"x": 1, "_keep_message_ids": [alias(FUNNY), alias(LAUGH)]}, "沒指定回哪則：焦點那串"
+    assert other["reply_tool_args"]["_keep_message_ids"] == [alias(LATEST)], "回別串的那則：給那一串"
+
+    # 她送出的話加進焦點那串；之後才收到、還沒分的訊息也留著
+    env.plugin._join_focus({"session_id": "s1", "message_id": "her-1", "raw_message": [{"type": "text", "data": "笑死我"}]})
+    env.plugin._remember_inbound("s1", _inbound("1567799999999999999"))
+    keep = env.plugin._focus_keep("s1")
+    assert keep == [alias(FUNNY), alias(LAUGH), "her-1", alias("1567799999999999999")]
+    assert env.plugin._topics["s1"]["topics"][2]["lines"][-1].endswith("（你）：笑死我")
 
 
-def test_asked_to_react_she_reacts_and_can_still_talk(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_reaction", 0.9, "讚同", target="3"), _answer("quick_reaction", 0.3)])
+def test_failed_topic_request_keeps_the_full_chat(monkeypatch) -> None:
+    env = _env(monkeypatch, answers=[None])
 
     async def scenario():
-        _receive_all(env.plugin, mentions_bot=True)  # 「@麥麥 幫這則按個讚」
-        addressed = await _decide(env)
-        await _drain()
         _receive_all(env.plugin)
         await _decide(env)
-        await _drain()
-        return addressed
+        kwargs = _planner(env.module)
+        return await env.plugin.keep_focus_thread(**kwargs)
 
-    (names, prompt) = asyncio.run(scenario())
-    assert names == KEPT_TOOLS and "有人在跟你說話，需要的話照常回覆" in prompt and "stop()" not in prompt, (
-        "表情照按，planner 照常可以說話"
-    )
-    assert env.reactions == [(LATEST, env.emojis[1])]
-    scenes = [item["scene"] for item in env.plugin._decision_stats.state["decisions"]]
-    assert scenes == ["text", "quick_reaction"], "新的在前：第二次沒過門檻當成只要文字"
-
-
-def test_planner_decides_alone_when_no_message_can_be_traced_back(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_reaction")])
-    env.plugin._emote_unjudged.add("s1")  # 有新訊息，但都是插件啟動前收到的，換不回 Discord 訊息
-    names, _ = asyncio.run(_decide(env))
-    assert "discord_emote" in names and env.asked == []
-
-
-def test_single_candidate_skips_the_target_question(monkeypatch) -> None:
-    answer = _answer("quick_reaction", 0.9, "讚同")
-    del answer["target"]  # 沒問就不會有這個答案
-    env = _env(monkeypatch, answers=[answer])
-
-    async def scenario():
-        env.plugin._remember_inbound("s1", _inbound(LATEST))  # 剛重啟：只記得啟動後收到的這一則
-        await _decide(env)
-        await _drain()
-
-    asyncio.run(scenario())
-    asked = set(env.asked[0][1])
-    assert {"scene", "emotion"} <= asked and "target" not in asked, "只有一個選項的選擇題會被決策模型回 422"
-    assert env.reactions == [(LATEST, env.emojis[1])], "表態對象就是唯一那則"
-
-
-def test_text_emote_appends_a_picture_after_her_whole_reply(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("text_emote", 0.8, "心疼")])
-    monkeypatch.setattr(env.module, "APPEND_DELAY_SECONDS", 0)
-
-    def sent_message(*segments):
-        return {"session_id": "s1", "raw_message": list(segments)}
-
-    async def scenario():
-        _receive_all(env.plugin)
-        names, prompt = await _decide(env)
-        assert names == KEPT_TOOLS and "會自動附上一張" in prompt
-        env.plugin._schedule_append(sent_message({"type": "emoji", "data": ""}))  # 圖本身送出不算回覆
-        assert "s1" not in env.plugin._append_tasks
-        env.plugin._schedule_append(sent_message({"type": "text", "data": "沒事吧"}))
-        env.plugin._schedule_append(sent_message({"type": "text", "data": "要不要抱抱"}))  # 回覆拆成兩則，等最後一則
-        await _drain()
-
-    asyncio.run(scenario())
-    assert env.ctx.sent == [("emoji", env.ctx.library[1]["base64"], "s1")], (
-        "照「心疼＋她的回覆」挑到 hug 貼圖（送出時換回原生）；描述更像的一般圖片會變成附件，不挑"
-    )
-    assert env.plugin._decision_stats.state["sends"][0]["kind"] == "append"
-    assert "s1" not in env.plugin._pending_append
+    result = asyncio.run(scenario())
+    assert len(env.module.planner_messages(result["modified_kwargs"]["items"])) == 4, "焦點沒分到串就不過濾"
+    assert env.plugin._decision_stats.state["decisions"][0]["failed"] is True
 
 
 # ===== planner 自己用的 discord_emote 工具（決策模型沒開時）=====
@@ -452,83 +423,63 @@ def test_tool_picks_by_vector_without_any_llm_and_falls_back_when_embedding_fail
     assert env.plugin._native_emoji.lookup(env.ctx.sent[1][1]) is not None, "embedding 掛了隨機挑一個原生的，不挑一般圖片"
 
 
-# ===== 「DC生活 → 決策模型」頁面 =====
+# ===== 「DC生活 → 話題分析」頁面 =====
 
 
-def test_decision_page_shows_scenes_and_sends(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_reaction", 0.9)])
+def test_topic_page_shows_analysis_and_sends(monkeypatch) -> None:
+    env = _env(monkeypatch, answers=[SPLIT])
 
     async def scenario():
         _receive_all(env.plugin)
         await _decide(env)
-        await _drain()
+        await env.plugin.handle_discord_emote(msg_id=FUNNY, group_id="10", stream_id="s1", feeling="好笑")
         return await env.plugin.webui_decision()
 
     page = asyncio.run(scenario())
-    assert page["notice"] == "" and page["today_calls"] == 1
-    assert "只按表情 1" in page["today_scenes"] and page["today_sends"] == "送出 1・沒送成 0"
-    assert page["decisions"][0]["chat"] == "聊天大廳" and page["decisions"][0]["emotion"] == "好笑"
-    assert page["sends"][0]["kind"] == "按表情" and page["sends"][0]["result"] == "送出"
-    assert page["daily"][0]["emotes"] == 1 and page["daily"][0]["sends"] == 1
+    assert page["notice"] == "" and page["today_calls"] == 1 and page["today_sends"] == "送出 1・沒送成 0"
+    row = page["decisions"][0]
+    assert row["chat"] == "聊天大廳" and row["message"] == "「小美」：真的假的" and "#1→串2" in row["topics"]
+    assert "（你）：大家在幹嘛" in row["context"] and row["recall"] == "看得懂 0.90" and row["topic"] == "串"
+    assert page["sends"][0]["kind"] == "planner 工具" and page["daily"][0]["sends"] == 1
 
 
-def test_decision_page_lists_only_recent_records(monkeypatch) -> None:
+def test_decision_page_lists_only_recent_records_and_reads_old_ones(monkeypatch) -> None:
     env = _env(monkeypatch)
     for index in range(15):
-        env.plugin._decision_stats.record_decision(datetime.now(), "s1", f"第 {index} 則", "text", 100)
+        env.plugin._decision_stats.record_decision(datetime.now(), "s1", f"第 {index} 則", 100)
+    # 上一版的紀錄：有 scene、links，沒有 topics、failed
+    env.plugin._decision_stats.state["decisions"].insert(
+        0, {"time": "2026-11-18T10:00:00", "chat": "s1", "message": "舊", "scene": "failed", "latency_ms": 5, "links": "#1→串1"}
+    )
     page = asyncio.run(env.plugin.webui_decision())
-    assert len(page["decisions"]) == 10 and page["decisions"][0]["message"] == "第 14 則", "只列最近 10 筆，新的在前"
+    assert len(page["decisions"]) == 10 and page["decisions"][1]["message"] == "第 14 則", "只列最近 10 筆，新的在前"
+    assert page["decisions"][0]["result"] == "分話題失敗" and page["decisions"][0]["topics"] == "#1→串1"
     assert page["today_calls"] == 15, "統計照算全部"
 
 
-def test_prompts_and_emotions_edited_on_the_page_go_to_the_decision_model(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("text", emotion="傻眼")])
+def test_settings_edited_on_the_page_are_used(monkeypatch) -> None:
+    env = _env(monkeypatch, answers=[_topics(topic_3="none")])
     plugin = env.plugin
     plugin._page_settings = {}
     plugin._page_settings_path = None
-
-    asyncio.run(plugin.webui_decision_save(scene_instructions=" 你要怎麼回？ ", scene_text="   ", context_messages="3"))
-    asyncio.run(plugin.webui_decision_save_emotion("傻眼", "傻眼、無言"))
-    asyncio.run(plugin.webui_decision_save_emotion("好笑", "笑到流淚"))
-    asyncio.run(plugin.webui_decision_remove_emotion("開心"))
+    asyncio.run(plugin.webui_decision_save(context_messages="3", lookup_enabled="true", model="  "))
 
     async def scenario():
         _receive_all(plugin)
         await _decide(env)
-        await _drain()
 
     asyncio.run(scenario())
-    state, questions = env.asked[0]
-    assert questions["scene"]["instructions"] == "你要怎麼回？"
-    assert questions["scene"]["criteria"]["text"].startswith("用文字參與"), "留空的不會清掉選項說明"
-    emotions = questions["emotion"]["criteria"]
-    assert emotions["好笑"] == "笑到流淚" and emotions["傻眼"] == "傻眼、無言" and "開心" not in emotions
-    assert list(emotions)[-1] == "傻眼", "新的加在最後"
-    assert "大家在幹嘛" not in state and "#3" in state, "只送最後 3 則，她自己說的那句被擠掉"
-    assert plugin._decision_stats.state["decisions"][0]["emotion"] == "傻眼"
-
+    state, _ = env.asked[0]
+    assert "大家在幹嘛" not in state and "#3" in state, "只看最後 3 則，她自己說的那句被擠掉"
     page = asyncio.run(plugin.webui_decision())
-    assert {"item": "情境題提示詞", "value": "你要怎麼回？"} in page["prompts"]
-    assert {"item": "送出的聊天則數", "value": "3"} in page["settings"]
-    assert {"name": "傻眼", "description": "傻眼、無言"} in page["emotions"]
-
-    for name in list(plugin._load_settings().decision.emotion_options())[:-2]:
-        asyncio.run(plugin.webui_decision_remove_emotion(name))
-    with pytest.raises(ValueError, match="至少要留 2 個"):
-        asyncio.run(plugin.webui_decision_remove_emotion("傻眼"))
-    with pytest.raises(ValueError):
-        asyncio.run(plugin.webui_decision_save_emotion("好：笑"))
-
-    asyncio.run(plugin.webui_decision_reset_prompts())
-    decision = plugin._load_settings().decision
-    assert len(decision.emotion_options()) == 12 and decision.context_messages == 15
-    assert decision.scene_instructions.startswith("看最近的群聊")
+    assert page["current"]["context_messages"] == "3" and page["current"]["lookup_enabled"] == "開"
+    assert plugin._load_settings().decision.model == "vllm-sr/d3-flash", "留空不改"
 
 
 def test_decision_test_button_reports_the_failure_reason(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_sticker", target="2")])
+    env = _env(monkeypatch, answers=[_topics(topic_2="m1")])
     result = asyncio.run(env.plugin.webui_decision_test())
-    assert result["ok"] and "對象 #2" in result["detail"]
+    assert result["ok"] and "在接 #1" in result["detail"]
 
     async def unauthorized(config, state, questions, logger, **kwargs):
         logger.warning("決策模型回傳 HTTP 401：invalid key")
@@ -566,48 +517,32 @@ def test_recent_picks_are_skipped_so_stickers_do_not_repeat(monkeypatch) -> None
 
 
 def test_calling_her_by_alias_counts_like_maibots_own_mention_check(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_reaction", 0.9, "開心", target="3")])
+    env = _env(monkeypatch, answers=[SPLIT])
+    alias = env.module.display_message_id
 
     async def scenario():
         await env.plugin.warm_emote_vectors()  # 背景輪詢時讀到 MaiBot 的暱稱和別名
-        for message_id in (FUNNY, LAUGH):
-            env.plugin._remember_inbound("s1", _inbound(message_id))
-        env.plugin._remember_inbound("s1", _inbound(LATEST, text="C醬做點reaction"))  # 沒有 @，只叫別名
-        decided = await _decide(env)
-        await _drain()
-        return decided
-
-    names, prompt = asyncio.run(scenario())
-    assert env.plugin._bot_names == ["麥麥", "C醬", "小C"]
-    assert "上次之後有人 @ 你、回覆你或私訊你" in env.asked[0][0]
-    assert names == KEPT_TOOLS and "有人在跟你說話，需要的話照常回覆" in prompt, "叫她別名也算在跟她說話，照常可以回"
-    assert [message_id for message_id, _ in env.reactions] == [LATEST], "表情照樣按在她被叫的那則"
-
-
-def test_only_real_discord_messages_can_be_reaction_targets(monkeypatch) -> None:
-    env = _env(monkeypatch, answers=[_answer("quick_reaction", target="1")])
-    voice = "voice-1730000000000-42"
-
-    async def scenario():
-        _receive_all(env.plugin)
-        env.plugin._remember_inbound("s1", _inbound(voice))  # 語音轉文字也會變成一則進 MaiBot
-        kwargs = _planner(env.module)
-        kwargs["items"].append(_message_item(env.module.display_message_id(voice), "阿華", "（語音）早安"))
-        await env.plugin.decide_emote_in_planner(**kwargs)
-        await _drain()
+        env.plugin._remember_inbound("s1", _inbound(FUNNY))
+        env.plugin._remember_inbound("s1", _inbound(LAUGH, text="C醬做點reaction"))  # 沒有 @，只叫別名
+        env.plugin._remember_inbound("s1", _inbound(LATEST))
+        await _decide(env)
 
     asyncio.run(scenario())
-    criteria = env.asked[0][1]["target"]["criteria"]
-    assert len(criteria) == 3 and all("早安" not in text for text in criteria.values()), "語音轉文字不是訊息，按不了表情"
+    assert env.plugin._bot_names == ["麥麥", "C醬", "小C"]
+    assert env.plugin._focus["s1"] == alias(LAUGH), "叫她別名也算在叫她，焦點是那則"
+    questions = env.asked[0][1]
+    assert "在叫你" in questions["topic_2"]["instructions"] and "在叫你" not in questions["topic_3"]["instructions"], (
+        "叫她的訊息提醒決策模型：常常在接她上次說話的那串"
+    )
 
 
 def test_send_emoji_is_hidden_wherever_discord_emote_exists(monkeypatch) -> None:
     env = _env(monkeypatch, decision={"enabled": False})
-    result = asyncio.run(env.plugin.decide_emote_in_planner(**_planner(env.module)))
+    result = asyncio.run(env.plugin.analyze_in_planner(**_planner(env.module)))
     names = [tool["function"]["name"] for tool in result["modified_kwargs"]["tool_definitions"]]
     assert names == KEPT_TOOLS, "決策模型沒開也一樣：發表情包只走 discord_emote"
     other_platform = _planner(env.module, tools=("reply", "send_emoji", "stop"))
-    assert asyncio.run(env.plugin.decide_emote_in_planner(**other_platform)) == {"action": "continue"}, "別的平台不動"
+    assert asyncio.run(env.plugin.analyze_in_planner(**other_platform)) == {"action": "continue"}, "別的平台不動"
 
 
 def test_custom_emoji_ids_and_their_images_are_hidden_from_the_models(monkeypatch) -> None:
@@ -639,8 +574,8 @@ def test_custom_emoji_ids_and_their_images_are_hidden_from_the_models(monkeypatc
     texts = [message["text"] for message in emote_module.planner_messages(items)]
     assert texts == ["不太一樣", "（表情）", "[貼圖：wave（揮手）]", "看這張 [圖片]"]
 
-    # 決策模型那邊：表情不出前文題，用回覆功能回的訊息標出在回誰
-    env = _env(monkeypatch, answers=[_answer("text", 0.8)], decision={"reply_context_enabled": True})
+    # 決策模型那邊：只有表情的不分話題，用回覆功能回的訊息標出在回誰
+    env = _env(monkeypatch, answers=[_topics(topic_1="none", topic_3="m1")])
     _receive_all(env.plugin)
     alias = emote_module.display_message_id
     env.plugin._inbound["s1"][alias(LATEST)]["quote_label"] = "回覆「阿華」：笑死"
@@ -648,8 +583,8 @@ def test_custom_emoji_ids_and_their_images_are_hidden_from_the_models(monkeypatc
     kwargs["items"][3]["parts"] = [
         {"type": "text", "text": kwargs["items"][3]["parts"][0]["text"].split("\n")[0] + "\n<:lol:5>"}, dict(image),
     ]
-    asyncio.run(env.plugin.decide_emote_in_planner(**kwargs))
+    asyncio.run(env.plugin.analyze_in_planner(**kwargs))
     state, questions = env.asked[0]
     assert "#2 「阿華」：（表情）" in state and "<:lol:5>" not in state
     assert "#3 「小美」：[回覆「阿華」：笑死]真的假的" in state
-    assert "link_2" not in questions, "只有表情的不問在接哪一則"
+    assert "topic_2" not in questions, "只有表情的不分話題"

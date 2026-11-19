@@ -118,7 +118,6 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, RecallMixin, ReminderM
         self._decision_stats = DecisionStats(None)
         self._emote_library: Optional[EmoteLibrary] = None
         self._init_emote_state()
-        self._init_quote_state()
         self._init_recall_state()
 
     async def on_load(self) -> None:
@@ -1238,10 +1237,10 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, RecallMixin, ReminderM
         message: Dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """發送流程結束後按出站訊息再收束一次 Discord typing；她的文字送出後，該附圖的聊天重新計時附圖。"""
+        """發送流程結束後按出站訊息再收束一次 Discord typing；她送出的話加進焦點話題串。"""
         self._stop_discord_typing_for_hook_message(message)
         if kwargs.get("sent") and isinstance(message, Mapping):
-            self._schedule_append(message)
+            self._join_focus(message)
             if self._topic_scout is not None:
                 self._topic_scout.on_sent(str(message.get("session_id") or ""), sent_text(message))
         return {"action": "continue"}
