@@ -82,6 +82,10 @@ def _run(env, planner=None):
 
 
 def test_pieces() -> None:
+    assert recall.tidy("[2026-08-28 05:30] hinana: GTA6鎖30FPS<a:lol:5> [2026-08-28 05:40] LZ: https://ptt.cc/x ...") == (
+        "2026-08-28 hinana：GTA6鎖30FPS／LZ：（連結）"
+    ), "日期只留一個、拿掉表情 ID、網址換掉、截斷的 ... 拿掉"
+    assert recall.tidy("x" * 200, 10) == "x" * 9 + "…"
     assert recall.parse_hits("你知道这些知识: 1. A 常玩 R6\n2. 上週在排位") == ["A 常玩 R6", "上週在排位"]
     assert recall.parse_hits("你不太了解有关x的知识") == [] and recall.parse_hits({"success": False}) == []
     window = [
@@ -119,9 +123,9 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
         "【聯想】#3 是你要回的那則，它和這幾則在聊同一件事：\n"
         "#1 「小明」：今天好累\n#2 「阿華」：晚上要打R6嗎\n#3 「小美」：羚羊拿MP5打盾牌\n"
     ) in state
-    assert "m1. 群裡常打虹彩六號：圍攻" in state and "對「阿華」的印象：阿華主玩防守方" in state
+    assert "m1. 群裡常打虹彩六號：圍攻" in state and "m3. （和「阿華」有關）阿華主玩防守方" in state, "群記憶和人的記憶一起當候選"
     assert list(questions) == ["recall_understand", "recall_pick"]
-    assert list(questions["recall_pick"]["criteria"]) == ["m1", "m2", "none"]
+    assert list(questions["recall_pick"]["criteria"]) == ["m1", "m2", "m3", "none"]
     lookup = next(kwargs for name, kwargs in calls if name == "api.call")
     assert lookup["api_name"] == "luca.linux-computer.lookup"
     assert lookup["args"] == {
@@ -136,17 +140,14 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
     searched = [(kwargs["person_id"], kwargs["query"]) for kwargs in searches]
     assert ("", "R6 羚羊 MP5 盾牌") in searched, "群記憶用小模型寫的關鍵字查，不用整段原文"
     assert ("p-u2", "阿華 R6 羚羊 MP5 盾牌") in searched, "整體印象：名字＋關鍵字"
-    assert ("p-u2", "群裡常打虹彩六號：圍攻") in searched, "有了話題再用話題查"
+    assert ("p-u2", "群裡常打虹彩六號：圍攻") not in searched, "不再用選中的那筆重查一次人（查回來的就是同一筆）"
 
     note = result["items"][0]["parts"][-1]["text"]
     assert note == (
-        f"【聯想】回 msg_id={alias(LATEST)}（小美）之前，你想起這些。這是聯想，不一定對；和眼前的聊天衝突時以聊天為準，也別逐字說出來：\n"
-        "- 上網查到：在聊《虹彩六號：圍攻》（來源：https://r6.example）\n"
-        "- 可能在聊：群裡常打虹彩六號：圍攻（把握 0.60）\n"
-        "- 「小美」：沒有相關的記憶\n"
-        "- 「小明」：沒有相關的記憶\n"
-        "- 「阿華」：阿華 R6 鑽石牌位；阿華主玩防守方"
-    )
+        "【聯想】這段話題讓你想起的（可能不對；和眼前的聊天衝突時以聊天為準，別逐字說出來）：\n"
+        "- 群裡以前聊過（把握 0.60）：群裡常打虹彩六號：圍攻\n"
+        "- 上網查到：在聊《虹彩六號：圍攻》（來源：https://r6.example）"
+    ), "只給選中的那筆和上網查到的，人一個個列出來的那幾行不給"
     summary = "看不懂 0.70・想到 m1（0.60）・人 1/3・上網「羚羊 MP5 盾牌」"
     assert env.plugin._decision_stats.state["decisions"][0]["recall"] == summary
     row = asyncio.run(env.plugin.webui_decision())["decisions"][0]
@@ -155,7 +156,7 @@ def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypa
     assert row["recall_detail"].startswith(
         "往回找話題：\n→ #3 「小美」：羚羊拿MP5打盾牌（焦點，話題串 2）\n"
         "← #2 「阿華」：晚上要打R6嗎（同一串）\n← #1 「小明」：今天好累（同一串）\n"
-        "關鍵字：R6 羚羊 MP5 盾牌\n群記憶：\nm1. 群裡常打虹彩六號：圍攻"
+        "關鍵字：R6 羚羊 MP5 盾牌\n想起的記憶：\nm1. 群裡常打虹彩六號：圍攻\nm2. 上週在聊顯卡\nm3. （「阿華」）阿華主玩防守方"
     )
     assert "「小美」：沒查到" in row["recall_detail"] and row["recall_detail"].endswith(note)
 
@@ -217,9 +218,9 @@ def test_timed_out_searches_are_not_reported_as_empty(monkeypatch) -> None:
     result = _run(env)
     record = env.plugin._decision_stats.state["decisions"][0]
     assert record["recall"] == "看得懂 0.90・群記憶沒等到（逾時或失敗）・人 1/3（1 人沒等到）"
-    assert "群記憶：沒等到（逾時或失敗）" in record["recall_detail"] and "「小明」：沒等到（逾時或失敗）" in record["recall_detail"]
-    note = result["items"][0]["parts"][-1]["text"]
-    assert "「阿華」：阿華主玩防守方" in note and "小明" not in note.split("\n", 1)[1], "沒等到的人不說成沒有記憶"
+    assert "想起的記憶：\nm1. （「阿華」）阿華主玩防守方" in record["recall_detail"], "群記憶沒等到，人的照樣當候選"
+    assert "「小明」：沒等到（逾時或失敗）" in record["recall_detail"]
+    assert "【聯想】" not in result["items"][0]["parts"][-1]["text"], "沒選中、也有把握：不加聯想"
 
 
 def test_keyword_model_saying_nothing_falls_back_to_the_thread_text(monkeypatch) -> None:

@@ -4,16 +4,14 @@
 想錯時靠接下來的話修正，沒把握就用問的。每輪話題分析（emote._analyze）分完話題、選好焦點之後做：
 
 1. 話題：焦點所在的話題串（topics.py）；還沒分到串時只有焦點那一則。
-2. 喚起：把這串請小模型寫成檢索關鍵字（整段原文向量比對分數過不了門檻），查群記憶（文字聯想），
-   每個參與者再用「名字＋關鍵字」限定這個人查（整體印象）。
-   人物畫像沒開放給插件，用限定人物的記憶檢索代替。
-3. 整合：問決策模型：看得懂這段在聊什麼嗎、哪一筆記憶最有關（可選都無關）。
-   記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），不直接取最像的那筆；
-   選了「都無關」時那些記憶和用同一組關鍵字查到的人物印象都不給。
+2. 喚起：把這串請小模型寫成檢索關鍵字（整段原文向量比對分數過不了門檻），查群記憶，
+   每個參與者再用「名字＋關鍵字」限定這個人查。人物畫像沒開放給插件，用限定人物的記憶檢索代替。
+3. 整合：群記憶和參與者的記憶去重後一起當候選（最多 CANDIDATES 筆），問決策模型：看得懂這段在聊什麼嗎、
+   哪一筆最有關（可選都無關）。記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），不直接取最像的那筆；
+   沒選中就一筆都不給。
 4. 看不懂時請「Linux 沙盒電腦」插件的 lookup API 上網查（十幾秒）。
-5. 用確定的話題（選中的記憶或查到的說明）再查參與者跟這個話題有關的記憶。
-6. 整理成一段「聯想」接在 planner 系統提示詞後面：同一回合每次請求都帶，換了焦點才換；
-   標明是聯想、把握多少，沒把握時要她用問的或保守地接。replyer 也看得到。
+5. 整理成短短一段「聯想」：選中的那筆（清掉表情 ID 和網址）、上網查到的、沒把握時要她用問的或保守地接。
+   接在 planner 系統提示詞後面，同一回合每次請求都帶，換了焦點才換；replyer 也看得到。
 """
 
 import asyncio
@@ -27,9 +25,12 @@ from .reply_links import NONE, plain
 from .topics import focus_message, lacks_content, numbered, topic_members, with_card
 
 LOOKUP_API = "luca.linux-computer.lookup"
-# 文字聯想取幾筆、每個人取幾筆、最多看幾個人
+# 文字聯想取幾筆、每個人取幾筆、最多看幾個人；去重後最多給決策模型挑幾筆
 MEMORY_HITS = 3
 PERSON_HITS = 2
+CANDIDATES = 6
+# 給 planner 和 replyer 的那筆記憶最多幾個字
+NOTE_MEMORY_CHARS = 160
 # 每個人各查一次記憶；正式機檢索慢，等不及放棄的查詢在主程式那邊還會跑完，查太多會越積越慢
 MAX_PEOPLE = 3
 # 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
@@ -45,7 +46,7 @@ LOOKUP_TIMEOUT_SECONDS = 60
 CONFIDENT = 0.5
 UNDERSTAND = "recall_understand"
 PICK = "recall_pick"
-NOTE_HEAD = "【聯想】回 msg_id={msg_id}（{user}）之前，你想起這些。這是聯想，不一定對；和眼前的聊天衝突時以聊天為準，也別逐字說出來："
+NOTE_HEAD = "【聯想】這段話題讓你想起的（可能不對；和眼前的聊天衝突時以聊天為準，別逐字說出來）："
 # 記憶檢索是向量比對：整段聊天原文太長太雜，分數常過不了門檻，先請小模型寫成關鍵字再查
 QUERY_TASK = "utils"
 QUERY_TIMEOUT_SECONDS = 10
@@ -61,6 +62,22 @@ NOTHING = "無"
 UNSURE = "你對這段在聊什麼沒有把握：要回的話可以用問的（例如「你們在說……嗎？」），或接得保守一點，別把猜測當成事實。"
 
 _HIT = re.compile(r"(?:^|\n)\s*\d+\.\s*")
+# 記憶原文：「[2026-08-28 05:30] 名字: 內容 [2026-08-28 05:40] 名字: 內容 ...」
+_STAMP = re.compile(r"\[(\d{4}-\d\d-\d\d) \d\d:\d\d\]\s*")
+_EMOTE = re.compile(r"<a?:\w+:\d+>")
+_URL = re.compile(r"https?://\S+")
+
+
+def tidy(memory: str, limit: int = NOTE_MEMORY_CHARS) -> str:
+    """記憶原文整理成一行：日期只留第一個、每句用「／」隔開，拿掉表情 ID，網址換成「（連結）」。"""
+    text = _URL.sub("（連結）", _EMOTE.sub("", memory))
+    pieces = _STAMP.split(text)
+    date = pieces[1] if len(pieces) > 1 else ""
+    # 記憶檢索把太長的截斷成「...」
+    said = [" ".join(piece.split()).replace(": ", "：", 1).rstrip(" .") for piece in pieces[2::2] or pieces[:1]]
+    line = "／".join(piece for piece in said if piece)
+    line = f"{date} {line}" if date else line
+    return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
 def parse_hits(result: Any) -> List[str]:
@@ -121,14 +138,25 @@ def probability(answer: Mapping[str, Any], option: str) -> float:
     return float(answer.get("confidence") or 1.0) if answer.get("choice") == option else 0.0
 
 
+def candidates(hits: Sequence[str], people: Sequence[Mapping[str, Any]]) -> List[Dict[str, str]]:
+    """決策模型挑的候選：群記憶在前，再來每個人的；同一筆只留一次，最多 CANDIDATES 筆。"""
+    picked: Dict[str, Dict[str, str]] = {}
+    for text, who in [*((hit, "") for hit in hits), *((text, person["name"]) for person in people for text in person["impression"])]:
+        picked.setdefault(text, {"text": text, "who": who})
+    return list(picked.values())[:CANDIDATES]
+
+
 def recall_state(recall: Mapping[str, Any], number: str) -> str:
-    """接在決策模型 state 後面：要回的是哪則、想起的記憶（m 編號）和對參與者的印象。"""
-    lines = [f"\n\n【聯想】#{number} 是你要回的那則，它和這幾則在聊同一件事：\n{recall['thread_text']}\n下面是你想起的，可能不對。"]
-    if recall["hits"]:
-        lines.append("想起的群聊記憶：" + "".join(f"\nm{index}. {hit}" for index, hit in enumerate(recall["hits"], 1)))
-    for person in recall["people"]:
-        if person["impression"]:
-            lines.append(f"對「{person['name']}」的印象：" + "；".join(person["impression"]))
+    """接在決策模型 state 後面：要回的是哪則、這串，和想起的記憶（m 編號）。"""
+    lines = [f"\n\n【聯想】#{number} 是你要回的那則，它和這幾則在聊同一件事：\n{recall['thread_text']}"]
+    if recall["candidates"]:
+        lines.append(
+            "你想起的記憶（可能不對）："
+            + "".join(
+                f"\nm{index}. " + (f"（和「{item['who']}」有關）" if item["who"] else "") + tidy(item["text"], 300)
+                for index, item in enumerate(recall["candidates"], 1)
+            )
+        )
     return "\n".join(lines)
 
 
@@ -144,55 +172,42 @@ def recall_questions(recall: Mapping[str, Any], number: str) -> Dict[str, Dict[s
             },
         }
     }
-    if recall["hits"]:
-        criteria = {f"m{index}": hit for index, hit in enumerate(recall["hits"], 1)}
+    if recall["candidates"]:
+        criteria = {f"m{index}": tidy(item["text"], 300) for index, item in enumerate(recall["candidates"], 1)}
         criteria[NONE] = "都跟這段在聊的無關"
         questions[PICK] = {"type": "choice", "instructions": f"#{number} 那段在聊的，跟哪一筆記憶最有關？", "criteria": criteria}
     return questions
 
 
-def recall_note(recall: Mapping[str, Any], picked: str, confidence: float, lookup: Mapping[str, Any]) -> str:
-    """給 planner（和 replyer）的那段；什麼都沒想起、也不缺把握時是空字串。"""
+def recall_note(picked: Optional[Mapping[str, str]], confidence: float, lookup: Mapping[str, Any]) -> str:
+    """給 planner（和 replyer）的那段：選中的那筆記憶、上網查到的、沒把握時的提醒；都沒有時是空字串。"""
     lines = []
+    if picked:
+        about = f"（和「{picked['who']}」有關）" if picked["who"] else ""
+        lines.append(f"- 群裡以前聊過{about}（把握 {confidence:.2f}）：{tidy(picked['text'])}")
     if lookup.get("summary"):
         sources = "、".join(lookup.get("sources") or []) or "搜尋結果"
         lines.append(f"- 上網查到：{lookup['summary']}（來源：{sources}）")
-    if picked:
-        lines.append(f"- 可能在聊：{picked}（把握 {confidence:.2f}）")
-    elif recall["hits"] and not recall.get("rejected") and not lookup.get("summary"):
-        # 決策模型沒給答案（請求失敗）時才給這段；它選了「都無關」就是真的無關
-        lines.append("- 想起幾筆可能有關的記憶，但看不出是哪一筆：" + "；".join(recall["hits"]))
-    remembered = False
-    for person in recall["people"]:
-        # 選了「都無關」時，用同一組關鍵字查到的印象也一樣不準，只留用確定的話題查到的
-        impression = [] if recall.get("rejected") else person["impression"]
-        memories = list(dict.fromkeys([*person.get("details", []), *impression]))[:3]
-        remembered = remembered or bool(memories)
-        if not memories and (person.get("missed") or recall.get("rejected")):
-            continue  # 沒等到結果不等於沒有記憶；記憶都無關時也不用一個個說「沒有相關的記憶」
-        lines.append(f"- 「{person['name']}」：" + ("；".join(memories) if memories else "沒有相關的記憶"))
-    unsure = not lookup.get("summary") and confidence < CONFIDENT
-    if unsure:
-        lines.append(UNSURE)
-    elif not (lookup.get("summary") or (recall["hits"] and not recall.get("rejected")) or remembered):
-        return ""
-    focus = recall["focus"]
-    return NOTE_HEAD.format(msg_id=focus["msg_id"], user=focus["user"]) + "\n" + "\n".join(lines)
+    elif confidence < CONFIDENT:
+        lines.append(f"- {UNSURE}")
+    return NOTE_HEAD + "\n" + "\n".join(lines) if lines else ""
 
 
 def recall_detail(recall: Mapping[str, Any], lookup: Mapping[str, Any], note: str) -> str:
-    """判斷詳情裡的聯想經過：怎麼往回找到這串、用什麼關鍵字查、每一邊查到什麼、上網結果、最後給 planner 的那段。"""
-    hits = "".join(f"\nm{index}. {hit}" for index, hit in enumerate(recall["hits"], 1))
+    """判斷詳情裡的聯想經過：這串有哪幾則、用什麼關鍵字查、想起哪些候選、每個人查得如何、上網結果、最後給 planner 的那段。"""
+    found = "".join(
+        f"\nm{index}. " + (f"（「{item['who']}」）" if item["who"] else "") + tidy(item["text"], 300)
+        for index, item in enumerate(recall["candidates"], 1)
+    )
     lines = [
         "往回找話題：",
         *recall["walk"],
         f"關鍵字：{recall['query']}",
-        f"群記憶：{hits or (MISSED if recall['missed'] else '沒查到')}",
+        f"想起的記憶：{found or (MISSED if recall['missed'] else '沒查到')}",
     ]
     for person in recall["people"]:
-        found = list(dict.fromkeys([*person["impression"], *person.get("details", [])]))
-        if found:
-            state = "；".join(found) + (f"（有一次{MISSED}）" if person["missed"] else "")
+        if person["impression"]:
+            state = f"{len(person['impression'])} 筆" + (f"（有一次{MISSED}）" if person["missed"] else "")
         else:
             state = MISSED if person["missed"] else "沒查到" if person.get("person_id") else "找不到這個人的人物 ID"
         lines.append(f"「{person['name']}」：{state}")
@@ -324,6 +339,7 @@ class RecallMixin:
             "query": query,
             "people": people,
             "hits": hits or [],
+            "candidates": candidates(hits or [], people),
             "missed": hits is None,
         }
 
@@ -363,17 +379,16 @@ class RecallMixin:
     async def _finish_recall(
         self, decision: Any, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]]
     ) -> tuple[str, str, Dict[str, str]]:
-        """第 2～5 步：照決策模型的答案挑記憶、看不懂就上網查、用話題查參與者，記下給 planner 的那段。
+        """照決策模型的答案挑記憶、看不懂就上網查，記下給 planner 的那段。
 
         Returns:
-            頁面「聯想」欄的摘要，和判斷詳情裡的經過（用什麼查、查到什麼、最後給 planner 什麼）。
+            頁面「聯想」欄的摘要、判斷詳情裡的經過、頁面欄位（話題串、看得懂嗎、想起的記憶）。
         """
         understand = (answers or {}).get(UNDERSTAND) or {}
         pick = (answers or {}).get(PICK) or {}
         choice = str(pick.get("choice") or "")
         index = int(choice[1:]) if re.fullmatch(r"m\d+", choice) else 0
-        picked = recall["hits"][index - 1] if 0 < index <= len(recall["hits"]) else ""
-        recall["rejected"] = choice == NONE
+        picked = recall["candidates"][index - 1] if 0 < index <= len(recall["candidates"]) else None
         # 請求失敗沒拿到判斷時不當作沒把握，免得每次失敗都叫她別把話說死
         confidence = probability(pick, choice) if picked else probability(understand, "yes") if understand else 1.0
         lost = understand.get("choice") == "no"
@@ -382,19 +397,11 @@ class RecallMixin:
         if previous.get("focus") == recall["focus"]["msg_id"] and previous.get("lookup", {}).get("summary"):
             lookup = previous["lookup"]  # 同一則查過就不再查
         elif lost and decision.lookup_enabled:
-            lookup = await self._lookup(session_id, recall["chat"], picked)
-        topic = picked or str(lookup.get("summary") or "")
-        if topic:
-            details = await asyncio.gather(
-                *(self._person_memories(session_id, person, topic, PERSON_HITS) for person in recall["people"])
-            )
-            for person, found in zip(recall["people"], details, strict=True):
-                person["details"] = found or []
-                person["missed"] = person["missed"] or found is None
-        note = recall_note(recall, picked, confidence, lookup)
+            lookup = await self._lookup(session_id, recall["chat"], picked["text"] if picked else "")
+        note = recall_note(picked, confidence, lookup)
         self._recalls[session_id] = {"focus": recall["focus"]["msg_id"], "note": note, "lookup": lookup}
         verdict = str(understand.get("choice") or "")
-        known = sum(1 for person in recall["people"] if person["impression"] or person.get("details"))
+        known = sum(1 for person in recall["people"] if person["impression"])
         missed = sum(1 for person in recall["people"] if person["missed"])
         parts = [
             f"{'看不懂' if lost else '看得懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "沒拿到判斷",
@@ -402,7 +409,7 @@ class RecallMixin:
             if picked
             else "群記憶沒等到（逾時或失敗）"
             if recall["missed"]
-            else f"記憶 {len(recall['hits'])} 筆都沒選",
+            else f"記憶 {len(recall['candidates'])} 筆都沒選",
             f"人 {known}/{len(recall['people'])}" + (f"（{missed} 人沒等到）" if missed else ""),
         ]
         if lookup:
@@ -410,7 +417,7 @@ class RecallMixin:
         columns = {
             "topic": recall.get("topic_label", ""),
             "understood": f"{'不懂' if lost else '懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "—",
-            "memory": "檢索逾時" if recall["missed"] else f"{len(recall['hits'])} 筆・人 {known}/{len(recall['people'])}",
+            "memory": "檢索逾時" if recall["missed"] else f"{len(recall['candidates'])} 筆・人 {known}/{len(recall['people'])}",
         }
         return "・".join(parts), recall_detail(recall, lookup, note), columns
 
