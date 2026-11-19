@@ -1802,39 +1802,6 @@
                       "children": [
                         {
                           "type": "text",
-                          "value": "看不懂就上網查（要先啟用「Linux 沙盒電腦」插件，查一次十幾秒）"
-                        },
-                        {
-                          "type": "text",
-                          "label": "目前",
-                          "value": {
-                            "source": "decision",
-                            "field": "current.lookup_enabled"
-                          }
-                        },
-                        {
-                          "type": "select",
-                          "name": "lookup_enabled",
-                          "label": "改成",
-                          "options": [
-                            {
-                              "label": "開",
-                              "value": "true"
-                            },
-                            {
-                              "label": "關",
-                              "value": "false"
-                            }
-                          ]
-                        }
-                      ]
-                    },
-                    {
-                      "type": "grid",
-                      "columns": 3,
-                      "children": [
-                        {
-                          "type": "text",
                           "value": "分話題時看的聊天則數（3～30；planner 這輪上下文的最後幾則）"
                         },
                         {
@@ -2146,11 +2113,6 @@
               "max_length": 200
             },
             "context_messages": {
-              "type": "string",
-              "required": false,
-              "max_length": 200
-            },
-            "lookup_enabled": {
               "type": "string",
               "required": false,
               "max_length": 200

@@ -1,21 +1,25 @@
-"""聯想：回話之前，先想起這段在聊什麼、參與的人是誰，再交給 planner 自己判斷。
+"""聯想：回話之前先讀懂這串在聊什麼，像人一樣：看到對話 → 找出它所在的話題串 → 想起這串裡的人、詞和相關的事。
 
-人聽到「A：羚羊拿MP5打盾牌」時，文字（羚羊、MP5）和說話的人（A 平常打 R6）會一起喚起記憶，兩邊對得上就懂了；
-想錯時靠接下來的話修正，沒把握就用問的。每輪話題分析（emote._analyze）分完話題、選好焦點之後做：
+每輪話題分析（emote._analyze）分完話題、選好焦點之後做：
 
 1. 話題：焦點所在的話題串（topics.py）；還沒分到串時只有焦點那一則。
-2. 喚起：把這串請小模型寫成檢索關鍵字（整段原文向量比對分數過不了門檻），查群記憶，
-   每個參與者再用「名字＋關鍵字」限定這個人查。人物畫像沒開放給插件，用限定人物的記憶檢索代替。
-3. 整合：群記憶和參與者的記憶去重後一起當候選（最多 CANDIDATES 筆），問決策模型：看得懂這段在聊什麼嗎、
-   哪一筆最有關（可選都無關）。記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），不直接取最像的那筆；
-   沒選中就一筆都不給。
-4. 看不懂時請「Linux 沙盒電腦」插件的 lookup API 上網查（十幾秒）。
-5. 整理成短短一段「聯想」：選中的那筆（清掉表情 ID 和網址）、上網查到的、沒把握時要她用問的或保守地接。
-   接在 planner 系統提示詞後面，同一回合每次請求都帶，換了焦點才換；replyer 也看得到。
+2. 理解這串，三件事同時查：
+   - 人物：這串的參與者（發話的、被 @ 的）的人物畫像（person.get_profile，和 planner 內建 query_person_profile 同一個來源）。
+     畫像變得慢，每人快取 PROFILE_TTL_SECONDS。
+   - 詞彙：只拿這串的文字比對這個群學過的黑話（jargon.match）；英數詞要整個詞對上（「FF14」裡的 FF 不算 FF）。
+     MaiBot 原本拿整段上下文比對的 <jargon> 由 quote_context 拿掉，免得兩份。
+   - 記憶：請小模型把這串寫成檢索關鍵字（整段原文向量比對分數過不了門檻），查群記憶。
+3. 整合：問決策模型：看得懂這段在聊什麼嗎、哪一筆記憶最有關（可選都無關）。
+   記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），沒選中就不給。
+4. 整理成一段「這串的理解」：人物、詞彙、選中的記憶；看不懂時提醒她可以先查（給關鍵字）或用問的。
+   要不要上網查由 planner 自己決定。接在 planner 系統提示詞後面，同一回合每次請求都帶，換了焦點才換；replyer 也看得到。
+
+person.get_profile、jargon.match 是 banana2556/MaiBot custom 分支加的能力；原版 MaiBot 沒有時那兩段就是空的。
 """
 
 import asyncio
 import re
+import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from maibot_sdk import HookHandler
@@ -24,15 +28,14 @@ from .emote import display_message_id, planner_messages
 from .reply_links import NONE, plain
 from .topics import focus_message, lacks_content, numbered, topic_members, with_card
 
-LOOKUP_API = "luca.linux-computer.lookup"
-# 文字聯想取幾筆、每個人取幾筆、最多看幾個人；去重後最多給決策模型挑幾筆
+# 群記憶取幾筆、最多看幾個人、最多給幾個詞
 MEMORY_HITS = 3
-PERSON_HITS = 2
-CANDIDATES = 6
-# 給 planner 和 replyer 的那筆記憶最多幾個字
+MAX_PEOPLE = 4
+JARGON_LIMIT = 8
+# 人物畫像快取多久；給 planner 的畫像、記憶最多幾個字
+PROFILE_TTL_SECONDS = 1800
+PROFILE_CHARS = 120
 NOTE_MEMORY_CHARS = 160
-# 每個人各查一次記憶；正式機檢索慢，等不及放棄的查詢在主程式那邊還會跑完，查太多會越積越慢
-MAX_PEOPLE = 3
 # 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
 FOCUS_WAIT_SECONDS = 5
 # 查詢字數上限（記憶檢索和整理話題用）
@@ -40,13 +43,11 @@ QUERY_CHARS = 300
 # 正式機的記憶檢索常要好幾秒，4 秒時幾乎每次都逾時；等不到就這輪少一段聯想
 SEARCH_TIMEOUT_SECONDS = 15
 MISSED = "沒等到（逾時或失敗）"
-# 上網查最多等多久；lookup 本身最多 150 秒，等不到就這輪不用
-LOOKUP_TIMEOUT_SECONDS = 60
-# 選中的記憶（或看得懂）的機率低於這個值，就要她用問的或保守地接
+# 選中的記憶（或看得懂）的機率低於這個值，就要她先查或用問的
 CONFIDENT = 0.5
 UNDERSTAND = "recall_understand"
 PICK = "recall_pick"
-NOTE_HEAD = "【聯想】這段話題讓你想起的（可能不對；和眼前的聊天衝突時以聊天為準，別逐字說出來）："
+NOTE_HEAD = "【這串的理解】（聯想，可能不對；和眼前的聊天衝突時以聊天為準，別逐字說出來）"
 # 記憶檢索是向量比對：整段聊天原文太長太雜，分數常過不了門檻，先請小模型寫成關鍵字再查
 QUERY_TASK = "utils"
 QUERY_TIMEOUT_SECONDS = 10
@@ -59,25 +60,14 @@ QUERY_PROMPT = """下面是 Discord 群聊裡的一段對話：
 看不出在聊什麼就只輸出「無」。只輸出這一行，不要解釋。"""
 # 小模型說看不出在聊什麼時的回答
 NOTHING = "無"
-UNSURE = "你對這段在聊什麼沒有把握：要回的話可以用問的（例如「你們在說……嗎？」），或接得保守一點，別把猜測當成事實。"
+UNSURE = "你不太確定這串在聊什麼：需要的話先查（可以查：{query}）再回，或用問的，別把猜測當成事實。"
 
 _HIT = re.compile(r"(?:^|\n)\s*\d+\.\s*")
 # 記憶原文：「[2026-08-28 05:30] 名字: 內容 [2026-08-28 05:40] 名字: 內容 ...」
 _STAMP = re.compile(r"\[(\d{4}-\d\d-\d\d) \d\d:\d\d\]\s*")
 _EMOTE = re.compile(r"<a?:\w+:\d+>")
 _URL = re.compile(r"https?://\S+")
-
-
-def tidy(memory: str, limit: int = NOTE_MEMORY_CHARS) -> str:
-    """記憶原文整理成一行：日期只留第一個、每句用「／」隔開，拿掉表情 ID，網址換成「（連結）」。"""
-    text = _URL.sub("（連結）", _EMOTE.sub("", memory))
-    pieces = _STAMP.split(text)
-    date = pieces[1] if len(pieces) > 1 else ""
-    # 記憶檢索把太長的截斷成「...」
-    said = [" ".join(piece.split()).replace(": ", "：", 1).rstrip(" .") for piece in pieces[2::2] or pieces[:1]]
-    line = "／".join(piece for piece in said if piece)
-    line = f"{date} {line}" if date else line
-    return line if len(line) <= limit else line[: limit - 1] + "…"
+_ASCII_TERM = re.compile(r"[A-Za-z0-9]+")
 
 
 def parse_hits(result: Any) -> List[str]:
@@ -89,6 +79,34 @@ def parse_hits(result: Any) -> List[str]:
         return []
     body = result.split(":", 1)[1] if result.startswith("你知道") else result
     return [hit.strip() for hit in _HIT.split(body) if hit.strip()]
+
+
+def clip(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def tidy(memory: str, limit: int = NOTE_MEMORY_CHARS) -> str:
+    """記憶原文整理成一行：日期只留第一個、每句用「／」隔開，拿掉表情 ID，網址換成「（連結）」。"""
+    text = _URL.sub("（連結）", _EMOTE.sub("", memory))
+    pieces = _STAMP.split(text)
+    date = pieces[1] if len(pieces) > 1 else ""
+    # 記憶檢索把太長的截斷成「...」
+    said = [" ".join(piece.split()).replace(": ", "：", 1).rstrip(" .") for piece in pieces[2::2] or pieces[:1]]
+    line = "／".join(piece for piece in said if piece)
+    return clip(f"{date} {line}" if date else line, limit)
+
+
+def whole_terms(jargons: Sequence[Mapping[str, str]], texts: Sequence[str]) -> List[Dict[str, str]]:
+    """黑話比對是字串包含：英數詞要整個詞對上才算（「FF14」裡的 FF、「T1000」裡的 T1 不算）。"""
+    joined = "\n".join(texts)
+    kept = []
+    for item in jargons:
+        term = str(item.get("content") or "")
+        if _ASCII_TERM.fullmatch(term) and not re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", joined, re.I):
+            continue
+        kept.append({"content": term, "meaning": str(item.get("meaning") or "")})
+    return kept
 
 
 def thread_messages(window: Sequence[Mapping[str, Any]], members: Sequence[str]) -> List[Mapping[str, Any]]:
@@ -111,7 +129,7 @@ def participants(
     remembered: Mapping[str, Mapping[str, Any]],
     bot_id: str,
 ) -> List[Dict[str, str]]:
-    """這段話題的參與者：要回那則的發話人、那則 @ 的人、前文的發話人（新的先）；不含她自己，最多 MAX_PEOPLE 個。"""
+    """這串的參與者：要回那則的發話人、那則 @ 的人、這串其他發話人（新的先）；不含她自己，最多 MAX_PEOPLE 個。"""
     by_id = {message["msg_id"]: message for message in window}
     people: Dict[str, Dict[str, str]] = {}
 
@@ -138,25 +156,22 @@ def probability(answer: Mapping[str, Any], option: str) -> float:
     return float(answer.get("confidence") or 1.0) if answer.get("choice") == option else 0.0
 
 
-def candidates(hits: Sequence[str], people: Sequence[Mapping[str, Any]]) -> List[Dict[str, str]]:
-    """決策模型挑的候選：群記憶在前，再來每個人的；同一筆只留一次，最多 CANDIDATES 筆。"""
-    picked: Dict[str, Dict[str, str]] = {}
-    for text, who in [*((hit, "") for hit in hits), *((text, person["name"]) for person in people for text in person["impression"])]:
-        picked.setdefault(text, {"text": text, "who": who})
-    return list(picked.values())[:CANDIDATES]
+def understanding_lines(recall: Mapping[str, Any]) -> List[str]:
+    """人物和詞彙那兩段（planner、replyer 和決策模型都看這一份）。"""
+    lines = []
+    people = [person for person in recall["people"] if person.get("profile")]
+    if people:
+        lines += ["人物：", *(f"- {person['name']}：{person['profile']}" for person in people)]
+    if recall["terms"]:
+        lines += ["詞彙：", *(f"- {term['content']}：{term['meaning']}" for term in recall["terms"])]
+    return lines
 
 
 def recall_state(recall: Mapping[str, Any], number: str) -> str:
-    """接在決策模型 state 後面：要回的是哪則、這串，和想起的記憶（m 編號）。"""
-    lines = [f"\n\n【聯想】#{number} 是你要回的那則，它和這幾則在聊同一件事：\n{recall['thread_text']}"]
-    if recall["candidates"]:
-        lines.append(
-            "你想起的記憶（可能不對）："
-            + "".join(
-                f"\nm{index}. " + (f"（和「{item['who']}」有關）" if item["who"] else "") + tidy(item["text"], 300)
-                for index, item in enumerate(recall["candidates"], 1)
-            )
-        )
+    """接在決策模型 state 後面：要回的是哪則、這串、這串的人物和詞彙，和想起的記憶（m 編號）。"""
+    lines = [f"\n\n【聯想】#{number} 是你要回的那則，它和這幾則在聊同一件事：\n{recall['thread_text']}", *understanding_lines(recall)]
+    if recall["hits"]:
+        lines.append("你想起的群聊記憶（可能不對）：" + "".join(f"\nm{index}. {tidy(hit, 300)}" for index, hit in enumerate(recall["hits"], 1)))
     return "\n".join(lines)
 
 
@@ -165,55 +180,49 @@ def recall_questions(recall: Mapping[str, Any], number: str) -> Dict[str, Dict[s
     questions = {
         UNDERSTAND: {
             "type": "choice",
-            "instructions": f"#{number} 和上面跟它在聊同一件事的那幾則，你看得懂在聊什麼嗎？",
+            "instructions": f"#{number} 和上面跟它在聊同一件事的那幾則，加上你對這些人和詞的了解，你看得懂在聊什麼嗎？",
             "criteria": {
-                "yes": "看得懂：靠常識或想起的記憶就知道在聊什麼",
+                "yes": "看得懂：靠常識、對這些人和詞的了解或想起的記憶就知道在聊什麼",
                 "no": "看不懂：有不認識的遊戲、作品、人物、新聞、梗或術語，要先查",
             },
         }
     }
-    if recall["candidates"]:
-        criteria = {f"m{index}": tidy(item["text"], 300) for index, item in enumerate(recall["candidates"], 1)}
+    if recall["hits"]:
+        criteria = {f"m{index}": tidy(hit, 300) for index, hit in enumerate(recall["hits"], 1)}
         criteria[NONE] = "都跟這段在聊的無關"
         questions[PICK] = {"type": "choice", "instructions": f"#{number} 那段在聊的，跟哪一筆記憶最有關？", "criteria": criteria}
     return questions
 
 
-def recall_note(picked: Optional[Mapping[str, str]], confidence: float, lookup: Mapping[str, Any]) -> str:
-    """給 planner（和 replyer）的那段：選中的那筆記憶、上網查到的、沒把握時的提醒；都沒有時是空字串。"""
-    lines = []
+def recall_note(recall: Mapping[str, Any], picked: str, pick_confidence: float, understood: float) -> str:
+    """給 planner（和 replyer）的「這串的理解」：人物、詞彙、選中的記憶、看不懂時的提醒；都沒有時是空字串。
+
+    Args:
+        pick_confidence: 選中那筆記憶的機率。
+        understood: 看得懂的機率；低於 CONFIDENT 就提醒她先查或用問的。
+    """
+    lines = understanding_lines(recall)
     if picked:
-        about = f"（和「{picked['who']}」有關）" if picked["who"] else ""
-        lines.append(f"- 群裡以前聊過{about}（把握 {confidence:.2f}）：{tidy(picked['text'])}")
-    if lookup.get("summary"):
-        sources = "、".join(lookup.get("sources") or []) or "搜尋結果"
-        lines.append(f"- 上網查到：{lookup['summary']}（來源：{sources}）")
-    elif confidence < CONFIDENT:
-        lines.append(f"- {UNSURE}")
+        lines += ["記憶：", f"- 群裡以前聊過（把握 {pick_confidence:.2f}）：{tidy(picked)}"]
+    if understood < CONFIDENT:
+        lines.append("沒把握：" + UNSURE.format(query=recall["query"]))
     return NOTE_HEAD + "\n" + "\n".join(lines) if lines else ""
 
 
-def recall_detail(recall: Mapping[str, Any], lookup: Mapping[str, Any], note: str) -> str:
-    """判斷詳情裡的聯想經過：這串有哪幾則、用什麼關鍵字查、想起哪些候選、每個人查得如何、上網結果、最後給 planner 的那段。"""
-    found = "".join(
-        f"\nm{index}. " + (f"（「{item['who']}」）" if item["who"] else "") + tidy(item["text"], 300)
-        for index, item in enumerate(recall["candidates"], 1)
-    )
-    lines = [
-        "往回找話題：",
-        *recall["walk"],
-        f"關鍵字：{recall['query']}",
-        f"想起的記憶：{found or (MISSED if recall['missed'] else '沒查到')}",
-    ]
+def recall_detail(recall: Mapping[str, Any], note: str) -> str:
+    """判斷詳情裡的聯想經過：這串有哪幾則、每個人的畫像、比對到的詞、用什麼關鍵字查到哪些記憶、最後給 planner 的那段。"""
+    lines = ["往回找話題：", *recall["walk"]]
     for person in recall["people"]:
-        if person["impression"]:
-            state = f"{len(person['impression'])} 筆" + (f"（有一次{MISSED}）" if person["missed"] else "")
+        if person.get("profile"):
+            state = person["profile"]
         else:
-            state = MISSED if person["missed"] else "沒查到" if person.get("person_id") else "找不到這個人的人物 ID"
+            state = MISSED if person.get("missed") else "沒有畫像" if person.get("person_id") else "找不到這個人的人物 ID"
         lines.append(f"「{person['name']}」：{state}")
-    if lookup:
-        lines.append(f"上網「{lookup.get('query', '')}」：" + str(lookup.get("summary") or f"失敗：{lookup.get('error', '')}"))
-    lines.append("給 planner 的：" + (f"\n{note}" if note else "沒有（什麼都沒想起來，也不缺把握）"))
+    terms = "、".join(term["content"] for term in recall["terms"])
+    lines.append(f"詞彙：{terms or '沒有比對到'}")
+    hits = "".join(f"\nm{index}. {tidy(hit, 300)}" for index, hit in enumerate(recall["hits"], 1))
+    lines += [f"關鍵字：{recall['query']}", f"群記憶：{hits or (MISSED if recall['missed'] else '沒查到')}"]
+    lines.append("給 planner 的：" + (f"\n{note}" if note else "沒有（這串沒有要補充的，也不缺把握）"))
     return "\n".join(lines)
 
 
@@ -221,13 +230,13 @@ class RecallMixin:
     """需要主插件提供 ctx、_append_system_text、_client_manager，和 EmoteMixin 的 _topics、_focus、_inbound。"""
 
     def _init_recall_state(self) -> None:
-        # 每個聊天最近一次聯想：{"focus": msg_id, "note": 給 planner / replyer 的那段, "lookup": 上網查的結果}
+        # 每個聊天最近一次聯想：{"focus": msg_id, "note": 給 planner / replyer 的那段}
         self._recalls: Dict[str, Dict[str, Any]] = {}
+        # 人物畫像快取：person_id -> (查的時間 time.monotonic, 畫像文字)
+        self._profiles: Dict[str, tuple[float, str]] = {}
 
-    async def _search_memory(
-        self, session_id: str, query: str, person_id: str = "", limit: int = MEMORY_HITS
-    ) -> Optional[List[str]]:
-        """查這個群看得到的記憶（和 planner 內建 query_memory 一樣限定這個聊天）；給 person_id 時只查這個人的。
+    async def _search_memory(self, session_id: str, query: str) -> Optional[List[str]]:
+        """查這個群看得到的記憶（和 planner 內建 query_memory 一樣限定這個聊天）。
 
         Returns:
             每筆記憶；逾時或失敗時是 None，和「查了但沒有」的空清單分開，頁面才不會把沒等到結果寫成 0 筆。
@@ -237,9 +246,8 @@ class RecallMixin:
                 self.ctx.call_capability(
                     "knowledge.search",
                     query=query[:QUERY_CHARS],
-                    limit=limit,
+                    limit=MEMORY_HITS,
                     chat_id=session_id,
-                    person_id=person_id,
                     # 和 planner 內建的 query_memory 一樣帶群號：記憶的聊天過濾用群號比對，只給 chat_id 可能整個被濾掉
                     group_id=str(self._latest_inbound.get(session_id, {}).get("group_id") or ""),
                 ),
@@ -252,19 +260,47 @@ class RecallMixin:
             return None
         return parse_hits(result)
 
-    async def _person_memories(
-        self, session_id: str, person: Mapping[str, str], query: str, limit: int
-    ) -> Optional[List[str]]:
-        if not person.get("person_id"):
-            return []
-        return await self._search_memory(session_id, query, person["person_id"], limit)
-
     async def _person_id(self, person: Mapping[str, str]) -> str:
         try:
             result = await self.ctx.call_capability("person.get_id", platform=person["platform"], user_id=person["user_id"])
         except Exception:  # 換不到人物 ID 就不查這個人
             return ""
         return result if isinstance(result, str) else ""
+
+    async def _profile(self, session_id: str, person: Dict[str, str]) -> None:
+        """這個人的人物畫像（摘要＋特徵），寫進 person["profile"]；查不到時留空，逾時或失敗另外標 missed。"""
+        person_id = person.get("person_id") or ""
+        cached = self._profiles.get(person_id)
+        if not person_id:
+            return
+        if cached and time.monotonic() - cached[0] < PROFILE_TTL_SECONDS:
+            person["profile"] = cached[1]
+            return
+        try:
+            result = await asyncio.wait_for(
+                self.ctx.call_capability("person.get_profile", person_id=person_id, chat_id=session_id), SEARCH_TIMEOUT_SECONDS
+            )
+        except Exception as exc:  # 讀不到畫像這輪就少這個人
+            result = {"success": False, "error": repr(exc)}
+        if not isinstance(result, Mapping) or not result.get("success"):
+            person["missed"] = "1"
+            return
+        traits = "、".join(str(trait) for trait in result.get("traits") or [] if str(trait).strip())
+        summary = str(result.get("summary") or "").strip()
+        text = clip(summary + (f"（{traits}）" if traits else ""), PROFILE_CHARS)
+        self._profiles[person_id] = (time.monotonic(), text)
+        person["profile"] = text
+
+    async def _terms(self, session_id: str, texts: Sequence[str]) -> List[Dict[str, str]]:
+        """這串的文字裡出現的、這個群學過的黑話；能力不存在或失敗時是空清單。"""
+        try:
+            result = await self.ctx.call_capability("jargon.match", session_id=session_id, texts=list(texts), limit=JARGON_LIMIT)
+        except Exception as exc:  # 讀不到黑話這輪就少這段
+            result = {"success": False, "error": repr(exc)}
+        if not isinstance(result, Mapping) or not result.get("success"):
+            self.ctx.logger.debug(f"聯想：比對黑話失敗：{result.get('error') if isinstance(result, Mapping) else result}")
+            return []
+        return whole_terms(result.get("jargons") or [], texts)
 
     async def _run_recall(
         self,
@@ -280,7 +316,7 @@ class RecallMixin:
         recall = await self._recall(session_id, window, remembered, numbers, focus)
         number = numbers[id(recall["focus"])]
         answers = await self._ask_decision(decision, state + recall_state(recall, number), recall_questions(recall, number))
-        return await self._finish_recall(decision, session_id, recall, answers)
+        return self._finish_recall(session_id, recall, answers)
 
     def _thread(
         self, session_id: str, window: Sequence[Mapping[str, Any]], numbers: Mapping[int, str], focus: Mapping[str, Any]
@@ -305,10 +341,10 @@ class RecallMixin:
         numbers: Mapping[int, str],
         focus: Mapping[str, Any],
     ) -> Dict[str, Any]:
-        """焦點所在的這串和參與者，同時查文字聯想和每個人的整體印象。"""
+        """焦點所在的這串和參與者，同時查人物畫像、這串的黑話和群記憶。"""
         said, walk, topic_label = self._thread(session_id, window, numbers, focus)
         context = [message["msg_id"] for message in said if message["msg_id"] != focus["msg_id"]]
-        # 叫她的 @ 換成「@你」：她的 Discord 暱稱會被小模型和上網查當成要查的詞
+        # 叫她的 @ 換成「@你」：她的 Discord 暱稱會被小模型當成要查的詞
         bot = self._bot_name()
         chat = "\n".join(
             ("（你）" if message["self"] else f"「{plain(message['user'])}」")
@@ -324,12 +360,11 @@ class RecallMixin:
         query = query or " ".join(message["text"] for message in said)
         for person, person_id in zip(people, person_ids, strict=True):
             person["person_id"] = person_id
-        hits, *impressions = await asyncio.gather(
+        hits, terms, *_ = await asyncio.gather(
             self._search_memory(session_id, query),
-            *(self._person_memories(session_id, person, f"{person['name']} {query}", PERSON_HITS) for person in people),
+            self._terms(session_id, [message["text"] for message in said]),
+            *(self._profile(session_id, person) for person in people),
         )
-        for person, impression in zip(people, impressions, strict=True):
-            person["impression"], person["missed"] = impression or [], impression is None
         return {
             "focus": focus,
             "chat": chat,
@@ -338,8 +373,8 @@ class RecallMixin:
             "topic_label": topic_label,
             "query": query,
             "people": people,
+            "terms": terms,
             "hits": hits or [],
-            "candidates": candidates(hits or [], people),
             "missed": hits is None,
         }
 
@@ -376,10 +411,10 @@ class RecallMixin:
         keywords = text.splitlines()[0].strip().strip("「」") if text else ""
         return "" if keywords == NOTHING else keywords
 
-    async def _finish_recall(
-        self, decision: Any, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]]
+    def _finish_recall(
+        self, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]]
     ) -> tuple[str, str, Dict[str, str]]:
-        """照決策模型的答案挑記憶、看不懂就上網查，記下給 planner 的那段。
+        """照決策模型的答案挑記憶，記下給 planner 的那段。
 
         Returns:
             頁面「聯想」欄的摘要、判斷詳情裡的經過、頁面欄位（話題串、看得懂嗎、想起的記憶）。
@@ -388,59 +423,33 @@ class RecallMixin:
         pick = (answers or {}).get(PICK) or {}
         choice = str(pick.get("choice") or "")
         index = int(choice[1:]) if re.fullmatch(r"m\d+", choice) else 0
-        picked = recall["candidates"][index - 1] if 0 < index <= len(recall["candidates"]) else None
-        # 請求失敗沒拿到判斷時不當作沒把握，免得每次失敗都叫她別把話說死
-        confidence = probability(pick, choice) if picked else probability(understand, "yes") if understand else 1.0
+        picked = recall["hits"][index - 1] if 0 < index <= len(recall["hits"]) else ""
         lost = understand.get("choice") == "no"
-        previous = self._recalls.get(session_id) or {}
-        lookup: Dict[str, Any] = {}
-        if previous.get("focus") == recall["focus"]["msg_id"] and previous.get("lookup", {}).get("summary"):
-            lookup = previous["lookup"]  # 同一則查過就不再查
-        elif lost and decision.lookup_enabled:
-            lookup = await self._lookup(session_id, recall["chat"], picked["text"] if picked else "")
-        note = recall_note(picked, confidence, lookup)
-        self._recalls[session_id] = {"focus": recall["focus"]["msg_id"], "note": note, "lookup": lookup}
+        # 請求失敗沒拿到判斷時不當作看不懂，免得每次失敗都叫她別把話說死
+        understood = probability(understand, "yes") if understand else 1.0
+        note = recall_note(recall, picked, probability(pick, choice), understood)
+        self._recalls[session_id] = {"focus": recall["focus"]["msg_id"], "note": note}
         verdict = str(understand.get("choice") or "")
-        known = sum(1 for person in recall["people"] if person["impression"])
-        missed = sum(1 for person in recall["people"] if person["missed"])
+        known = sum(1 for person in recall["people"] if person.get("profile"))
         parts = [
             f"{'看不懂' if lost else '看得懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "沒拿到判斷",
-            f"想到 m{index}（{confidence:.2f}）"
+            f"想到 m{index}（{probability(pick, choice):.2f}）"
             if picked
             else "群記憶沒等到（逾時或失敗）"
             if recall["missed"]
-            else f"記憶 {len(recall['candidates'])} 筆都沒選",
-            f"人 {known}/{len(recall['people'])}" + (f"（{missed} 人沒等到）" if missed else ""),
+            else f"記憶 {len(recall['hits'])} 筆都沒選",
+            f"人 {known}/{len(recall['people'])}",
+            f"詞 {len(recall['terms'])}",
         ]
-        if lookup:
-            parts.append(f"上網「{lookup.get('query', '')}」" + ("" if lookup.get("summary") else f"失敗：{lookup.get('error', '')}"))
         columns = {
             "topic": recall.get("topic_label", ""),
             "understood": f"{'不懂' if lost else '懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "—",
-            "memory": "檢索逾時" if recall["missed"] else f"{len(recall['candidates'])} 筆・人 {known}/{len(recall['people'])}",
+            "memory": "檢索逾時" if recall["missed"] else f"{len(recall['hits'])} 筆・人 {known}/{len(recall['people'])}・詞 {len(recall['terms'])}",
         }
-        return "・".join(parts), recall_detail(recall, lookup, note), columns
-
-    async def _lookup(self, session_id: str, chat: str, hint: str) -> Dict[str, Any]:
-        """請 linux 沙盒電腦插件上網查；沒裝、沒權限或逾時都回傳帶 error 的 dict。"""
-        try:
-            result = await self.ctx.call_capability(
-                "api.call",
-                timeout_ms=LOOKUP_TIMEOUT_SECONDS * 1000,
-                api_name=LOOKUP_API,
-                version="",
-                args={"chat": chat, "hint": hint, "stream_id": session_id},
-            )
-        except Exception as exc:  # 查不到就照原本的聯想回
-            result = {"success": False, "error": repr(exc)}
-        if not isinstance(result, Mapping):
-            result = {"success": False, "error": f"回傳格式不對：{result!r}"}
-        if not result.get("summary"):
-            self.ctx.logger.warning(f"聯想 [{session_id}]：上網查失敗：{result.get('error')}")
-        return dict(result)
+        return "・".join(parts), recall_detail(recall, note), columns
 
     def _add_recall_note(self, kwargs: Dict[str, Any], session_id: str) -> None:
-        """要回的那則還在 planner 上下文裡，就把這次的聯想接在系統提示詞後面。"""
+        """焦點還在 planner 上下文裡，就把這次的理解接在系統提示詞後面。"""
         recall = self._recalls.get(session_id) or {}
         if recall.get("note") and any(m["msg_id"] == recall["focus"] for m in planner_messages(kwargs.get("items"))):
             self._append_system_text(kwargs, recall["note"])
@@ -453,7 +462,7 @@ class RecallMixin:
         timeout_ms=1000,
     )
     async def add_recall_to_replyer(self, **kwargs: Any) -> Dict[str, Any]:
-        """她回的是焦點那串（或沒指定回哪則）時，replyer 也看到同一段聯想（它看不到 planner 的系統提示詞）。"""
+        """她回的是焦點那串（或沒指定回哪則）時，replyer 也看到同一段理解（它看不到 planner 的系統提示詞）。"""
         session_id = str(kwargs.get("session_id") or "")
         recall = self._recalls.get(session_id) or {}
         target = display_message_id(str(kwargs.get("reply_message_id") or ""))

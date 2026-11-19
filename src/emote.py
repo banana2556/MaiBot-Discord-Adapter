@@ -294,7 +294,7 @@ class EmoteMixin:
         mode="blocking",
         # 比 quote_context（late）早：那邊照這裡選的焦點過濾聊天
         order="normal",
-        # 決策模型兩次、寫關鍵字、記憶檢索（recall.SEARCH_TIMEOUT_SECONDS）兩輪，看不懂的話題再加上網查（recall.LOOKUP_TIMEOUT_SECONDS）
+        # 決策模型兩次、寫關鍵字、記憶檢索和人物畫像（recall.SEARCH_TIMEOUT_SECONDS）
         timeout_ms=150000,
     )
     async def analyze_in_planner(self, **kwargs: Any) -> Dict[str, Any]:

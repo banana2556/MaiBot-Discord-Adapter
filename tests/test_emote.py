@@ -462,7 +462,7 @@ def test_settings_edited_on_the_page_are_used(monkeypatch) -> None:
     plugin = env.plugin
     plugin._page_settings = {}
     plugin._page_settings_path = None
-    asyncio.run(plugin.webui_decision_save(context_messages="3", lookup_enabled="true", model="  "))
+    asyncio.run(plugin.webui_decision_save(context_messages="3", model="  "))
 
     async def scenario():
         _receive_all(plugin)
@@ -472,7 +472,7 @@ def test_settings_edited_on_the_page_are_used(monkeypatch) -> None:
     state, _ = env.asked[0]
     assert "大家在幹嘛" not in state and "#3" in state, "只看最後 3 則，她自己說的那句被擠掉"
     page = asyncio.run(plugin.webui_decision())
-    assert page["current"]["context_messages"] == "3" and page["current"]["lookup_enabled"] == "開"
+    assert page["current"]["context_messages"] == "3"
     assert plugin._load_settings().decision.model == "vllm-sr/d3-flash", "留空不改"
 
 

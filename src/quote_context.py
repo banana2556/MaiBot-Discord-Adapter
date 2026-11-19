@@ -3,7 +3,8 @@
 話題分析（emote._analyze）選好焦點之後：
 
 - planner 和表達方式選擇（MaiBot 的子請求，也走 planner.before_request）的聊天訊息只留焦點那串，
-  加上分完話題之後才出現的（新進來的、她剛說的）；其他話題的訊息和它們的連結提醒都拿掉。
+  加上分完話題之後才出現的（新進來的、她剛說的）；其他話題的訊息和它們的連結提醒都拿掉，
+  MaiBot 拿整段上下文比對的 <jargon> 也拿掉（這串的詞彙在聯想裡）。
   提示詞叫模型「別混在一起」常常沒用，直接不給它看才混不進去。要不要說話、回哪一則由 planner 自己決定。
 - replyer 的聊天紀錄照同一串過濾：把要留的 msg_id 放進 ``reply_tool_args["_keep_message_ids"]``，
   MaiBot（banana2556/MaiBot 的 custom 分支）在組提示詞、挑表達和分圖片名額之前照它過濾；原版 MaiBot 會忽略。
@@ -30,6 +31,13 @@ CALLING_NOTE = (
 )
 # linux 沙盒電腦插件在含連結的訊息後面插的提醒（item_id 是「這個前綴＋那則訊息的 item_id」）
 LINK_REMINDER = "link-reminder-"
+
+
+def is_jargon(item: Mapping[str, Any]) -> bool:
+    """MaiBot 每輪 planner 前插的黑話參考（src/maisaka/jargon_context_matcher.py，開頭是 <jargon>）。"""
+    parts = item.get("parts") if isinstance(item.get("parts"), list) else []
+    first = parts[0] if parts and isinstance(parts[0], Mapping) else {}
+    return item.get("item_type") == "UserMessageItem" and str(first.get("text") or "").lstrip().startswith("<jargon>")
 
 
 def keep_focus_items(items: List[Dict[str, Any]], keep: Set[str], assigned: Set[str]) -> Tuple[List[Dict[str, Any]], int]:
@@ -111,6 +119,8 @@ class QuoteContextMixin:
         if keep := self._focus_keep(session_id):
             store = self._topics[session_id]
             items, dropped = keep_focus_items(items, set(keep), set(store["of"]))
+            # MaiBot 拿整段上下文比對的黑話（<jargon>）拿掉：這串用得到的詞已經在聯想的「這串的理解」裡
+            items = [item for item in items if not is_jargon(item)]
             kwargs["items"] = items
             if dropped:
                 self.ctx.logger.debug(f"焦點話題串 [{session_id}]：拿掉其他話題 {dropped} 則")

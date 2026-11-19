@@ -111,4 +111,4 @@ def test_topic_page_shows_thread_understanding_memory_and_current_settings(monke
     row = page["decisions"][0]
     assert row["topic"].startswith("串 ") and row["topic"].endswith(" 則") and row["understood"] == "懂 0.90"
     assert "筆" in row["memory"]
-    assert set(page["current"]) == {"enabled", "base_url", "model", "context_messages", "lookup_enabled"}
+    assert set(page["current"]) == {"enabled", "base_url", "model", "context_messages"}

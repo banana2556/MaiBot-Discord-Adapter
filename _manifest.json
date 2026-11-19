@@ -67,7 +67,8 @@
     "llm.embed",
     "config.get",
     "person.get_id",
-    "api.call"
+    "person.get_profile",
+    "jargon.match"
   ],
   "i18n": {
     "default_locale": "zh-CN",

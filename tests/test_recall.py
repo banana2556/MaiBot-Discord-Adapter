@@ -1,4 +1,4 @@
-"""聯想：分完話題後，用焦點那串查群記憶與參與者的記憶，決策模型判斷看不看得懂、哪筆有關，看不懂才上網，整理給 planner 和 replyer。"""
+"""聯想：分完話題後讀懂焦點那串：參與者的人物畫像、這串的黑話、相關的群記憶；看不懂時提醒她先查，整理給 planner 和 replyer。"""
 
 import asyncio
 
@@ -11,7 +11,17 @@ alias = _load_adapter_module("src.emote").display_message_id
 
 # 她說的先自己一串（t1）；小明、阿華、小美（回覆阿華）同一串（t2）
 SAME_THREAD = _topics(topic_1="none", topic_2="m1", topic_3="m2")
-LOOKUP = {"success": True, "query": "羚羊 MP5 盾牌", "summary": "在聊《虹彩六號：圍攻》", "sources": ["https://r6.example"]}
+MEMORY = "你知道这些知识: 1. [2026-08-28 05:30] 阿華: 晚上R6 <a:lol:5> [2026-08-28 05:40] 小明: https://x.com/a ...\n2. 上週在聊顯卡"
+PROFILES = {
+    "p-u2": {"success": True, "summary": "阿華主玩 R6 防守方", "traits": ["鑽石牌位"]},
+    "p-u1": {"success": True, "summary": "", "traits": []},
+    "p-u3": {"success": False, "error": "TimeoutError()"},
+}
+# 黑話是字串包含：「P5」也會在「MP5」裡比對到
+JARGONS = {"success": True, "jargons": [
+    {"content": "MP5", "meaning": "一把衝鋒槍"}, {"content": "P5", "meaning": "女神異聞錄5"}, {"content": "羚羊", "meaning": "R6 幹員 Thermite"},
+]}
+NOTE_HEAD = "【這串的理解】（聯想，可能不對；和眼前的聊天衝突時以聊天為準，別逐字說出來）"
 
 
 def _inbound(message_id, user_id, at=None):
@@ -27,7 +37,7 @@ def _item(msg_id, user, text, quote=""):
 
 
 def _planner():
-    """小明說累、阿華約打 R6、小美回覆阿華並 @ 小明：「羚羊拿MP5打盾牌」。"""
+    """小明說累、阿華約打 R6、小美回覆阿華並 @ 小明：「羚羊拿MP5打盾牌」；MaiBot 自己也插了一段整段上下文的黑話。"""
     return {
         "items": [
             {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]},
@@ -35,6 +45,7 @@ def _planner():
             _item(alias(FUNNY), "小明", "今天好累"),
             _item(alias(LAUGH), "阿華", "晚上要打R6嗎"),
             _item(alias(LATEST), "小美", "羚羊拿MP5打盾牌", quote=alias(LAUGH)),
+            {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": "<jargon>\nFF：開拓動漫祭"}]},
         ],
         "tool_definitions": [{"type": "function", "function": {"name": name}} for name in ("reply", "discord_emote", "stop")],
         "session_id": "s1",
@@ -53,18 +64,15 @@ def _setup(monkeypatch, answers, decision):
         calls.append((name, kwargs))
         if name == "person.get_id":
             return f"p-{kwargs['user_id']}"
-        if name == "api.call":
-            return LOOKUP
+        if name == "person.get_profile":
+            return PROFILES[kwargs["person_id"]]
+        if name == "jargon.match":
+            return JARGONS
         if name == "llm.generate":
             return {"success": True, "response": "R6 羚羊 MP5 盾牌\n（多的行不要）"}
-        if name != "knowledge.search":
-            return await original(name, **kwargs)
-        if not kwargs["person_id"]:
-            return "你知道这些知识: 1. 群裡常打虹彩六號：圍攻\n2. 上週在聊顯卡"
-        if kwargs["person_id"] == "p-u2":
-            # 先用「名字＋這段文字」查整體印象，有了話題再用話題查
-            return "你知道这些知识: 1. " + ("阿華主玩防守方" if kwargs["query"].startswith("阿華") else "阿華 R6 鑽石牌位")
-        return f"你不太了解有关{kwargs['query']}的知识"
+        if name == "knowledge.search":
+            return MEMORY
+        return await original(name, **kwargs)
 
     env.ctx.call_capability = call
     return env, calls
@@ -82,12 +90,14 @@ def _run(env, planner=None):
 
 
 def test_pieces() -> None:
+    assert recall.parse_hits("你知道这些知识: 1. A 常玩 R6\n2. 上週在排位") == ["A 常玩 R6", "上週在排位"]
+    assert recall.parse_hits("你不太了解有关x的知识") == [] and recall.parse_hits({"success": False}) == []
     assert recall.tidy("[2026-08-28 05:30] hinana: GTA6鎖30FPS<a:lol:5> [2026-08-28 05:40] LZ: https://ptt.cc/x ...") == (
         "2026-08-28 hinana：GTA6鎖30FPS／LZ：（連結）"
     ), "日期只留一個、拿掉表情 ID、網址換掉、截斷的 ... 拿掉"
     assert recall.tidy("x" * 200, 10) == "x" * 9 + "…"
-    assert recall.parse_hits("你知道这些知识: 1. A 常玩 R6\n2. 上週在排位") == ["A 常玩 R6", "上週在排位"]
-    assert recall.parse_hits("你不太了解有关x的知识") == [] and recall.parse_hits({"success": False}) == []
+    terms = recall.whole_terms(JARGONS["jargons"] + [{"content": "FF", "meaning": "開拓動漫祭"}], ["羚羊拿MP5打盾牌", "FF14 好玩"])
+    assert [term["content"] for term in terms] == ["MP5", "羚羊"], "英數詞要整個詞對上：MP5 裡的 P5、FF14 裡的 FF 不算"
     window = [
         {"msg_id": "a", "user": "「A」", "self": False, "text": "x"},
         {"msg_id": "b", "user": "「B」", "self": False, "text": "x"},
@@ -104,86 +114,80 @@ def test_pieces() -> None:
     assert topics.focus_message(window, remembered)["msg_id"] == "c", "她說話之後叫她的優先"
     assert topics.focus_message(window, {})["msg_id"] == "d", "沒人叫她就是最新一則"
     people = recall.participants(window, window[4], ["a", "b"], remembered, "bot")
-    assert [person["name"] for person in people] == ["D", "E", "B"], "發話人、@ 的人、前文（新的先）；不含她自己，最多 3 個"
-
-RECALL_NO_M1 = {
-    "recall_understand": {"choice": "no", "probabilities": {"no": 0.7, "yes": 0.3}},
-    "recall_pick": {"choice": "m1", "probabilities": {"m1": 0.6, "none": 0.3}},
-}
+    assert [person["name"] for person in people] == ["D", "E", "B", "A"], "發話人、@ 的人、這串其他人（新的先）；不含她自己"
 
 
-def test_recall_reads_memories_asks_decision_looks_up_and_tells_planner(monkeypatch) -> None:
-    env, calls = _setup(monkeypatch, [SAME_THREAD, RECALL_NO_M1], {"lookup_enabled": True})
+def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
+    picked = {
+        "recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9, "no": 0.1}},
+        "recall_pick": {"choice": "m1", "probabilities": {"m1": 0.7, "none": 0.2}},
+    }
+    env, calls = _setup(monkeypatch, [SAME_THREAD, picked], {})
     result = _run(env)
 
-    # 第一次只分話題；分完用焦點那串聯想，第二次才問聯想
+    # 第一次只分話題；分完用焦點那串聯想，第二次才問看不看得懂、哪筆記憶有關
     assert len(env.asked) == 2 and not any(name.startswith("recall_") for name in env.asked[0][1])
     state, questions = env.asked[1]
     assert (
         "【聯想】#3 是你要回的那則，它和這幾則在聊同一件事：\n"
         "#1 「小明」：今天好累\n#2 「阿華」：晚上要打R6嗎\n#3 「小美」：羚羊拿MP5打盾牌\n"
-    ) in state
-    assert "m1. 群裡常打虹彩六號：圍攻" in state and "m3. （和「阿華」有關）阿華主玩防守方" in state, "群記憶和人的記憶一起當候選"
-    assert list(questions) == ["recall_understand", "recall_pick"]
-    assert list(questions["recall_pick"]["criteria"]) == ["m1", "m2", "m3", "none"]
-    lookup = next(kwargs for name, kwargs in calls if name == "api.call")
-    assert lookup["api_name"] == "luca.linux-computer.lookup"
-    assert lookup["args"] == {
-        "chat": "「小明」：今天好累\n「阿華」：晚上要打R6嗎\n「小美」：羚羊拿MP5打盾牌",
-        "hint": "群裡常打虹彩六號：圍攻",
-        "stream_id": "s1",
-    }, "焦點那串"
-    keywords = next(kwargs for name, kwargs in calls if name == "llm.generate")
-    assert "「小美」：羚羊拿MP5打盾牌" in keywords["prompt"] and keywords["task_name"] == "utils"
+        "人物：\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）\n詞彙：\n- MP5：一把衝鋒槍\n- 羚羊：R6 幹員 Thermite\n"
+    ) in state, "決策模型判斷看不看得懂時也知道這些人和詞"
+    assert "m1. 2026-08-28 阿華：晚上R6／小明：（連結）" in state
+    assert list(questions["recall_pick"]["criteria"]) == ["m1", "m2", "none"]
+
+    jargon = next(kwargs for name, kwargs in calls if name == "jargon.match")
+    assert jargon["session_id"] == "s1" and jargon["texts"] == ["今天好累", "晚上要打R6嗎", "羚羊拿MP5打盾牌"], "只比對這串"
+    profiles = [kwargs for name, kwargs in calls if name == "person.get_profile"]
+    assert {kwargs["person_id"] for kwargs in profiles} == {"p-u1", "p-u2", "p-u3"} and profiles[0]["chat_id"] == "s1"
     searches = [kwargs for name, kwargs in calls if name == "knowledge.search"]
-    assert all(kwargs["group_id"] == "10" and kwargs["chat_id"] == "s1" for kwargs in searches), "和 query_memory 一樣帶群號"
-    searched = [(kwargs["person_id"], kwargs["query"]) for kwargs in searches]
-    assert ("", "R6 羚羊 MP5 盾牌") in searched, "群記憶用小模型寫的關鍵字查，不用整段原文"
-    assert ("p-u2", "阿華 R6 羚羊 MP5 盾牌") in searched, "整體印象：名字＋關鍵字"
-    assert ("p-u2", "群裡常打虹彩六號：圍攻") not in searched, "不再用選中的那筆重查一次人（查回來的就是同一筆）"
+    assert [(kwargs["query"], kwargs["group_id"], "person_id" in kwargs) for kwargs in searches] == [("R6 羚羊 MP5 盾牌", "10", False)], (
+        "只用關鍵字查一次群記憶，不再一個個人去撈聊天原文"
+    )
+    assert not any(name == "api.call" for name, _ in calls), "要不要上網查交給 planner"
 
     note = result["items"][0]["parts"][-1]["text"]
     assert note == (
-        "【聯想】這段話題讓你想起的（可能不對；和眼前的聊天衝突時以聊天為準，別逐字說出來）：\n"
-        "- 群裡以前聊過（把握 0.60）：群裡常打虹彩六號：圍攻\n"
-        "- 上網查到：在聊《虹彩六號：圍攻》（來源：https://r6.example）"
-    ), "只給選中的那筆和上網查到的，人一個個列出來的那幾行不給"
-    summary = "看不懂 0.70・想到 m1（0.60）・人 1/3・上網「羚羊 MP5 盾牌」"
-    assert env.plugin._decision_stats.state["decisions"][0]["recall"] == summary
-    row = asyncio.run(env.plugin.webui_decision())["decisions"][0]
-    assert row["recall"] == summary
-    assert "#3 「小美」：羚羊拿MP5打盾牌" in row["context"], "詳情看得到 # 編號對應的訊息"
-    assert row["recall_detail"].startswith(
-        "往回找話題：\n→ #3 「小美」：羚羊拿MP5打盾牌（焦點，話題串 2）\n"
-        "← #2 「阿華」：晚上要打R6嗎（同一串）\n← #1 「小明」：今天好累（同一串）\n"
-        "關鍵字：R6 羚羊 MP5 盾牌\n想起的記憶：\nm1. 群裡常打虹彩六號：圍攻\nm2. 上週在聊顯卡\nm3. （「阿華」）阿華主玩防守方"
+        f"{NOTE_HEAD}\n"
+        "人物：\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）\n"
+        "詞彙：\n- MP5：一把衝鋒槍\n- 羚羊：R6 幹員 Thermite\n"
+        "記憶：\n- 群裡以前聊過（把握 0.70）：2026-08-28 阿華：晚上R6／小明：（連結）"
     )
-    assert "「小美」：沒查到" in row["recall_detail"] and row["recall_detail"].endswith(note)
+    assert not any("<jargon>" in str(item) for item in result["items"]), "MaiBot 整段上下文比對的黑話拿掉"
+
+    summary = "看得懂 0.90・想到 m1（0.70）・人 1/3・詞 2"
+    record = env.plugin._decision_stats.state["decisions"][0]
+    assert record["recall"] == summary and record["columns"]["memory"] == "2 筆・人 1/3・詞 2"
+    detail = record["recall_detail"]
+    assert "「阿華」：阿華主玩 R6 防守方（鑽石牌位）" in detail and "「小明」：沒有畫像" in detail
+    assert "「小美」：沒等到（逾時或失敗）" in detail and "詞彙：MP5、羚羊" in detail and detail.endswith(note)
 
     # 同一回合後面的請求（不再問決策模型）也帶著；replyer 回的是這串（或沒指定回哪則）才給
     later = _run(env)
     assert later["items"][0]["parts"][-1]["text"] == note and len(env.asked) == 2
     replied = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=FUNNY, extra_prompt="前面"))
     assert replied["modified_kwargs"]["extra_prompt"] == f"前面\n{note}"
-    assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=""))["modified_kwargs"]
     assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id="mother")) == {"action": "continue"}
 
+    # 人物畫像變得慢：快取期間不再查
+    before = len(calls)
+    asyncio.run(env.plugin._profile("s1", person := {"person_id": "p-u2"}))
+    assert len(calls) == before and person["profile"] == "阿華主玩 R6 防守方（鑽石牌位）"
 
-def test_unsure_recall_asks_her_to_hedge_and_lookup_only_when_enabled(monkeypatch) -> None:
-    unsure = {
+
+def test_not_understanding_asks_her_to_look_it_up_herself(monkeypatch) -> None:
+    lost = {
         "recall_understand": {"choice": "no", "probabilities": {"no": 0.8, "yes": 0.2}},
         "recall_pick": {"choice": "none", "probabilities": {"none": 0.7}},
     }
-    env, calls = _setup(monkeypatch, [SAME_THREAD, unsure], {})
+    env, calls = _setup(monkeypatch, [SAME_THREAD, lost], {})
     note = _run(env)["items"][0]["parts"][-1]["text"]
-    assert note.endswith(recall.UNSURE)
-    assert "群裡常打" not in note and "阿華主玩防守方" not in note and "沒有相關的記憶" not in note, (
-        "選了「都無關」：記憶和用同一組關鍵字查到的印象都不給"
-    )
-    assert not any(name == "api.call" for name, _ in calls), "沒開上網查"
+    assert note.endswith("沒把握：" + recall.UNSURE.format(query="R6 羚羊 MP5 盾牌")), "給她可以查的關鍵字，查不查她自己決定"
+    assert "記憶：" not in note and "人物：" in note, "選了「都無關」不給記憶；人和詞照樣給"
+    assert not any(name == "api.call" for name, _ in calls)
 
     # 寫不出關鍵字時改用原文查
-    failing, failing_calls = _setup(monkeypatch, [SAME_THREAD, unsure], {})
+    failing, failing_calls = _setup(monkeypatch, [SAME_THREAD, lost], {})
     original = failing.ctx.call_capability
 
     async def no_keywords(name, **kwargs):
@@ -194,33 +198,33 @@ def test_unsure_recall_asks_her_to_hedge_and_lookup_only_when_enabled(monkeypatc
 
     failing.ctx.call_capability = no_keywords
     _run(failing)
-    queries = [kwargs["query"] for name, kwargs in failing_calls if name == "knowledge.search" and not kwargs["person_id"]]
+    queries = [kwargs["query"] for name, kwargs in failing_calls if name == "knowledge.search"]
     assert queries[0] == "今天好累 晚上要打R6嗎 羚羊拿MP5打盾牌"
 
-    # 沒開決策模型就不分話題、不聯想
+    # 沒開決策模型就不分話題、不聯想，MaiBot 自己的 <jargon> 也留著
     off, off_calls = _setup(monkeypatch, [], {"enabled": False})
-    _run(off)
-    assert not off.asked and not off_calls
+    kept = _run(off)
+    assert not off.asked and not off_calls and any("<jargon>" in str(item) for item in kept["items"])
 
 
-def test_timed_out_searches_are_not_reported_as_empty(monkeypatch) -> None:
+def test_missing_capabilities_and_timeouts_leave_their_part_out(monkeypatch) -> None:
+    """原版 MaiBot 沒有 person.get_profile、jargon.match；記憶檢索逾時。三段都缺時只剩把握的判斷。"""
     understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
     env, calls = _setup(monkeypatch, [SAME_THREAD, understood], {})
     original = env.ctx.call_capability
 
-    async def slow(name, **kwargs):
-        if name == "knowledge.search" and kwargs["person_id"] in ("", "p-u1"):
+    async def bare(name, **kwargs):
+        if name in ("person.get_profile", "jargon.match", "knowledge.search"):
             calls.append((name, kwargs))
-            return {"success": False, "error": "TimeoutError()"}
+            return {"success": False, "error": f"沒有 {name}"}
         return await original(name, **kwargs)
 
-    env.ctx.call_capability = slow
+    env.ctx.call_capability = bare
     result = _run(env)
     record = env.plugin._decision_stats.state["decisions"][0]
-    assert record["recall"] == "看得懂 0.90・群記憶沒等到（逾時或失敗）・人 1/3（1 人沒等到）"
-    assert "想起的記憶：\nm1. （「阿華」）阿華主玩防守方" in record["recall_detail"], "群記憶沒等到，人的照樣當候選"
-    assert "「小明」：沒等到（逾時或失敗）" in record["recall_detail"]
-    assert "【聯想】" not in result["items"][0]["parts"][-1]["text"], "沒選中、也有把握：不加聯想"
+    assert record["recall"] == "看得懂 0.90・群記憶沒等到（逾時或失敗）・人 0/3・詞 0"
+    assert "群記憶：沒等到（逾時或失敗）" in record["recall_detail"]
+    assert "【這串的理解】" not in result["items"][0]["parts"][-1]["text"], "看得懂又沒東西可補：不加"
 
 
 def test_keyword_model_saying_nothing_falls_back_to_the_thread_text(monkeypatch) -> None:
@@ -236,5 +240,5 @@ def test_keyword_model_saying_nothing_falls_back_to_the_thread_text(monkeypatch)
 
     env.ctx.call_capability = nothing
     _run(env)
-    queries = [kwargs["query"] for name, kwargs in calls if name == "knowledge.search" and not kwargs["person_id"]]
+    queries = [kwargs["query"] for name, kwargs in calls if name == "knowledge.search"]
     assert queries[0] == "今天好累 晚上要打R6嗎 羚羊拿MP5打盾牌", "看不出在聊什麼就用這串的原文查"

@@ -1005,8 +1005,8 @@ class DecisionConfig(PluginConfigBase):
         default=False,
         description=(
             "群聊收到新訊息後第一次進 planner 時，先問決策模型把訊息分到話題串，選出這輪的焦點（叫她的優先，否則最新一則）所在那串，"
-            "再聯想（查記憶、看不懂就上網查）。planner、表達方式選擇和 replyer 都只看這一串；"
-            "要不要說話、要不要按表情由 planner 自己決定。replyer 的過濾要用 banana2556/MaiBot 的 custom 分支。"
+            "再聯想（這串的人物畫像、黑話和相關記憶，看不懂時提醒她先查）。planner、表達方式選擇和 replyer 都只看這一串；"
+            "要不要說話、要不要按表情、要不要上網查由 planner 自己決定。replyer 的過濾、人物畫像和黑話要用 banana2556/MaiBot 的 custom 分支。"
         ),
         json_schema_extra={"label": "啟用決策模型", "order": 0},
     )
@@ -1040,11 +1040,6 @@ class DecisionConfig(PluginConfigBase):
         le=30,
         description="分話題時看 planner 上下文的最後幾則。",
         json_schema_extra={"label": "送出的聊天則數", "order": 4, "step": 1},
-    )
-    lookup_enabled: bool = Field(
-        default=False,
-        description="聯想時看不懂話題，就請「Linux 沙盒電腦」插件上網查（十幾秒）；要先裝好並啟用那個插件。",
-        json_schema_extra={"label": "看不懂就上網查", "order": 5},
     )
 
 
@@ -1150,7 +1145,7 @@ PAGE_FIELDS: Dict[str, tuple[str, ...]] = {
         "share_instructions",
     ),
     "reminder": ("enabled", "drift_minutes", "max_per_chat", "followup_enabled", "followup_max_per_chat"),
-    "decision": ("enabled", "base_url", "model", "context_messages", "lookup_enabled"),
+    "decision": ("enabled", "base_url", "model", "context_messages"),
     "voice": (
         "voice_mode",
         "fixed_channel_id",
