@@ -155,13 +155,13 @@ def test_threads_survive_a_restart(monkeypatch, tmp_path) -> None:
     topics = _load_adapter_module("src.topics")
     store = topics.new_store()
     tid = topics.add_member(store, None, {"msg_id": "mq", "user": "CiKa", "self": False, "time": 1.0}, "[08:00] 「CiKa」：嗨")
-    env.plugin._topics["s1"], env.plugin._last_sent["s1"] = store, 5.0
+    env.plugin._topics["s1"], env.plugin._seen_until["s1"] = store, 5.0
     env.plugin._threads_path = tmp_path / "threads.json"
     env.plugin._save_threads()
-    env.plugin._topics, env.plugin._last_sent = {}, {}
+    env.plugin._topics, env.plugin._seen_until = {}, {}
     env.plugin._load_threads(tmp_path / "threads.json")
     loaded = env.plugin._topics["s1"]
-    assert loaded["of"] == {"mq": tid} and list(loaded["topics"]) == [tid] and env.plugin._last_sent == {"s1": 5.0}
+    assert loaded["of"] == {"mq": tid} and list(loaded["topics"]) == [tid] and env.plugin._seen_until == {"s1": 5.0}
     assert loaded["topics"][tid]["items"][0]["text"] == "嗨"
 
 
@@ -205,5 +205,35 @@ def test_compacted_start_of_thread_subagent_thread_and_answered_calls(monkeypatc
     # 叫她的訊息在她送出之前就到了：她送出時 replyer 已經看過，不再列成「有人在找你」
     calling = _stamp(_message_item(alias(REPLY), "小美", "真的嗎"), t0 + 200)
     assert "【有人在找你】" in _planner(env, calling, tools=("reply",))[1]
-    plugin._last_sent["s1"] = t0 + 230
+    plugin._seen_until["s1"] = t0 + 230
     assert "【有人在找你】" not in _planner(env, calling, tools=("reply",))[1]
+
+
+def test_replyer_snapshot_leaves_late_messages_for_next_round_and_keeps_a_gap(monkeypatch) -> None:
+    # 2026-11-20 15:50：replyer 寫了 44 秒，期間到的「搜好沒」被它順手回成「搜完了啦」
+    env, _ = _setup(monkeypatch)
+    topics = _load_adapter_module("src.topics")
+    quote = _load_adapter_module("src.quote_context")
+    alias = env.module.display_message_id
+    plugin, store = env.plugin, topics.new_store()
+    plugin._topics["s1"] = store
+    tid = topics.add_member(store, None, {"msg_id": alias(FUNNY), "user": "小明", "self": False, "time": 1.0}, "「小明」：跌倒")
+    topics.add_member(store, tid, {"msg_id": alias(REPLY), "user": "小美", "self": False, "time": 2.0}, "「小美」：真的嗎")
+    plugin._focus["s1"] = alias(FUNNY)
+    plugin._inbound["s1"][alias(REPLY)]["at"] = plugin._inbound["s1"][alias(FUNNY)]["at"] + 30
+    plugin._planner_at["s1"] = plugin._inbound["s1"][alias(FUNNY)]["at"] + 1
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(quote.asyncio, "sleep", fake_sleep)
+    reply = asyncio.run(plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=FUNNY))
+    assert reply["modified_kwargs"]["reply_tool_args"]["_keep_message_ids"] == [alias(FUNNY)], "planner 決定後才到的不給 replyer"
+    assert slept == [], "之前沒說過話，不用等"
+
+    # 送出後：她看過的截到 planner 開始時，晚到的那則下一輪還算沒回；下一則回覆要等滿間隔
+    plugin._join_focus({"session_id": "s1", "message_id": "her-1", "raw_message": [{"type": "text", "data": "哈哈"}]})
+    assert plugin._seen_until["s1"] == plugin._planner_at["s1"]
+    asyncio.run(plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=FUNNY))
+    assert len(slept) == 1 and 0 < slept[0] <= quote.REPLY_GAP_SECONDS

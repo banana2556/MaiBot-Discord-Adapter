@@ -461,7 +461,7 @@ class RecallMixin:
 
     async def _wait_for_focus_card(self, session_id: str, window: Sequence[Mapping[str, Any]]) -> None:
         """要回的那則只有網址時，等 Discord 補上連結卡片（_remember_card），最多 FOCUS_WAIT_SECONDS 秒。"""
-        focus = focus_message(window, self._inbound.get(session_id, {}), self._last_sent.get(session_id, 0.0))
+        focus = focus_message(window, self._inbound.get(session_id, {}), self._seen_until.get(session_id, 0.0))
         deadline = asyncio.get_running_loop().time() + FOCUS_WAIT_SECONDS
         while focus is not None and asyncio.get_running_loop().time() < deadline:
             entry = self._inbound.get(session_id, {}).get(focus["msg_id"]) or {}

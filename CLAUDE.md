@@ -5,7 +5,7 @@ MaiBot 的 Discord 插件，跑在 MaiBot 的插件 Runner 裡（`maibot_sdk`）
 
 ## 結構
 
-- `plugin.py`：入口、訊息閘道器和大部分 Tool / Hook / `webui_*` API；按功能拆出去的 mixin 有定時提醒（`src/life/reminders.py` 的 `ReminderMixin`）、話題分析與表情工具（`src/emote.py` 的 `EmoteMixin`：每輪分話題串、選焦點）、焦點過濾（`src/quote_context.py` 的 `QuoteContextMixin`：planner、表達方式選擇和 replyer 只看焦點那串，加上回覆標籤、有人在找你、被 MaiBot 壓縮掉的這串前文放在聊天紀錄最前面、MaiBot 的時間標記只留現在時間，子代理結論送回時也給它當初那串；話題串存在資料目錄的 `threads.json`，重啟後讀回）和聯想（`src/recall.py` 的 `RecallMixin`：理解焦點那串，參與者的人物畫像、這串的黑話、相關的群記憶，看不懂時提醒她先查；話題串在 `src/topics.py`），新功能照這個方式拆，不要再往 `plugin.py` 加。
+- `plugin.py`：入口、訊息閘道器和大部分 Tool / Hook / `webui_*` API；按功能拆出去的 mixin 有定時提醒（`src/life/reminders.py` 的 `ReminderMixin`）、話題分析與表情工具（`src/emote.py` 的 `EmoteMixin`：每輪分話題串、選焦點）、焦點過濾（`src/quote_context.py` 的 `QuoteContextMixin`：planner、表達方式選擇和 replyer 只看焦點那串，加上回覆標籤、有人在找你、被 MaiBot 壓縮掉的這串前文放在聊天紀錄最前面、MaiBot 的時間標記只留現在時間，子代理結論送回時也給它當初那串；話題串存在資料目錄的 `threads.json`，重啟後讀回；replyer 只看 planner 做決定前到的訊息（快照），兩次回話至少隔 `REPLY_GAP_SECONDS`）和聯想（`src/recall.py` 的 `RecallMixin`：理解焦點那串，參與者的人物畫像、這串的黑話、相關的群記憶，看不懂時提醒她先查；話題串在 `src/topics.py`），新功能照這個方式拆，不要再往 `plugin.py` 加。
 - `config.py`：配置模型；`WEBUI_CONFIG_TABS` 決定設定頁分組，`PAGE_FIELDS` 是改到「DC生活」頁面設定的欄位（每頁一組，設定頁不再顯示，整節都搬走的設定節會整個隱藏）。
 - `webui.json`：「DC生活」工作區頁面（日常生活、主動話題、語音、定時提醒、話題串、話題分析設定）。「話題串」是 custom 頁面（`webui/threads.html`，沙盒 iframe，只能用 `window.maibot.query` 呼叫宣告過的 API，主題色用 `--maibot-*` CSS 變數），資料來自 `webui_threads`。
 - `src/recv_handler/`：Discord → MaiBot；`src/send_handler/`：MaiBot → Discord（含 OpenCC 轉繁體）。

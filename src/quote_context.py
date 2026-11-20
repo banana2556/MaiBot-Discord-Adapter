@@ -18,8 +18,12 @@
 - MaiBot 在每批訊息前插的「时间：…」不送：每則訊息開頭已經有時間（不是今天的加上日期），只留最後一條當作現在時間。
   過濾掉別串後它們只剩空殼；焦點過濾時 MaiBot 的「[上下文恢复]」說明也拿掉（它說的那些恢復的訊息多半不在這串）。
 - 子代理在背景查，結論送回時焦點可能已經換到別串：派出時記下那串，結論回來那輪也給 planner 和 replyer 看那串。
+- 快照：replyer 只看 planner 做決定那時已經到的訊息。replyer 寫得慢時新訊息會進來，它會順手回到 planner 沒看過的事
+  （「搜完了啦」）；之後才到的留給下一輪，「她看過的截到哪」也照 planner 開始的時間算，下一輪還會提醒她。
+- 送出間隔：同一個聊天兩次回話至少隔 REPLY_GAP_SECONDS，不會上一則剛送出下一則又跟著噴出來。
 """
 
+import asyncio
 import re
 import time
 from datetime import date, datetime
@@ -31,6 +35,8 @@ from .emote import display_message_id, planner_messages, strip_emotes, tool_name
 from .life.common import sent_text
 from .topics import add_member, clock, earlier_items, focus_ids, unanswered
 
+# 同一個聊天兩次回話（不是同一則回覆拆成幾段）之間至少隔幾秒
+REPLY_GAP_SECONDS = 8
 # 叫她的訊息最多列幾則（取最新的）
 CALLING_LIMIT = 3
 CALLING_NOTE = (
@@ -209,6 +215,8 @@ class QuoteContextMixin:
         now = time.time()
         if session_id:
             self._last_sent[session_id] = now
+            # replyer 只看了 planner 開始前到的（快照），之後才到的還沒回
+            self._seen_until[session_id] = self._planner_at.get(session_id, now)
         if not store or focus not in store["of"] or not msg_id or msg_id in store["of"]:
             return
         line = f"[{clock(now)}] （你）：{sent_text(message)[:120]}"
@@ -220,7 +228,7 @@ class QuoteContextMixin:
         if not self._latest_inbound.get(session_id, {}).get("group_id"):
             return ""
         lines = []
-        for message in unanswered(messages, self._last_sent.get(session_id, 0.0)):
+        for message in unanswered(messages, self._seen_until.get(session_id, 0.0)):
             entry = remembered.get(message["msg_id"])
             if entry and entry["addressed"]:
                 label = f"[{entry['quote_label']}]" if entry.get("quote_label") else ""
@@ -267,6 +275,7 @@ class QuoteContextMixin:
         kwargs["items"] = items
         # 有 reply 才是 planner 本身（表達方式選擇沒有工具；睡覺時段只剩 stop，不用叫她回）
         if "reply" in tool_names(kwargs):
+            self._planner_at[session_id] = time.time()
             if note := self._calling_note(session_id, messages, remembered):
                 self._append_system_text(kwargs, note)
             self._add_recall_note(kwargs, session_id)
@@ -277,16 +286,26 @@ class QuoteContextMixin:
         name="discord_quote_context_reply",
         mode="blocking",
         order="late",
-        timeout_ms=1000,
+        # 等送出間隔（REPLY_GAP_SECONDS）再多留一點
+        timeout_ms=(REPLY_GAP_SECONDS + 2) * 1000,
     )
     async def add_quote_context_to_replyer(self, **kwargs: Any) -> Dict[str, Any]:
-        """replyer 只看焦點那串（_keep_message_ids）；要回的那則是回覆時，告訴它在回覆誰。"""
+        """replyer 只看焦點那串、planner 做決定前到的（_keep_message_ids）；要回的那則是回覆時，告訴它在回覆誰。
+        上一則剛送出時先等到滿 REPLY_GAP_SECONDS 再寫。"""
         session_id = str(kwargs.get("session_id") or "")
         target = display_message_id(str(kwargs.get("reply_message_id") or ""))
+        if (wait := REPLY_GAP_SECONDS - (time.time() - self._last_sent.get(session_id, 0.0))) > 0:
+            await asyncio.sleep(wait)
         changed = False
         if keep := self._focus_keep(session_id, target):
+            decided = self._planner_at.get(session_id, time.time())
+            remembered = self._inbound.get(session_id, {})
+            late = [msg_id for msg_id in keep if (remembered.get(msg_id) or {}).get("at", 0.0) > decided and msg_id != target]
+            keep = [msg_id for msg_id in keep if msg_id not in late]
             kwargs["reply_tool_args"] = {**(kwargs.get("reply_tool_args") or {}), "_keep_message_ids": keep}
-            self.ctx.logger.info(f"回覆只看焦點那串 [{session_id}]：{len(keep)} 則")
+            self.ctx.logger.info(
+                f"回覆只看焦點那串 [{session_id}]：{len(keep)} 則" + (f"，planner 決定後才到的 {len(late)} 則留給下一輪" if late else "")
+            )
             changed = True
             if note := self._earlier_notes.get(session_id):
                 kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{note}".strip()

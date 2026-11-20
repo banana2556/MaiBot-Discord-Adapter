@@ -77,20 +77,20 @@ def numbered(message: Mapping[str, Any], numbers: Mapping[int, str]) -> str:
     return f"#{numbers[id(message)]} 「{message['user']}」：{message['text']}"
 
 
-def unanswered(messages: Sequence[Mapping[str, Any]], last_sent: float = 0.0) -> List[Mapping[str, Any]]:
+def unanswered(messages: Sequence[Mapping[str, Any]], seen_until: float = 0.0) -> List[Mapping[str, Any]]:
     """她上次說話之後的訊息。MaiBot 的上下文裡她說的話常常只在 reply 的工具結果裡、不是聊天訊息，
-    所以也拿她最後一次送出的時間（last_sent）切：在那之前收到的，她送出前的 replyer 已經看過了。"""
+    所以也拿她上次說話時看過的訊息截到哪（seen_until，那輪 planner 開始的時間）切：在那之前收到的她已經看過了。"""
     last_self = max((index for index, message in enumerate(messages) if message["self"]), default=-1)
-    return [message for message in messages[last_self + 1 :] if (message.get("time") or last_sent + 1) > last_sent]
+    return [message for message in messages[last_self + 1 :] if (message.get("time") or seen_until + 1) > seen_until]
 
 
 def focus_message(
-    window: Sequence[Mapping[str, Any]], remembered: Mapping[str, Mapping[str, Any]], last_sent: float = 0.0
+    window: Sequence[Mapping[str, Any]], remembered: Mapping[str, Mapping[str, Any]], seen_until: float = 0.0
 ) -> Optional[Mapping[str, Any]]:
     """這輪的焦點：她上次說話之後叫她的最新一則，沒有就是最新一則別人的訊息；只有表情的不算（看不出在聊什麼）。"""
     calling = [
         message
-        for message in unanswered(window, last_sent)
+        for message in unanswered(window, seen_until)
         if not message["self"] and (remembered.get(message["msg_id"]) or {}).get("addressed")
     ]
     others = [message for message in window if not message["self"] and message["text"] != EMOTE_ONLY]
@@ -283,14 +283,14 @@ def focus_ids(store: Mapping[str, Any], msg_id: str, arrived: Sequence[str]) -> 
     return [*members, *(other for other in arrived[last + 1 :] if other not in members)]
 
 
-def dump_stores(stores: Mapping[str, Mapping[str, Any]], last_sent: Mapping[str, float]) -> Dict[str, Any]:
-    """所有聊天的話題串和她最後送出的時間，存成 JSON（串 ID 變成字串）。"""
+def dump_stores(stores: Mapping[str, Mapping[str, Any]], seen_until: Mapping[str, float]) -> Dict[str, Any]:
+    """所有聊天的話題串和她上次說話時看過的訊息截到哪，存成 JSON（串 ID 變成字串）。"""
     return {
         "chats": {
             session_id: {**store, "topics": {str(tid): topic for tid, topic in store["topics"].items()}}
             for session_id, store in stores.items()
         },
-        "last_sent": dict(last_sent),
+        "seen_until": dict(seen_until),
     }
 
 
@@ -305,4 +305,4 @@ def load_stores(data: Mapping[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dic
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
         stores[session_id] = store
-    return stores, {key: float(value) for key, value in (data.get("last_sent") or {}).items()}
+    return stores, {key: float(value) for key, value in (data.get("seen_until") or {}).items()}

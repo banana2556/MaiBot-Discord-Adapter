@@ -255,8 +255,11 @@ class EmoteMixin:
         # MaiBot 設定的暱稱與別名，和它的「被提及必回覆」用同一份
         self._bot_names: List[str] = []
         self._bot_names_at = 0.0
-        # 每個聊天她最後一次送出訊息的時間（epoch 秒）：在那之前叫她的，她已經回過了
+        # 每個聊天她上次說話時看過的訊息截到哪（那輪 planner 開始的時間，epoch 秒）：在那之前叫她的，她已經回過了
+        self._seen_until: Dict[str, float] = {}
+        # 每個聊天她最後一次送出的時間，和最近一次會回話的 planner 請求開始的時間（replyer 的快照照它切）
         self._last_sent: Dict[str, float] = {}
+        self._planner_at: Dict[str, float] = {}
         # 子代理：派出時那一輪焦點所在的串（planner 的 call_id -> 串 ID），派出後拿到任務 id（任務 id -> 串 ID）
         self._subagent_calls: Dict[str, int] = {}
         self._subagent_tasks: Dict[str, int] = {}
@@ -268,11 +271,11 @@ class EmoteMixin:
     def _load_threads(self, path: Path) -> None:
         """讀回話題串：重啟後 MaiBot 恢復的上下文、被壓縮掉的前文，都還對得上是哪一串。"""
         self._threads_path = path
-        self._topics, self._last_sent = load_stores(load_state(path))
+        self._topics, self._seen_until = load_stores(load_state(path))
 
     def _save_threads(self) -> None:
         if self._threads_path is not None:
-            save_state(self._threads_path, dump_stores(self._topics, self._last_sent))
+            save_state(self._threads_path, dump_stores(self._topics, self._seen_until))
 
     # ===== 收訊與 planner =====
 
@@ -311,6 +314,8 @@ class EmoteMixin:
             "mentioned": mentioned_people(message),
             # 第一張圖片（base64）：分話題時直接附給決策模型看，不等主程式寫圖片描述
             "image": first_image(message),
+            # 收到的時間：planner 做完決定之後才到的，replyer 不看（quote_context 的快照）
+            "at": time.time(),
         }
         remembered = self._inbound.setdefault(session_id, OrderedDict())
         # 用 planner 上下文顯示的 msg_id（長 ID 是別名）當鍵
@@ -374,7 +379,7 @@ class EmoteMixin:
             else message
             for message in window
         ]
-        focus = focus_message(window, remembered, self._last_sent.get(session_id, 0.0))
+        focus = focus_message(window, remembered, self._seen_until.get(session_id, 0.0))
         if focus is None:
             self._focus.pop(session_id, None)
             return
