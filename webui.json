@@ -1593,9 +1593,24 @@
       ]
     },
     {
+      "id": "threads",
+      "title": "話題串",
+      "description": "各群聊現在的話題串（對話泡泡），和每次分析時她讀到的人物、詞彙、記憶。",
+      "icon": "list",
+      "mode": "custom",
+      "entry": "webui/threads.html",
+      "layout": "document",
+      "queries": {
+        "threads": {
+          "api": "webui_threads",
+          "version": "1"
+        }
+      }
+    },
+    {
       "id": "decision",
-      "title": "話題分析",
-      "description": "她回話前怎麼讀懂這段在聊什麼：新訊息分到哪個話題串、這輪的焦點是哪一串、看不看得懂、想起什麼記憶。planner、表達方式選擇和 replyer 都只看焦點那串。",
+      "title": "話題分析設定",
+      "description": "決策模型的連線與分話題設定、planner 送出的表情、每天的統計；每次分析的對話和理解在「話題串」頁看。",
       "icon": "chart",
       "queries": {
         "decision": {
@@ -1621,96 +1636,6 @@
         {
           "type": "tabs",
           "children": [
-            {
-              "type": "stack",
-              "label": "話題分析",
-              "children": [
-                {
-                  "type": "grid",
-                  "columns": 3,
-                  "children": [
-                    {
-                      "type": "stat",
-                      "label": "今天分析",
-                      "value": {
-                        "source": "decision",
-                        "field": "today_calls"
-                      }
-                    },
-                    {
-                      "type": "stat",
-                      "label": "平均延遲",
-                      "value": {
-                        "source": "decision",
-                        "field": "today_latency"
-                      }
-                    },
-                    {
-                      "type": "stat",
-                      "label": "請求失敗",
-                      "value": {
-                        "source": "decision",
-                        "field": "today_failed"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "type": "text",
-                  "value": "還沒有判斷紀錄。",
-                  "when": {
-                    "reference": {
-                      "source": "decision",
-                      "field": "decisions"
-                    },
-                    "operator": "empty"
-                  }
-                },
-                {
-                  "type": "table",
-                  "label": "最近 10 次話題分析（新的在前；點一列看整串）",
-                  "value": {
-                    "source": "decision",
-                    "field": "decisions"
-                  },
-                  "when": {
-                    "reference": {
-                      "source": "decision",
-                      "field": "decisions"
-                    },
-                    "operator": "not_empty"
-                  },
-                  "selection": "decisionRow",
-                  "detail": "decisionDetails",
-                  "columns": [
-                    {
-                      "field": "time",
-                      "label": "時間"
-                    },
-                    {
-                      "field": "message",
-                      "label": "焦點"
-                    },
-                    {
-                      "field": "topic",
-                      "label": "話題串"
-                    },
-                    {
-                      "field": "understood",
-                      "label": "看得懂"
-                    },
-                    {
-                      "field": "memory",
-                      "label": "想起的記憶"
-                    },
-                    {
-                      "field": "latency",
-                      "label": "延遲"
-                    }
-                  ]
-                }
-              ]
-            },
             {
               "type": "stack",
               "label": "送出的表情",
@@ -1931,6 +1856,36 @@
               "label": "統計",
               "children": [
                 {
+                  "type": "grid",
+                  "columns": 3,
+                  "children": [
+                    {
+                      "type": "stat",
+                      "label": "今天分析",
+                      "value": {
+                        "source": "decision",
+                        "field": "today_calls"
+                      }
+                    },
+                    {
+                      "type": "stat",
+                      "label": "平均延遲",
+                      "value": {
+                        "source": "decision",
+                        "field": "today_latency"
+                      }
+                    },
+                    {
+                      "type": "stat",
+                      "label": "請求失敗",
+                      "value": {
+                        "source": "decision",
+                        "field": "today_failed"
+                      }
+                    }
+                  ]
+                },
+                {
                   "type": "chart",
                   "label": "每天話題分析次數",
                   "chart_type": "bar",
@@ -1993,94 +1948,6 @@
               ]
             }
           ]
-        },
-        {
-          "type": "dialog",
-          "name": "decisionDetails",
-          "label": "話題分析詳情",
-          "children": [
-            {
-              "type": "text",
-              "label": "時間",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "time"
-              }
-            },
-            {
-              "type": "text",
-              "label": "聊天",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "chat"
-              }
-            },
-            {
-              "type": "text",
-              "label": "焦點",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "message"
-              }
-            },
-            {
-              "type": "text",
-              "label": "延遲",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "latency"
-              }
-            },
-            {
-              "type": "text",
-              "label": "結果",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "result"
-              }
-            },
-            {
-              "type": "text",
-              "label": "當時的群聊（# 是訊息編號，和話題分配對得上）",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "context"
-              }
-            },
-            {
-              "type": "text",
-              "label": "話題分配",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "topics"
-              }
-            },
-            {
-              "type": "text",
-              "label": "聯想",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "recall"
-              }
-            },
-            {
-              "type": "text",
-              "label": "聯想經過",
-              "value": {
-                "scope": "selection",
-                "source": "decisionRow",
-                "field": "recall_detail"
-              }
-            }
-          ]
         }
       ],
       "actions": {
@@ -2121,5 +1988,9 @@
         }
       }
     }
+  ],
+  "required_capabilities": [
+    "declarative_basic",
+    "custom_pages"
   ]
 }

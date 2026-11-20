@@ -26,7 +26,7 @@ from maibot_sdk import HookHandler
 
 from .emote import display_message_id, planner_messages
 from .reply_links import NONE, plain
-from .topics import _URL, focus_message, hide_urls, lacks_content, numbered, topic_members, with_card
+from .topics import _URL, clock, focus_message, hide_urls, lacks_content, numbered, topic_members, with_card
 
 # 群記憶取幾筆、最多看幾個人、最多給幾個詞
 MEMORY_HITS = 3
@@ -265,6 +265,41 @@ def recall_detail(recall: Mapping[str, Any], note: str) -> str:
     return "\n".join(lines)
 
 
+def recall_view(
+    recall: Mapping[str, Any], picked: str, pick_confidence: float, understand: Mapping[str, Any], note: str
+) -> Dict[str, Any]:
+    """「話題串」頁畫泡泡用的結構：這串的對話（焦點標出來）、人物、詞彙、選中的記憶、看不看得懂。"""
+    focus = recall["focus"]["msg_id"]
+    verdict = str(understand.get("choice") or "")
+    return {
+        "thread": [
+            {
+                "who": "你" if message["self"] else plain(message["user"]),
+                "self": bool(message["self"]),
+                "text": clip(hide_urls(message["text"]), 300),
+                "time": clock(message.get("time")),
+                "focus": message["msg_id"] == focus,
+            }
+            for message in recall["said"]
+        ],
+        "topic": recall.get("topic_label", ""),
+        "people": [
+            {
+                "name": person["name"],
+                "profile": person.get("profile") or "",
+                "state": "" if person.get("profile") else MISSED if person.get("missed") else "沒有畫像",
+            }
+            for person in recall["people"]
+        ],
+        "terms": list(recall["terms"]),
+        "memory": {"text": tidy(picked), "p": round(pick_confidence, 2)} if picked else None,
+        "understood": {"verdict": verdict, "p": round(probability(understand, verdict), 2) if verdict else None},
+        "query": clip(recall["query"], 60),
+        "keywords": bool(recall.get("keywords")),
+        "note": note,
+    }
+
+
 class RecallMixin:
     """需要主插件提供 ctx、_append_system_text、_client_manager，和 EmoteMixin 的 _topics、_focus、_inbound。"""
 
@@ -353,8 +388,8 @@ class RecallMixin:
         numbers: Mapping[int, str],
         state: str,
         focus: Mapping[str, Any],
-    ) -> tuple[str, str, Dict[str, str]]:
-        """分完話題後跑完整個聯想；回傳頁面「聯想」欄的摘要、判斷詳情的經過和頁面欄位。"""
+    ) -> tuple[str, str, Dict[str, str], Dict[str, Any]]:
+        """分完話題後跑完整個聯想；回傳頁面「聯想」欄的摘要、判斷詳情的經過、頁面欄位和「話題串」頁用的 view。"""
         recall = await self._recall(session_id, window, remembered, numbers, focus)
         number = numbers[id(recall["focus"])]
         answers = await self._ask_decision(decision, state + recall_state(recall, number), recall_questions(recall, number))
@@ -411,6 +446,7 @@ class RecallMixin:
         )
         return {
             "focus": focus,
+            "said": said,
             "chat": chat,
             "thread_text": "\n".join(numbered(message, numbers) for message in said),
             "walk": walk,
@@ -458,11 +494,11 @@ class RecallMixin:
 
     def _finish_recall(
         self, session_id: str, recall: Dict[str, Any], answers: Optional[Mapping[str, Any]]
-    ) -> tuple[str, str, Dict[str, str]]:
+    ) -> tuple[str, str, Dict[str, str], Dict[str, Any]]:
         """照決策模型的答案挑記憶，記下給 planner 的那段。
 
         Returns:
-            頁面「聯想」欄的摘要、判斷詳情裡的經過、頁面欄位（話題串、看得懂嗎、想起的記憶）。
+            頁面「聯想」欄的摘要、判斷詳情裡的經過、頁面欄位（話題串、看得懂嗎、想起的記憶）、「話題串」頁用的 view。
         """
         understand = (answers or {}).get(UNDERSTAND) or {}
         pick = (answers or {}).get(PICK) or {}
@@ -491,7 +527,7 @@ class RecallMixin:
             "understood": f"{'不懂' if lost else '懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "—",
             "memory": "檢索逾時" if recall["missed"] else f"{len(recall['hits'])} 筆・人 {known}/{len(recall['people'])}・詞 {len(recall['terms'])}",
         }
-        return "・".join(parts), recall_detail(recall, note), columns
+        return "・".join(parts), recall_detail(recall, note), columns, recall_view(recall, picked, probability(pick, choice), understand, note)
 
     def _add_recall_note(self, kwargs: Dict[str, Any], session_id: str) -> None:
         """焦點還在 planner 上下文裡，就把這次的理解接在系統提示詞後面。"""

@@ -56,6 +56,8 @@ DECISION_TEST_QUESTIONS = {
 }
 # 頁面只列最近幾筆判斷與送出，全部的紀錄還是照 decision.py 的上限保存
 PAGE_RECENT = 10
+# 「話題串」頁每個群聊最多列幾串
+PAGE_THREADS = 8
 # MaiBot 的暱稱與別名（bot.nickname / bot.alias_names）多久重讀一次，用來判斷訊息是不是在叫她
 BOT_NAMES_REFRESH_SECONDS = 600
 # 每個聊天記住最近幾則收到的訊息（planner 上下文裡只有 msg_id 別名，靠這裡換回 Discord 訊息 ID）
@@ -369,7 +371,7 @@ class EmoteMixin:
         failed = answers is None
         topic_summary = apply_topics(store, keys, answers)
         self._focus[session_id] = focus["msg_id"]
-        recall_summary, recall_detail, columns = await self._run_recall(
+        recall_summary, recall_detail, columns, view = await self._run_recall(
             decision, session_id, window, remembered, numbers, state, focus
         )
         self.ctx.logger.info(
@@ -389,6 +391,7 @@ class EmoteMixin:
             context=hide_urls("\n".join(lines)),
             recall_detail=recall_detail,
             columns=columns,
+            view=view,
         )
 
     def _record_send(self, session_id: str, kind: str, started: float, picked: str, score: float, ok: bool) -> None:
@@ -689,6 +692,44 @@ class EmoteMixin:
                 for item in sends
             ],
         }
+
+    @API("webui_threads", description="讀取各群聊現在的話題串和最近的話題分析（「話題串」頁）", version="1")
+    async def webui_threads(self) -> Dict[str, Any]:
+        """每個群聊開著的話題串（這輪的焦點那串在前，其餘新的在前），和最近幾次分析當時的對話與理解。"""
+        names = await self._webui_chat_names() if self._topics or self._decision_stats.state.get("decisions") else {}
+        now = time.time()
+        chats = []
+        for session_id, store in self._topics.items():
+            focus_topic = store["of"].get(self._focus.get(session_id, ""))
+            threads = [
+                {
+                    "id": topic_id,
+                    "title": topic["items"][0]["text"][:40],
+                    "count": len(topic["members"]),
+                    "minutes": max(0, round((now - topic["last"]) / 60)),
+                    "focus": topic_id == focus_topic,
+                    "messages": topic["items"],
+                }
+                for topic_id, topic in reversed(store["topics"].items())
+                if topic.get("items")
+            ]
+            threads.sort(key=lambda thread: not thread["focus"])  # 穩定排序：焦點那串在前，其餘照新的在前
+            if threads:
+                chats.append({"id": session_id, "name": names.get(session_id, session_id), "threads": threads[:PAGE_THREADS]})
+        analyses = [
+            {
+                "time": short_time(item["time"]),
+                "chat": names.get(item["chat"], item["chat"]),
+                "message": item["message"],
+                "latency": item["latency_ms"],
+                "failed": bool(item.get("failed") or item.get("scene") == "failed"),
+                "assigned": item.get("topics") or "",
+                "summary": item.get("recall") or "",
+                **(item.get("view") or {}),
+            }
+            for item in (self._decision_stats.state.get("decisions") or [])[:PAGE_RECENT]
+        ]
+        return {"chats": chats, "analyses": analyses}
 
     @API("webui_decision_test", description="用一段範例聊天測試決策模型連不連得上", version="1")
     async def webui_decision_test(self) -> Dict[str, Any]:

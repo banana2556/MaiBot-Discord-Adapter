@@ -1,0 +1,209 @@
+<style>
+  body.maibot-page { padding: 16px; }
+  h2 { font-size: 15px; margin: 20px 0 10px; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--maibot-muted); font-size: 12px; }
+  .threads { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .thread { padding: 12px !important; display: flex; flex-direction: column; gap: 8px; }
+  .thread.focus { box-shadow: 0 0 0 2px var(--maibot-primary); }
+  .thread-head { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; }
+  .thread-head > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .thread-head > span:last-child { display: flex; gap: 4px; font-weight: 400; }
+  .chat { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; padding-right: 4px; }
+  .msg { display: flex; flex-direction: column; align-items: flex-start; max-width: 86%; }
+  .msg.self { align-self: flex-end; align-items: flex-end; }
+  .who { font-size: 11px; color: var(--maibot-muted); margin: 0 8px 2px; }
+  .bubble { padding: 6px 11px; border-radius: 14px; background: var(--maibot-soft); border: 1px solid var(--maibot-border);
+            white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.45; }
+  .msg:not(.self) .bubble { border-top-left-radius: 4px; }
+  .self .bubble { background: var(--maibot-primary); color: var(--maibot-primary-foreground); border-color: transparent; border-top-right-radius: 4px; }
+  .msg.focus .bubble { box-shadow: 0 0 0 2px var(--maibot-primary); }
+  .msg.focus .who::after { content: "　← 焦點"; color: var(--maibot-primary); font-weight: 600; }
+  .badge { font-size: 11px; padding: 1px 7px !important; white-space: nowrap; }
+  .badge.good { border-color: var(--maibot-primary) !important; color: var(--maibot-primary) !important; }
+  .badge.bad { border-color: var(--maibot-danger) !important; color: var(--maibot-danger) !important; }
+  .rows { display: flex; flex-direction: column; gap: 6px; }
+  .row { display: grid; grid-template-columns: 92px 1fr auto; gap: 10px; align-items: center; padding: 8px 12px !important; cursor: pointer; }
+  .row > .muted { white-space: pre-line; }
+  .row .focus-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .row .tags { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .detail { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 14px; padding: 12px !important; margin: -2px 0 6px; }
+  @media (max-width: 760px) { .detail { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr; } .row .tags { justify-content: flex-start; } }
+  .section { margin-bottom: 12px; }
+  .section-title { font-size: 12px; font-weight: 600; color: var(--maibot-muted); margin-bottom: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; flex-direction: column; max-width: 100%; padding: 5px 9px !important; font-size: 12px; line-height: 1.4; }
+  .chip b { font-weight: 600; }
+  .chip small { color: var(--maibot-muted); }
+  .note { white-space: pre-wrap; font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: var(--maibot-radius);
+          background: var(--maibot-soft); border: 1px dashed var(--maibot-border); }
+  .warn { padding: 8px 10px; margin-bottom: 12px; border-radius: var(--maibot-radius); border: 1px solid var(--maibot-danger); color: var(--maibot-danger); font-size: 12px; }
+  .empty { padding: 20px; text-align: center; }
+</style>
+
+<div class="bar">
+  <select id="chat" class="maibot-select"></select>
+  <button id="refresh" class="maibot-button">重新整理</button>
+  <label class="muted"><input id="auto" type="checkbox" checked> 每 20 秒自動更新</label>
+  <span id="status" class="muted"></span>
+</div>
+
+<h2>現在的話題串</h2>
+<div class="muted" style="margin:-4px 0 10px">外框亮起來的是這輪的焦點那串，planner、表達方式選擇和 replyer 只看它。插件重啟後會清空，等下一則群聊訊息再分。</div>
+<div id="threads" class="threads"></div>
+
+<h2>最近的話題分析</h2>
+<div class="muted" style="margin:-4px 0 10px">點一列看當時那串的對話，和給 planner 的理解（人物、詞彙、記憶）。</div>
+<div id="analyses" class="rows"></div>
+
+<script>
+  const state = { data: null, chat: "", open: -1, timer: 0 };
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function badge(text, kind) {
+    return el("span", "maibot-badge badge" + (kind ? " " + kind : ""), text);
+  }
+
+  function bubbles(messages) {
+    const chat = el("div", "chat");
+    for (const message of messages) {
+      const row = el("div", "msg" + (message.self ? " self" : "") + (message.focus ? " focus" : ""));
+      row.append(el("div", "who", (message.self ? "她" : message.who) + (message.time && message.time !== "--:--" ? "・" + message.time : "")));
+      row.append(el("div", "bubble", message.text));
+      chat.append(row);
+    }
+    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+    return chat;
+  }
+
+  function renderChats() {
+    const select = document.getElementById("chat");
+    const chats = state.data.chats;
+    if (!chats.some((chat) => chat.id === state.chat)) state.chat = chats.length ? chats[0].id : "";
+    select.replaceChildren(...chats.map((chat) => {
+      const option = el("option", "", chat.name + "（" + chat.threads.length + " 串）");
+      option.value = chat.id;
+      option.selected = chat.id === state.chat;
+      return option;
+    }));
+    select.style.display = chats.length > 1 ? "" : "none";
+    const box = document.getElementById("threads");
+    const chat = chats.find((item) => item.id === state.chat);
+    if (!chat) {
+      box.replaceChildren(el("div", "maibot-card empty muted", "還沒有話題串。群聊有新訊息、決策模型分過話題後就會出現。"));
+      return;
+    }
+    box.replaceChildren(...chat.threads.map((thread) => {
+      const card = el("div", "maibot-card thread" + (thread.focus ? " focus" : ""));
+      const head = el("div", "thread-head");
+      head.append(el("span", "", "串 " + thread.id + "　" + thread.title));
+      const tags = el("span", "");
+      if (thread.focus) tags.append(badge("焦點", "good"));
+      tags.append(badge(thread.count + " 則・" + (thread.minutes ? thread.minutes + " 分鐘前" : "剛剛")));
+      head.append(tags);
+      card.append(head, bubbles(thread.messages));
+      return card;
+    }));
+  }
+
+  function understanding(item) {
+    const side = el("div", "");
+    const add = (title, body) => {
+      const section = el("div", "section");
+      section.append(el("div", "section-title", title), body);
+      side.append(section);
+    };
+    const verdict = item.understood || {};
+    const head = el("div", "chips");
+    if (item.failed) head.append(badge("分話題的請求失敗", "bad"));
+    if (verdict.verdict) head.append(badge((verdict.verdict === "yes" ? "看得懂 " : "看不懂 ") + (verdict.p ?? ""), verdict.verdict === "yes" ? "good" : "bad"));
+    if (item.topic) head.append(badge(item.topic));
+    head.append(badge(item.latency + " ms"));
+    side.append(head, el("div", "section"));
+    const people = el("div", "chips");
+    for (const person of item.people || []) {
+      const chip = el("div", "maibot-badge chip");
+      chip.append(el("b", "", person.name), el("small", "", person.profile || person.state));
+      people.append(chip);
+    }
+    add("人物", (item.people || []).length ? people : el("div", "muted", "沒有"));
+    const terms = el("div", "chips");
+    for (const term of item.terms || []) {
+      const chip = el("div", "maibot-badge chip");
+      chip.append(el("b", "", term.content), el("small", "", term.meaning));
+      terms.append(chip);
+    }
+    add("詞彙（群裡學過的黑話）", (item.terms || []).length ? terms : el("div", "muted", "沒有比對到"));
+    const memory = el("div", "");
+    if (item.memory) memory.append(el("div", "note", item.memory.text + "（把握 " + item.memory.p + "）"));
+    else memory.append(el("div", "muted", "沒有選中的記憶"));
+    memory.append(el("div", "muted", "關鍵字：" + (item.query || "—") + (item.keywords === false ? "（小模型沒寫出關鍵字，改用原文）" : "")));
+    add("記憶", memory);
+    if (verdict.verdict === "no") side.append(el("div", "warn", "她看不太懂這串：提醒她需要的話先查，或用問的。"));
+    if (item.assigned) add("這次的話題分配", el("div", "muted", item.assigned));
+    add("給 planner 的", item.note ? el("div", "note", item.note) : el("div", "muted", "沒有（這串沒有要補充的，也不缺把握）"));
+    return side;
+  }
+
+  function renderAnalyses() {
+    const box = document.getElementById("analyses");
+    const items = state.data.analyses;
+    if (!items.length) {
+      box.replaceChildren(el("div", "maibot-card empty muted", "還沒有話題分析紀錄。"));
+      return;
+    }
+    const nodes = [];
+    items.forEach((item, index) => {
+      const row = el("div", "maibot-card row");
+      row.append(el("div", "muted", item.time + "\n" + item.chat), el("div", "focus-text", item.message));
+      const tags = el("div", "tags");
+      const verdict = item.understood || {};
+      if (item.failed) tags.append(badge("失敗", "bad"));
+      if (verdict.verdict) tags.append(badge(verdict.verdict === "yes" ? "懂" : "不懂", verdict.verdict === "yes" ? "good" : "bad"));
+      if ((item.terms || []).length) tags.append(badge("詞 " + item.terms.length));
+      if (item.memory) tags.append(badge("記憶"));
+      if (item.topic) tags.append(badge(item.topic.split("「")[0].trim()));
+      row.append(tags);
+      row.addEventListener("click", () => { state.open = state.open === index ? -1 : index; renderAnalyses(); });
+      nodes.push(row);
+      if (state.open === index) {
+        const detail = el("div", "maibot-card detail");
+        const left = el("div", "");
+        left.append(el("div", "section-title", "當時這串的對話"));
+        left.append(item.thread && item.thread.length ? bubbles(item.thread) : el("div", "muted", "舊紀錄沒有存對話：" + item.message));
+        detail.append(left, understanding(item));
+        nodes.push(detail);
+      }
+    });
+    box.replaceChildren(...nodes);
+  }
+
+  async function load() {
+    const status = document.getElementById("status");
+    try {
+      state.data = await maibot.query("threads");
+      renderChats();
+      renderAnalyses();
+      status.textContent = "更新於 " + new Date().toLocaleTimeString();
+    } catch (error) {
+      status.textContent = "讀取失敗：" + error.message;
+    }
+  }
+
+  function schedule() {
+    clearInterval(state.timer);
+    if (document.getElementById("auto").checked) state.timer = setInterval(load, 20000);
+  }
+
+  document.getElementById("chat").addEventListener("change", (event) => { state.chat = event.target.value; renderChats(); });
+  document.getElementById("refresh").addEventListener("click", load);
+  document.getElementById("auto").addEventListener("change", schedule);
+  document.body.classList.add("maibot-page");
+  maibot.ready.then(() => { load(); schedule(); });
+</script>

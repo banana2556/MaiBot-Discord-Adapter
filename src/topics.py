@@ -28,6 +28,8 @@ LIVE_TOPICS = 5
 ASSIGN_LIMIT = 6
 TOPIC_TTL_SECONDS = 12 * 3600
 MAX_TOPICS = 60
+# 每串留給「話題串」頁顯示的最後幾則
+TOPIC_ITEMS = 30
 # 內容還看不到（卡片沒到）的訊息最多等多久才照現有內容分配
 PENDING_SECONDS = 20
 GAP_HINT = "隔了很久（10 分鐘以上）才出現的通常是新話題，除非內容明顯接得上那一串。"
@@ -101,6 +103,15 @@ def add_member(store: Dict[str, Any], topic_id: Optional[int], message: Mapping[
     topic = store["topics"][topic_id]
     topic["members"].append(message["msg_id"])
     topic["lines"].append(line)
+    # 「話題串」頁的對話泡泡：誰、說了什麼、幾點；只留最後 TOPIC_ITEMS 則
+    items = topic.setdefault("items", [])
+    items.append({
+        "who": "你" if message.get("self") else str(message.get("user") or ""),
+        "self": bool(message.get("self")),
+        "text": hide_urls(line.split("：", 1)[-1])[:300],
+        "time": clock(message.get("time")),
+    })
+    del items[:-TOPIC_ITEMS]
     topic["last"] = max(topic["last"], float(message.get("time") or time.time()))
     store["topics"].move_to_end(topic_id)
     store["of"][message["msg_id"]] = topic_id

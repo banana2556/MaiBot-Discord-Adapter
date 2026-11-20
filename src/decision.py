@@ -89,6 +89,7 @@ class DecisionStats:
         context: str = "",
         recall_detail: str = "",
         columns: Optional[Dict[str, str]] = None,
+        view: Optional[Dict[str, Any]] = None,
     ) -> None:
         """記一次話題分析；失敗的請求不算進平均延遲（多半是逾時，會把平均拉歪）。
 
@@ -100,6 +101,7 @@ class DecisionStats:
             context: 決策模型看到的群聊（# 編號和分配摘要對得上），給判斷詳情看。
             recall_detail: 聯想的經過（用什麼關鍵字查、查到什麼、給 planner 什麼），給判斷詳情看。
             columns: 話題分析頁的欄位：話題串、看得懂嗎、想起的記憶。
+            view: 「話題串」頁畫泡泡用的結構（recall.recall_view）。
         """
         day = self._day(now.date().isoformat())
         day["calls"] += 1
@@ -120,6 +122,7 @@ class DecisionStats:
                 "context": context,
                 "recall_detail": recall_detail,
                 "columns": dict(columns or {}),
+                "view": dict(view or {}),
             },
         )
 

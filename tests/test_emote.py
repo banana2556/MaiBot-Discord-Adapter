@@ -162,7 +162,7 @@ def _env(monkeypatch, answers=None, decision=None, chat=None):
 
     async def fake_recall(decision, session_id, window, remembered, numbers, state, focus):
         recalled.append(focus["msg_id"])
-        return "看得懂 0.90", "經過", {"topic": "串"}
+        return "看得懂 0.90", "經過", {"topic": "串"}, {"understood": {"verdict": "yes", "p": 0.9}, "terms": []}
 
     # 聯想另外在 test_recall.py 測；這裡只確認分完話題後用焦點跑
     plugin._run_recall = fake_recall
@@ -441,6 +441,31 @@ def test_topic_page_shows_analysis_and_sends(monkeypatch) -> None:
     assert row["chat"] == "聊天大廳" and row["message"] == "「小美」：真的假的" and "#1→串2" in row["topics"]
     assert "（你）：大家在幹嘛" in row["context"] and row["recall"] == "看得懂 0.90" and row["topic"] == "串"
     assert page["sends"][0]["kind"] == "planner 工具" and page["daily"][0]["sends"] == 1
+
+
+def test_threads_page_shows_live_threads_as_bubbles_and_recent_analyses(monkeypatch) -> None:
+    env = _env(monkeypatch, answers=[SPLIT])
+    alias = env.module.display_message_id
+
+    async def scenario():
+        _receive_all(env.plugin)
+        await _decide(env)
+        env.plugin._join_focus({"session_id": "s1", "message_id": "her-1", "raw_message": [{"type": "text", "data": "真的啦 https://x.com/a"}]})
+        return await env.plugin.webui_threads()
+
+    page = asyncio.run(scenario())
+    chat = page["chats"][0]
+    assert chat["name"] == "聊天大廳" and [thread["id"] for thread in chat["threads"]] == [3, 2, 1], "焦點那串在前，其餘新的在前"
+    focus = chat["threads"][0]
+    assert focus["focus"] and focus["count"] == 2 and focus["title"] == "真的假的"
+    assert focus["messages"] == [
+        {"who": "小美", "self": False, "text": "真的假的", "time": "--:--"},
+        {"who": "你", "self": True, "text": "真的啦 （連結）", "time": focus["messages"][1]["time"]},
+    ], "她送出的話也進這串，網址換成（連結）"
+    assert chat["threads"][1]["messages"][0]["who"] == "小明" and not chat["threads"][1]["focus"]
+    analysis = page["analyses"][0]
+    assert analysis["message"] == "「小美」：真的假的" and analysis["understood"] == {"verdict": "yes", "p": 0.9}
+    assert analysis["assigned"].startswith("#1→串2") and env.plugin._focus["s1"] == alias(LATEST)
 
 
 def test_decision_page_lists_only_recent_records_and_reads_old_ones(monkeypatch) -> None:
