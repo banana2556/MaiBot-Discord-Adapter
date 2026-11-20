@@ -171,8 +171,10 @@ def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
     record = env.plugin._decision_stats.state["decisions"][0]
     assert record["recall"] == summary and record["columns"]["memory"] == "2 筆・人 1/3・詞 2"
     detail = record["recall_detail"]
-    assert "「阿華」：阿華主玩 R6 防守方（鑽石牌位）" in detail and "「小明」：沒有畫像" in detail
-    assert "「小美」：沒等到（逾時或失敗）" in detail and "詞彙：MP5、羚羊" in detail and detail.endswith(note)
+    assert detail.startswith("【話題串】串 2「今天好累」・3 則\n→ #3 「小美」：羚羊拿MP5打盾牌（焦點，話題串 2）\n"), "分段給人看"
+    assert "\n\n【人物】\n- 小美：沒等到（逾時或失敗）\n- 小明：沒有畫像\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）\n" in detail
+    assert "\n\n【詞彙】MP5、羚羊\n" in detail and "\n\n【記憶】關鍵字：R6 羚羊 MP5 盾牌\n- m1. " in detail
+    assert detail.endswith(f"【給 planner 的】\n{note}")
 
     # 同一回合後面的請求（不再問決策模型）也帶著；replyer 回的是這串（或沒指定回哪則）才給
     later = _run(env)
@@ -235,7 +237,7 @@ def test_missing_capabilities_and_timeouts_leave_their_part_out(monkeypatch) -> 
     result = _run(env)
     record = env.plugin._decision_stats.state["decisions"][0]
     assert record["recall"] == "看得懂 0.90・群記憶沒等到（逾時或失敗）・人 0/3・詞 0"
-    assert "群記憶：沒等到（逾時或失敗）" in record["recall_detail"]
+    assert "【記憶】關鍵字：R6 羚羊 MP5 盾牌\n- 沒等到（逾時或失敗）" in record["recall_detail"]
     assert "【這串的理解】" not in result["items"][0]["parts"][-1]["text"], "看得懂又沒東西可補：不加"
 
 
@@ -254,3 +256,26 @@ def test_keyword_model_saying_nothing_falls_back_to_the_thread_text(monkeypatch)
     _run(env)
     queries = [kwargs["query"] for name, kwargs in calls if name == "knowledge.search"]
     assert queries[0] == "今天好累 晚上要打R6嗎 羚羊拿MP5打盾牌", "看不出在聊什麼就用這串的原文查"
+
+
+def test_a_bare_link_is_not_searched_or_suggested_as_a_query(monkeypatch) -> None:
+    """正式機那次：焦點只有影片連結和卡片，小模型寫不出關鍵字，結果拿整串網址去查記憶、又叫她去查那串網址。"""
+    lost = {"recall_understand": {"choice": "no", "probabilities": {"no": 0.84}}}
+    env, calls = _setup(monkeypatch, [SAME_THREAD, lost], {})
+    original = env.ctx.call_capability
+
+    async def nothing(name, **kwargs):
+        if name == "llm.generate":
+            return {"success": True, "response": "無"}
+        return await original(name, **kwargs)
+
+    env.ctx.call_capability = nothing
+    planner = _planner()
+    planner["items"][4] = _item(alias(LATEST), "小美", "https://fxtwitter.com/a/status/1/video/1?a=x&s=12[卡片: 椿ちゃ]", quote=alias(LAUGH))
+    note = _run(env, planner)["items"][0]["parts"][-1]["text"]
+    query = next(kwargs["query"] for name, kwargs in calls if name == "knowledge.search")
+    assert "http" not in query and "[卡片: 椿ちゃ]" in query, "網址拿掉、卡片留著"
+    assert note.endswith("沒把握：" + recall.UNSURE_NO_QUERY), "原文不當成建議她查的關鍵字"
+    record = env.plugin._decision_stats.state["decisions"][0]
+    assert "http" not in record["recall_detail"] and "http" not in record["message"], "頁面上的網址都換成（連結）"
+    assert "（小模型沒寫出關鍵字，改用這串的原文）" in record["recall_detail"]

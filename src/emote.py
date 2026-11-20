@@ -34,7 +34,7 @@ from .decision import TIMEOUT_SECONDS
 from .decision import ask as ask_decision
 from .life.common import short_time
 from .reply_links import EMOTE_ONLY, plain
-from .topics import apply_topics, focus_message, new_store, numbered, topic_questions, with_card
+from .topics import apply_topics, focus_message, hide_urls, new_store, numbered, topic_questions, with_card
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
@@ -381,12 +381,12 @@ class EmoteMixin:
         self._decision_stats.record_decision(
             now,
             session_id,
-            f"「{focus['user']}」：{focus['text']}",
+            hide_urls(f"「{focus['user']}」：{focus['text']}"),
             latency_ms,
             failed=failed,
             topics=topic_summary,
             recall=recall_summary,
-            context="\n".join(lines),
+            context=hide_urls("\n".join(lines)),
             recall_detail=recall_detail,
             columns=columns,
         )

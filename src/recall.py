@@ -26,7 +26,7 @@ from maibot_sdk import HookHandler
 
 from .emote import display_message_id, planner_messages
 from .reply_links import NONE, plain
-from .topics import focus_message, lacks_content, numbered, topic_members, with_card
+from .topics import _URL, focus_message, hide_urls, lacks_content, numbered, topic_members, with_card
 
 # 群記憶取幾筆、最多看幾個人、最多給幾個詞
 MEMORY_HITS = 3
@@ -64,12 +64,12 @@ QUERY_PROMPT = """下面是 Discord 群聊裡的一段對話：
 # 小模型說看不出在聊什麼時的回答
 NOTHING = "無"
 UNSURE = "你不太確定這串在聊什麼：需要的話先查（可以查：{query}）再回，或用問的，別把猜測當成事實。"
+UNSURE_NO_QUERY = "你不太確定這串在聊什麼：需要的話先查再回，或用問的，別把猜測當成事實。"
 
 _HIT = re.compile(r"(?:^|\n)\s*\d+\.\s*")
 # 記憶原文：「[2026-08-28 05:30] 名字: 內容 [2026-08-28 05:40] 名字: 內容 ...」
 _STAMP = re.compile(r"\[(\d{4}-\d\d-\d\d) \d\d:\d\d\]\s*")
 _EMOTE = re.compile(r"<a?:\w+:\d+>")
-_URL = re.compile(r"https?://\S+")
 _ASCII_TERM = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -91,7 +91,7 @@ def clip(text: str, limit: int) -> str:
 
 def tidy(memory: str, limit: int = NOTE_MEMORY_CHARS) -> str:
     """記憶原文整理成一行：日期只留第一個、每句用「／」隔開，拿掉表情 ID，網址換成「（連結）」。"""
-    text = _URL.sub("（連結）", _EMOTE.sub("", memory))
+    text = hide_urls(_EMOTE.sub("", memory))
     pieces = _STAMP.split(text)
     date = pieces[1] if len(pieces) > 1 else ""
     # 記憶檢索把太長的截斷成「...」
@@ -230,24 +230,38 @@ def recall_note(recall: Mapping[str, Any], picked: str, pick_confidence: float, 
     if picked:
         lines += ["記憶：", f"- 群裡以前聊過（把握 {pick_confidence:.2f}）：{tidy(picked)}"]
     if understood < CONFIDENT:
-        lines.append("沒把握：" + UNSURE.format(query=recall["query"]))
+        # 小模型寫出關鍵字才給她當查詢；沒寫出來時那是原文，給了只會害她拿整段去查
+        lines.append("沒把握：" + (UNSURE.format(query=recall["query"]) if recall.get("keywords") else UNSURE_NO_QUERY))
     return NOTE_HEAD + "\n" + "\n".join(lines) if lines else ""
 
 
 def recall_detail(recall: Mapping[str, Any], note: str) -> str:
-    """判斷詳情裡的聯想經過：這串有哪幾則、每個人的畫像、比對到的詞、用什麼關鍵字查到哪些記憶、最後給 planner 的那段。"""
-    lines = ["往回找話題：", *recall["walk"]]
+    """判斷詳情裡的聯想經過，分段給人看：話題串、人物、詞彙、記憶、最後給 planner 的那段。"""
+    people = []
     for person in recall["people"]:
         if person.get("profile"):
             state = person["profile"]
         else:
             state = MISSED if person.get("missed") else "沒有畫像" if person.get("person_id") else "找不到這個人的人物 ID"
-        lines.append(f"「{person['name']}」：{state}")
+        people.append(f"- {person['name']}：{state}")
     terms = "、".join(term["content"] for term in recall["terms"])
-    lines.append(f"詞彙：{terms or '沒有比對到'}")
-    hits = "".join(f"\nm{index}. {tidy(hit, 300)}" for index, hit in enumerate(recall["hits"], 1))
-    lines += [f"關鍵字：{recall['query']}", f"群記憶：{hits or (MISSED if recall['missed'] else '沒查到')}"]
-    lines.append("給 planner 的：" + (f"\n{note}" if note else "沒有（這串沒有要補充的，也不缺把握）"))
+    how = "" if recall.get("keywords") else "（小模型沒寫出關鍵字，改用這串的原文）"
+    hits = [f"- m{index}. {tidy(hit, 120)}" for index, hit in enumerate(recall["hits"], 1)]
+    lines = [
+        f"【話題串】{recall.get('topic_label', '')}",
+        *(hide_urls(line) for line in recall["walk"]),
+        "",
+        "【人物】",
+        *(people or ["- 沒有"]),
+        "",
+        f"【詞彙】{terms or '沒有比對到'}",
+        "",
+        f"【記憶】關鍵字：{clip(recall['query'], 60)}{how}",
+        *(hits or [f"- {MISSED if recall['missed'] else '沒查到'}"]),
+        "",
+        "【給 planner 的】",
+        note or "沒有（這串沒有要補充的，也不缺把握）",
+    ]
     return "\n".join(lines)
 
 
@@ -385,7 +399,9 @@ class RecallMixin:
         query, person_ids = await asyncio.gather(
             self._recall_query(chat), asyncio.gather(*(self._person_id(person) for person in people))
         )
-        query = query or " ".join(message["text"] for message in said)
+        keywords = bool(query)
+        # 寫不出關鍵字時用原文查，網址拿掉（向量比對時一長串網址只會變成雜訊）
+        query = query or " ".join(_URL.sub(" ", message["text"]).strip() for message in said).strip()
         for person, person_id in zip(people, person_ids, strict=True):
             person["person_id"] = person_id
         hits, terms, *_ = await asyncio.gather(
@@ -400,6 +416,7 @@ class RecallMixin:
             "walk": walk,
             "topic_label": topic_label,
             "query": query,
+            "keywords": keywords,
             "people": people,
             "terms": terms,
             "hits": hits or [],
