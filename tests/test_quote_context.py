@@ -122,6 +122,49 @@ def test_keep_focus_items_drops_other_topics_but_not_newer_messages_or_tool_call
     assert kept == [system, a, call, d] and dropped == 2, "其他話題的 b、c 和 b 的連結提醒拿掉；分完話題之後才出現的 d 留著"
 
 
+def _items(env, *chat, tools=("reply",)):
+    """跑一次 planner hook，回傳送出去的 items。"""
+    kwargs = {
+        "items": [{"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]}, *chat],
+        "tool_definitions": [{"type": "function", "function": {"name": name}} for name in tools],
+        "session_id": "s1",
+    }
+    result = asyncio.run(env.plugin.keep_focus_thread(**kwargs))
+    return result.get("modified_kwargs", {}).get("items") or kwargs["items"]
+
+
+def _mark(text):
+    return {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": text}]}
+
+
+def test_time_marks_dropped_except_now_and_older_messages_get_a_date(monkeypatch) -> None:
+    # 2026-11-20 重啟後的 ping：前面恢復的訊息都不在這串，只剩一串「时间：…」空殼
+    env, _ = _setup(monkeypatch)
+    alias = env.module.display_message_id
+    yesterday = _stamp(_message_item(alias(FUNNY), "小明", "我剛剛跌倒了哈哈哈"), __import__("time").time() - 86400 * 2)
+    items = _items(env, _mark("时间：2026-11-15 19:04:48"), _mark("时间：2026-11-18 12:44:06"), yesterday,
+                   _mark("时间：2026-11-20 16:12:38"), _mark("请分析后决定下一步"))
+    texts = [item["parts"][0]["text"] for item in items[1:]]
+    assert [text for text in texts if text.startswith("时间：")] == ["时间：2026-11-20 16:12:38"], "只留現在時間"
+    day = __import__("datetime").date.fromtimestamp(__import__("time").time() - 86400 * 2).strftime("%m-%d")
+    assert f'time="{day} 15:11:30"' in texts[0], "不是今天的訊息開頭加上月日"
+
+
+def test_threads_survive_a_restart(monkeypatch, tmp_path) -> None:
+    env, _ = _setup(monkeypatch)
+    topics = _load_adapter_module("src.topics")
+    store = topics.new_store()
+    tid = topics.add_member(store, None, {"msg_id": "mq", "user": "CiKa", "self": False, "time": 1.0}, "[08:00] 「CiKa」：嗨")
+    env.plugin._topics["s1"], env.plugin._last_sent["s1"] = store, 5.0
+    env.plugin._threads_path = tmp_path / "threads.json"
+    env.plugin._save_threads()
+    env.plugin._topics, env.plugin._last_sent = {}, {}
+    env.plugin._load_threads(tmp_path / "threads.json")
+    loaded = env.plugin._topics["s1"]
+    assert loaded["of"] == {"mq": tid} and list(loaded["topics"]) == [tid] and env.plugin._last_sent == {"s1": 5.0}
+    assert loaded["topics"][tid]["items"][0]["text"] == "嗨"
+
+
 def _stamp(item, at):
     item["meta"] = {"timestamp": __import__("datetime").datetime.fromtimestamp(at).isoformat()}
     return item
@@ -150,8 +193,11 @@ def test_compacted_start_of_thread_subagent_thread_and_answered_calls(monkeypatc
     # 結論送回：Irys 那串（已經被壓縮掉）補成前文，replyer 也拿得到
     output = {"item_type": "FunctionCallOutputItem", "call_id": "c1", "output": "子代理已在后台开始工作，任务 id：subagent-1。"}
     result = {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": '<subagent_result id="subagent-1" status="completed">'}]}
-    _, note, _ = _planner(env, output, funny, result, tools=("reply",))
-    assert "【這串前面說過的】" in note and "「CiKa」：C醬你知道Irys是誰嗎" in note and "（你）：我搜搜" in note
+    items = _items(env, output, funny, result)
+    texts = [part.get("text", "") for item in items for part in item.get("parts", [])]
+    earlier = next(index for index, text in enumerate(texts) if text.startswith("【這串前面的對話】"))
+    assert "「CiKa」：C醬你知道Irys是誰嗎" in texts[earlier] and "（你）：我搜搜" in texts[earlier]
+    assert texts.index(next(t for t in texts if "我剛剛跌倒了" in t)) > earlier, "前文放在聊天紀錄最前面，不是系統提示詞"
     assert set(plugin._focus_keep("s1")) >= {"mq", "ms", alias(FUNNY)} and plugin._extra_topic["s1"] == irys != other
     reply = asyncio.run(plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=""))
     assert "C醬你知道Irys是誰嗎" in reply["modified_kwargs"]["extra_prompt"]

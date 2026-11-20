@@ -13,12 +13,16 @@
   （``[回覆「小明」：…]``、``[回覆你：…]``），replyer 也告訴它要回的那則在回覆誰。
 - 有人 @ 她或回覆她時 MaiBot 會強制開一輪 planner，但觸發原因只寫進日誌：她上次說話之後叫她的訊息列出來要她先回應。
   她說的話在 MaiBot 上下文裡只是 reply 的工具結果，所以「上次說話」用她最後一次送出的時間算，回過的不再列。
-- MaiBot 壓縮上下文時較早的訊息換成摘要，摘要常漏掉這串開頭在問什麼：這串已經不在上下文的前文從話題串補回來。
+- MaiBot 壓縮上下文時較早的訊息換成摘要，摘要常漏掉這串開頭在問什麼；重啟恢復的上下文也可能不在這串：
+  這串已經不在上下文的前文從話題串（存在 threads.json）補回來，放在聊天紀錄最前面。
+- MaiBot 在每批訊息前插的「时间：…」不送：每則訊息開頭已經有時間（不是今天的加上日期），只留最後一條當作現在時間。
+  過濾掉別串後它們只剩空殼；焦點過濾時 MaiBot 的「[上下文恢复]」說明也拿掉（它說的那些恢復的訊息多半不在這串）。
 - 子代理在背景查，結論送回時焦點可能已經換到別串：派出時記下那串，結論回來那輪也給 planner 和 replyer 看那串。
 """
 
 import re
 import time
+from datetime import date, datetime
 from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
 
 from maibot_sdk import HookHandler
@@ -35,7 +39,11 @@ CALLING_NOTE = (
 )
 # linux 沙盒電腦插件在含連結的訊息後面插的提醒（item_id 是「這個前綴＋那則訊息的 item_id」）
 LINK_REMINDER = "link-reminder-"
-EARLIER_NOTE = "【這串前面說過的】（已經不在上面的聊天紀錄裡，照時間排；這串是從這裡開始的）\n"
+EARLIER_NOTE = "【這串前面的對話】（比下面的紀錄更早、已經不在紀錄裡的部分，照時間排；這幾則不能用 msg_id 回覆）\n"
+EARLIER_ITEM_ID = "discord-thread-earlier"
+RESTORE_NOTE = "[上下文恢复]"
+_TIME_MARK = re.compile(r"时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+_HEAD_TIME = re.compile(r'time="(\d{2}:\d{2}(?::\d{2})?)"')
 _TASK_ID = re.compile(r"任务 id：([\w-]+)")
 _RESULT_ID = re.compile(r'<subagent_result id="([^"]+)"')
 
@@ -45,6 +53,54 @@ def is_jargon(item: Mapping[str, Any]) -> bool:
     parts = item.get("parts") if isinstance(item.get("parts"), list) else []
     first = parts[0] if parts and isinstance(parts[0], Mapping) else {}
     return item.get("item_type") == "UserMessageItem" and str(first.get("text") or "").lstrip().startswith("<jargon>")
+
+
+def first_text(item: Mapping[str, Any]) -> str:
+    """只有一段文字的 item 的那段文字；其他是空字串。"""
+    parts = item.get("parts") if isinstance(item.get("parts"), list) else []
+    return str(parts[0].get("text") or "") if len(parts) == 1 and isinstance(parts[0], Mapping) else ""
+
+
+def drop_time_marks(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """拿掉 MaiBot 的「时间：…」，只留最後一條（現在時間）。"""
+    marks = [
+        index
+        for index, item in enumerate(items)
+        if item.get("item_type") == "UserMessageItem" and _TIME_MARK.fullmatch(first_text(item).strip())
+    ]
+    drop = set(marks[:-1])
+    return [item for index, item in enumerate(items) if index not in drop]
+
+
+def stamp(at: float, today: date) -> str:
+    """訊息時間：今天的只寫 HH:MM，其他天的加上月日。"""
+    moment = datetime.fromtimestamp(at)
+    return moment.strftime("%H:%M" if moment.date() == today else "%m-%d %H:%M")
+
+
+def date_heads(messages: Sequence[Dict[str, Any]], today: date) -> None:
+    """不是今天的訊息，開頭的 time="HH:MM:SS" 加上月日（時間標記拿掉了，跨日要看得出來）。"""
+    for message in messages:
+        if not message.get("time") or datetime.fromtimestamp(message["time"]).date() == today:
+            continue
+        part, end = message["head"]
+        day = datetime.fromtimestamp(message["time"]).strftime("%m-%d")
+        head = _HEAD_TIME.sub(rf'time="{day} \1"', part["text"][:end], count=1)
+        part["text"] = head + part["text"][end:]
+        message["head"] = (part, len(head))
+
+
+def insert_earlier(items: List[Dict[str, Any]], text: str, now: datetime) -> List[Dict[str, Any]]:
+    """前文放在第一則聊天訊息前面；沒有聊天訊息時放在最後一條時間標記（或最後一個 item）前面。"""
+    item = {
+        "item_type": "UserMessageItem",
+        "meta": {"item_id": EARLIER_ITEM_ID, "logical_turn_id": None, "timestamp": now.isoformat()},
+        "parts": [{"type": "text", "text": text}],
+    }
+    chat = [index for index, other in enumerate(items) if planner_messages([other])]
+    marks = [index for index, other in enumerate(items) if _TIME_MARK.fullmatch(first_text(other).strip())]
+    index = chat[0] if chat else marks[-1] if marks else max(len(items) - 1, 0)
+    return [*items[:index], item, *items[index:]]
 
 
 def keep_focus_items(items: List[Dict[str, Any]], keep: Set[str], assigned: Set[str]) -> Tuple[List[Dict[str, Any]], int]:
@@ -97,13 +153,18 @@ class QuoteContextMixin:
         return [store["topics"][tid] for tid in dict.fromkeys(ids) if tid in store["topics"]]
 
     def _earlier_note(self, session_id: str, messages: Sequence[Mapping[str, Any]], msg_id: str = "") -> str:
-        """要看的話題串裡，已經被 MaiBot 壓縮掉、不在上下文的前文。"""
+        """要看的話題串裡，已經被 MaiBot 壓縮掉或重啟後不在上下文的前文（幾串的照時間合在一起）。"""
         present = [message["msg_id"] for message in messages]
         before = min((message["time"] for message in messages if message.get("time")), default=None)
+        found = sorted(
+            (item for topic in self._kept_topics(session_id, msg_id) for item in earlier_items(topic, present, before)),
+            key=lambda item: item.get("at", 0),
+        )
+        today = date.today()
         lines = [
-            f"[{item['time']}] {'（你）' if item['self'] else '「' + item['who'] + '」'}：{item['text']}"
-            for topic in self._kept_topics(session_id, msg_id)
-            for item in earlier_items(topic, present, before)
+            f"[{stamp(item['at'], today) if item.get('at') else item['time']}] "
+            f"{'（你）' if item['self'] else '「' + item['who'] + '」'}：{item['text']}"
+            for item in found
         ]
         return EARLIER_NOTE + "\n".join(lines) if lines else ""
 
@@ -152,6 +213,7 @@ class QuoteContextMixin:
             return
         line = f"[{clock(now)}] （你）：{sent_text(message)[:120]}"
         add_member(store, store["of"][focus], {"msg_id": msg_id, "user": "", "self": True, "time": now}, line)
+        self._save_threads()
 
     def _calling_note(self, session_id: str, messages: Sequence[Mapping[str, Any]], remembered: Mapping[str, Any]) -> str:
         """她上次說話之後叫她的訊息；私訊每則都在跟她說話，不用特別提。"""
@@ -187,22 +249,24 @@ class QuoteContextMixin:
             store = self._topics[session_id]
             items, dropped = keep_focus_items(items, set(keep), set(store["of"]))
             # MaiBot 拿整段上下文比對的黑話（<jargon>）拿掉：這串用得到的詞已經在聯想的「這串的理解」裡
-            items = [item for item in items if not is_jargon(item)]
-            kwargs["items"] = items
+            items = [item for item in items if not is_jargon(item) and not first_text(item).startswith(RESTORE_NOTE)]
             if dropped:
                 self.ctx.logger.debug(f"焦點話題串 [{session_id}]：拿掉其他話題 {dropped} 則")
+        items = drop_time_marks(items)
         messages = planner_messages(items)
         for message in messages:
             entry = remembered.get(message["msg_id"])
             if entry and entry.get("quote_label"):
                 part, end = message["head"]
                 part["text"] = f"{part['text'][:end]}[{entry['quote_label']}]{part['text'][end:]}"
+        date_heads(messages, date.today())
+        # replyer 拿的是同一份壓縮過的上下文，前文也要給它（add_quote_context_to_replyer）
+        self._earlier_notes[session_id] = note = self._earlier_note(session_id, messages) if keep else ""
+        if note:
+            items = insert_earlier(items, note, datetime.now())
+        kwargs["items"] = items
         # 有 reply 才是 planner 本身（表達方式選擇沒有工具；睡覺時段只剩 stop，不用叫她回）
         if "reply" in tool_names(kwargs):
-            # replyer 拿的是同一份壓縮過的上下文，前文也要給它（add_quote_context_to_replyer）
-            self._earlier_notes[session_id] = note = self._earlier_note(session_id, messages)
-            if note:
-                self._append_system_text(kwargs, note)
             if note := self._calling_note(session_id, messages, remembered):
                 self._append_system_text(kwargs, note)
             self._add_recall_note(kwargs, session_id)

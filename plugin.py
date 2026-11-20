@@ -147,6 +147,7 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, RecallMixin, ReminderM
         )
         self._topic_scout = TopicScout(self.ctx, data_dir / "topics.json", self._resolve_discord_stream)
         self._decision_stats = DecisionStats(data_dir / "decision_stats.json")
+        self._load_threads(data_dir / "threads.json")
         self._emote_library = EmoteLibrary(self.ctx, data_dir / "emote_vectors.json", lambda: self._native_emoji)
         self._daily_task = asyncio.create_task(self._run_daily_loop())
 

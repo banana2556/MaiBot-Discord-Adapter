@@ -11,7 +11,7 @@
 - 自己上傳的圖片直接附給決策模型看（連結預覽的圖不附，用預覽文字；表情和貼圖不附）。
 - 只有網址、卡片還沒到，或只有圖片的訊息：卡片晚到時插件會補記（emote._remember_card）；圖片直接附給決策模型看，
   不等主程式寫圖片描述。卡片沒到的先等（PENDING_SECONDS 內不問），不擋住這輪。
-- 話題串留 TOPIC_TTL_SECONDS；插件重啟就清空，第一輪會把 planner 上下文裡的訊息重新分一次。
+- 話題串留 TOPIC_TTL_SECONDS；存在資料目錄的 threads.json（dump_stores / load_stores），插件重啟後讀回。
 """
 
 import re
@@ -281,3 +281,28 @@ def focus_ids(store: Mapping[str, Any], msg_id: str, arrived: Sequence[str]) -> 
         return []
     last = max((index for index, other in enumerate(arrived) if other in store["of"]), default=len(arrived) - 1)
     return [*members, *(other for other in arrived[last + 1 :] if other not in members)]
+
+
+def dump_stores(stores: Mapping[str, Mapping[str, Any]], last_sent: Mapping[str, float]) -> Dict[str, Any]:
+    """所有聊天的話題串和她最後送出的時間，存成 JSON（串 ID 變成字串）。"""
+    return {
+        "chats": {
+            session_id: {**store, "topics": {str(tid): topic for tid, topic in store["topics"].items()}}
+            for session_id, store in stores.items()
+        },
+        "last_sent": dict(last_sent),
+    }
+
+
+def load_stores(data: Mapping[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
+    """dump_stores 的反向；格式不對的聊天跳過（當作沒存過）。"""
+    stores: Dict[str, Dict[str, Any]] = {}
+    for session_id, raw in (data.get("chats") or {}).items():
+        try:
+            store = {**new_store(), **raw}
+            store["topics"] = OrderedDict((int(tid), topic) for tid, topic in raw["topics"].items())
+            store["of"] = {msg_id: int(tid) for msg_id, tid in raw["of"].items()}
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        stores[session_id] = store
+    return stores, {key: float(value) for key, value in (data.get("last_sent") or {}).items()}

@@ -21,6 +21,7 @@ import re
 import time
 from collections import OrderedDict, deque
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -32,9 +33,19 @@ from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
 from .decision import TIMEOUT_SECONDS
 from .decision import ask as ask_decision
-from .life.common import short_time
+from .life.common import load_state, save_state, short_time
 from .reply_links import EMOTE_ONLY, plain
-from .topics import apply_topics, focus_message, hide_urls, new_store, numbered, topic_questions, with_card
+from .topics import (
+    apply_topics,
+    dump_stores,
+    focus_message,
+    hide_urls,
+    load_stores,
+    new_store,
+    numbered,
+    topic_questions,
+    with_card,
+)
 
 # 決策模型沒開時，chat.emote_chance 命中就把這段接在 planner 系統提示詞後面
 EMOTE_NUDGE = (
@@ -234,8 +245,9 @@ class EmoteMixin:
         self._inbound: Dict[str, "OrderedDict[str, Dict[str, Any]]"] = {}
         # 每個聊天最新一則的頻道與發話人，送出時找頻道和訊息用
         self._latest_inbound: Dict[str, Dict[str, Any]] = {}
-        # 每個聊天的話題串（topics.py）；插件重啟就清空
+        # 每個聊天的話題串（topics.py）；存在資料目錄的 threads.json（_save_threads），插件重啟後讀回
         self._topics: Dict[str, Dict[str, Any]] = {}
+        self._threads_path: Optional[Path] = None
         # 每個聊天這輪的焦點 msg_id：planner、表達方式選擇和 replyer 只看它那串
         self._focus: Dict[str, str] = {}
         # 每個聊天最近挑過的表情 key，下次先排除
@@ -252,6 +264,15 @@ class EmoteMixin:
         self._extra_topic: Dict[str, int] = {}
         # 每個聊天上一次 planner 補上的「這串前面說過的」，replyer 也用
         self._earlier_notes: Dict[str, str] = {}
+
+    def _load_threads(self, path: Path) -> None:
+        """讀回話題串：重啟後 MaiBot 恢復的上下文、被壓縮掉的前文，都還對得上是哪一串。"""
+        self._threads_path = path
+        self._topics, self._last_sent = load_stores(load_state(path))
+
+    def _save_threads(self) -> None:
+        if self._threads_path is not None:
+            save_state(self._threads_path, dump_stores(self._topics, self._last_sent))
 
     # ===== 收訊與 planner =====
 
@@ -379,6 +400,7 @@ class EmoteMixin:
         latency_ms = round((time.monotonic() - started) * 1000)
         failed = answers is None
         topic_summary = apply_topics(store, keys, answers)
+        self._save_threads()
         self._focus[session_id] = focus["msg_id"]
         self._extra_topic.pop(session_id, None)
         recall_summary, recall_detail, columns, view = await self._run_recall(
