@@ -26,7 +26,18 @@ from maibot_sdk import HookHandler
 
 from .emote import display_message_id, planner_messages
 from .reply_links import NONE, plain
-from .topics import _URL, clock, focus_message, hide_urls, lacks_content, numbered, topic_members, with_card
+from .topics import (
+    _URL,
+    clock,
+    describe_member,
+    focus_message,
+    hide_urls,
+    lacks_content,
+    numbered,
+    topic_members,
+    waiting_image,
+    with_card,
+)
 
 # 群記憶取幾筆、最多看幾個人、最多給幾個詞
 MEMORY_HITS = 3
@@ -41,6 +52,8 @@ TERM_CHARS = 60
 NOTE_MEMORY_CHARS = 160
 # 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
 FOCUS_WAIT_SECONDS = 5
+# 焦點那則有圖片時等 MaiBot 識圖最多幾秒（識圖模型通常要好幾秒）
+IMAGE_WAIT_SECONDS = 15
 # 查詢字數上限（記憶檢索和整理話題用）
 QUERY_CHARS = 300
 # 正式機的記憶檢索常要好幾秒，4 秒時幾乎每次都逾時；等不到就這輪少一段聯想
@@ -459,15 +472,42 @@ class RecallMixin:
             "missed": hits is None,
         }
 
-    async def _wait_for_focus_card(self, session_id: str, window: Sequence[Mapping[str, Any]]) -> None:
-        """要回的那則只有網址時，等 Discord 補上連結卡片（_remember_card），最多 FOCUS_WAIT_SECONDS 秒。"""
-        focus = focus_message(window, self._inbound.get(session_id, {}), self._seen_until.get(session_id, 0.0))
-        deadline = asyncio.get_running_loop().time() + FOCUS_WAIT_SECONDS
-        while focus is not None and asyncio.get_running_loop().time() < deadline:
-            entry = self._inbound.get(session_id, {}).get(focus["msg_id"]) or {}
-            if not lacks_content(with_card(focus, entry)):
+    async def _wait_for_focus_content(self, session_id: str, window: Sequence[Mapping[str, Any]]) -> None:
+        """要回的那則只有網址時等 Discord 補上連結卡片（_remember_card），最多 FOCUS_WAIT_SECONDS 秒；
+        有圖片還沒識別完時等 MaiBot 寫好描述，最多 IMAGE_WAIT_SECONDS 秒。其他圖片已經好的描述順便取回來。"""
+        remembered = self._inbound.get(session_id, {})
+        await self._fetch_image_descriptions(session_id, window)
+        focus = focus_message(window, remembered, self._seen_until.get(session_id, 0.0))
+        if focus is None:
+            return
+        loop = asyncio.get_running_loop()
+        image = waiting_image(remembered.get(focus["msg_id"]) or {})
+        deadline = loop.time() + (IMAGE_WAIT_SECONDS if image else FOCUS_WAIT_SECONDS)
+        while loop.time() < deadline:
+            entry = remembered.get(focus["msg_id"]) or {}
+            if not lacks_content(with_card(focus, entry)) and not waiting_image(entry):
                 return
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0 if image else 0.5)
+            await self._fetch_image_descriptions(session_id, [focus])
+
+    async def _fetch_image_descriptions(self, session_id: str, messages: Sequence[Mapping[str, Any]]) -> None:
+        """MaiBot 識圖寫好的描述（image.get_description）記在收訊紀錄上；已經分到話題串的那則也補上。"""
+        remembered = self._inbound.get(session_id, {})
+        store = getattr(self, "_topics", {}).get(session_id)
+        for message in messages:
+            entry = remembered.get(message["msg_id"])
+            if not entry or not waiting_image(entry):
+                continue
+            try:
+                result = await self.ctx.call_capability("image.get_description", image_hash=entry["image_hash"])
+            except Exception as exc:  # noqa: BLE001 - 拿不到描述就照「[圖片]」分
+                self.ctx.logger.debug(f"讀圖片描述失敗：{exc!r}")
+                return
+            description = " ".join(str((result or {}).get("description") or "").split()) if isinstance(result, Mapping) else ""
+            if description:
+                entry["image_desc"] = description
+                if store:
+                    describe_member(store, message["msg_id"], description)
 
     def _remember_card(self, message_id: str, card: str) -> None:
         """Discord 晚一點才展開連結預覽（訊息編輯事件，正文沒變）：把卡片文字補記在那則訊息上，分話題和聯想用得到。"""

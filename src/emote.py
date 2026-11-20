@@ -184,6 +184,19 @@ def first_image(message: Mapping[str, Any]) -> str:
     return ""
 
 
+def image_sha256(message: Mapping[str, Any]) -> str:
+    """入站訊息第一張圖片的 sha256（MaiBot 存圖片描述用的鍵）；沒有圖片時是空字串。不限大小。"""
+    raw = message.get("raw_message")
+    for segment in raw if isinstance(raw, list) else []:
+        if isinstance(segment, Mapping) and segment.get("type") == "image":
+            try:
+                data = base64.b64decode(str(segment.get("binary_data_base64") or segment.get("data") or ""), validate=True)
+            except ValueError:
+                return ""
+            return hashlib.sha256(data).hexdigest() if data else ""
+    return ""
+
+
 def quoted(message: Mapping[str, Any]) -> str:
     """入站訊息回覆了誰：「回覆「名字」：內容開頭」（回覆她時寫「回覆你」）；沒有回覆時是空字串。
 
@@ -310,6 +323,8 @@ class EmoteMixin:
             "mentioned": mentioned_people(message),
             # 第一張圖片（base64）：分話題時直接附給決策模型看，不等主程式寫圖片描述
             "image": first_image(message),
+            # 圖片的 sha256：向 MaiBot 拿識圖寫好的描述（image.get_description）
+            "image_hash": image_sha256(message),
             # 收到的時間：planner 做完決定之後才到的，replyer 不看（quote_context 的快照）
             "at": time.time(),
         }
@@ -371,7 +386,7 @@ class EmoteMixin:
         now = datetime.now()
         window = list(messages)[-decision.context_messages :]
         # 焦點只有網址、卡片還沒到時等一下（最多 recall.FOCUS_WAIT_SECONDS）；其他的照常，晚點再分話題
-        await self._wait_for_focus_card(session_id, window)
+        await self._wait_for_focus_content(session_id, window)
         remembered = self._inbound.get(session_id, {})
         # 卡片晚到時插件補記的文字接在正文後面；在叫她的記下來（話題串的待辦用）
         window = [

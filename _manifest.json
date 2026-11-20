@@ -68,7 +68,8 @@
     "config.get",
     "person.get_id",
     "person.get_profile",
-    "jargon.match"
+    "jargon.match",
+    "image.get_description"
   ],
   "i18n": {
     "default_locale": "zh-CN",

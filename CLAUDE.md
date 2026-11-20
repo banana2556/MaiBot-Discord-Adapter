@@ -14,7 +14,7 @@ MaiBot 的 Discord 插件，跑在 MaiBot 的插件 Runner 裡（`maibot_sdk`）
 - `../MaiBot`：MaiBot 本體，用 fork `banana2556/MaiBot` 的 `custom` 分支（遠端 `fork`）：上游正式版加上我們的修改，正式機也跑這個分支。
   平常只讀參考（hook 載荷、capability 實作、WebUI 頁面 schema）；要改主程式先請求許可，改了提交到 `custom`。
   目前的修改：記憶檢索的實體查詢不用刪除索引、replyer 照 `reply_tool_args["_keep_message_ids"]` 過濾聊天紀錄（焦點話題串用）、
-  給插件的能力 `person.get_profile`（人物畫像）和 `jargon.match`（給定文字命中的黑話）。
+  給插件的能力 `person.get_profile`（人物畫像）、`jargon.match`（給定文字命中的黑話）和 `image.get_description`（識圖寫好的圖片描述，按 sha256 查）。
 
 ## 測試
 

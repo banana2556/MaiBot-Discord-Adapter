@@ -96,7 +96,7 @@ def test_late_link_card_is_remembered_and_shown(monkeypatch) -> None:
     assert env.plugin._inbound["s1"][alias(LATEST)]["card"] == "[卡片: Suica 新角色是兔子]"
     window = [_message_item(alias(LATEST), "小美", "https://x.com/abc")]
     messages = _load_adapter_module("src.emote").planner_messages(window)
-    asyncio.run(env.plugin._wait_for_focus_card("s1", messages))  # 卡片已到，不用等
+    asyncio.run(env.plugin._wait_for_focus_content("s1", messages))  # 卡片已到，不用等
 
 
 def test_topic_page_shows_thread_understanding_memory_and_current_settings(monkeypatch) -> None:
@@ -112,3 +112,39 @@ def test_topic_page_shows_thread_understanding_memory_and_current_settings(monke
     assert row["topic"].startswith("串 ") and row["topic"].endswith(" 則") and row["understood"] == "懂 0.90"
     assert "筆" in row["memory"]
     assert set(page["current"]) == {"enabled", "base_url", "model", "context_messages"}
+
+
+def test_image_waits_for_maibot_description_and_the_thread_gets_it(monkeypatch) -> None:
+    # 2026-11-20 17:38 只有一張圖的訊息被當成「[圖片]」分進別串：等 MaiBot 識圖寫好描述再分
+    env, _ = _setup(monkeypatch, [], {})
+    plugin = env.plugin
+    entry = plugin._inbound["s1"][alias(LATEST)]
+    entry["image_hash"] = "h1"
+    store = topics.new_store()
+    plugin._topics["s1"] = store
+    topics.add_member(store, None, _msg(alias(LATEST), "小美", "[圖片]", 1000.0), "[17:38] 「小美」：[圖片]")
+    answers = iter(["", "", "律師們圍著一桌菜，標語寫肚子非常餓"])
+    asked = []
+
+    async def call_capability(name, **kwargs):
+        asked.append((name, kwargs))
+        return {"success": True, "description": next(answers)}
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(env.ctx, "call_capability", call_capability)
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    window = [{**_msg(alias(LATEST), "小美", "[圖片]", 1000.0), "head": None}]
+    asyncio.run(plugin._wait_for_focus_content("s1", window))
+    assert asked == [("image.get_description", {"image_hash": "h1"})] * 3, "焦點那則等到描述好"
+    assert topics.with_card(window[0], entry) == "[圖片：律師們圍著一桌菜，標語寫肚子非常餓]"
+    item = store["topics"][1]
+    assert item["items"][0]["text"] == "[圖片：律師們圍著一桌菜，標語寫肚子非常餓]" and "肚子非常餓" in item["lines"][0]
+
+    # 描述還沒好的先不分，等 PENDING_SECONDS
+    waiting = _msg("p", "阿華", "[圖片]", 1001.0)
+    questions, _, _ = topics.topic_questions(store, [waiting], {id(waiting): "1"}, {"p": {"image_hash": "h2"}}, 1001.0)
+    assert questions == {} and "p" not in store["of"]

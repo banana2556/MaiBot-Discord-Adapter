@@ -8,7 +8,9 @@
 - 每輪新訊息後第一次進 planner 時問：這輪還沒分配的訊息，各出一題選擇題（選項：開著的話題串、這輪前面剛問的那幾則、新話題）。
 - 分完後焦點（叫她的優先，否則最新一則別人說的）所在那串就是 planner、表達方式選擇和 replyer 唯一看得到的聊天（focus_ids）。
 - 用回覆功能回的直接跟被回覆那則同一串；她自己說的跟她回的那則（沒有就是她說之前最近叫她的那則）同一串；只有表情的不分。
-- 自己上傳的圖片直接附給決策模型看（連結預覽的圖不附，用預覽文字；表情和貼圖不附）。
+- 自己上傳的圖片直接附給決策模型看（連結預覽的圖不附，用預覽文字；表情和貼圖不附），
+  也等 MaiBot 的識圖寫好描述（image.get_description）再分：「[圖片]」換成「[圖片：描述]」，話題串裡看得出圖片在講什麼。
+  描述還沒好的跟卡片沒到的一樣先等（PENDING_SECONDS 內不問）；分完才拿到描述的，話題串裡那則會補上（describe_member）。
 - 只有網址、卡片還沒到，或只有圖片的訊息：卡片晚到時插件會補記（emote._remember_card）；圖片直接附給決策模型看，
   不等主程式寫圖片描述。卡片沒到的先等（PENDING_SECONDS 內不問），不擋住這輪。
 - 話題串留 TOPIC_TTL_SECONDS；存在資料目錄的 threads.json（dump_stores / load_stores），插件重啟後讀回。
@@ -54,11 +56,42 @@ def lacks_content(text: str) -> bool:
     return not _LABEL.sub("", _URL.sub("", text)).strip()
 
 
+IMAGE_MARKS = ("[圖片]", "[图片，识别中.....]")
+IMAGE_DESC_CHARS = 120
+
+
+def waiting_image(entry: Mapping[str, Any]) -> bool:
+    """有自己上傳的圖片，MaiBot 還沒寫好描述。"""
+    return bool(entry.get("image_hash")) and not entry.get("image_desc")
+
+
+def describe_image(text: str, description: str) -> str:
+    """第一個「[圖片]」換成「[圖片：描述]」。"""
+    for mark in IMAGE_MARKS:
+        if mark in text:
+            return text.replace(mark, f"[圖片：{description[:IMAGE_DESC_CHARS]}]", 1)
+    return text
+
+
 def with_card(message: Mapping[str, Any], entry: Mapping[str, Any]) -> str:
-    """訊息內容；卡片晚到時（插件補記在 entry["card"]）接在後面。"""
+    """訊息內容；卡片晚到時（插件補記在 entry["card"]）接在後面，圖片有描述了（entry["image_desc"]）換進去。"""
     text = str(message["text"])
+    if entry.get("image_desc"):
+        text = describe_image(text, str(entry["image_desc"]))
     card = str(entry.get("card") or "")
     return f"{text} {card}" if card and card not in text else text
+
+
+def describe_member(store: Mapping[str, Any], msg_id: str, description: str) -> None:
+    """分完話題才拿到圖片描述：話題串裡那則（選項文字和泡泡）補上。"""
+    topic = store["topics"].get(store["of"].get(msg_id))
+    if not topic or msg_id not in topic["members"]:
+        return
+    index = topic["members"].index(msg_id)
+    topic["lines"][index] = describe_image(topic["lines"][index], description)
+    for item in topic.get("items", []):
+        if item.get("msg_id") == msg_id:
+            item["text"] = describe_image(item["text"], description)
 
 
 def clock(stamp: Optional[float]) -> str:
@@ -201,8 +234,8 @@ def topic_questions(
             add_member(store, store["of"][message["quote"]], message, line)
             continue
         first = store["seen"].setdefault(msg_id, now)
-        if lacks_content(with_card(message, entry)) and now - first < PENDING_SECONDS:
-            continue  # 卡片可能還沒到，下一輪再分
+        if (lacks_content(with_card(message, entry)) or waiting_image(entry)) and now - first < PENDING_SECONDS:
+            continue  # 卡片可能還沒到、圖片還沒識別完，下一輪再分
         options: Dict[str, Tuple[str, Any]] = {}
         criteria: Dict[str, str] = {}
         for topic_id, topic in list(store["topics"].items())[-LIVE_TOPICS:]:
