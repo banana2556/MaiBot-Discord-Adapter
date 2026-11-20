@@ -77,12 +77,20 @@ def numbered(message: Mapping[str, Any], numbers: Mapping[int, str]) -> str:
     return f"#{numbers[id(message)]} 「{message['user']}」：{message['text']}"
 
 
-def focus_message(window: Sequence[Mapping[str, Any]], remembered: Mapping[str, Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+def unanswered(messages: Sequence[Mapping[str, Any]], last_sent: float = 0.0) -> List[Mapping[str, Any]]:
+    """她上次說話之後的訊息。MaiBot 的上下文裡她說的話常常只在 reply 的工具結果裡、不是聊天訊息，
+    所以也拿她最後一次送出的時間（last_sent）切：在那之前收到的，她送出前的 replyer 已經看過了。"""
+    last_self = max((index for index, message in enumerate(messages) if message["self"]), default=-1)
+    return [message for message in messages[last_self + 1 :] if (message.get("time") or last_sent + 1) > last_sent]
+
+
+def focus_message(
+    window: Sequence[Mapping[str, Any]], remembered: Mapping[str, Mapping[str, Any]], last_sent: float = 0.0
+) -> Optional[Mapping[str, Any]]:
     """這輪的焦點：她上次說話之後叫她的最新一則，沒有就是最新一則別人的訊息；只有表情的不算（看不出在聊什麼）。"""
-    last_self = max((index for index, message in enumerate(window) if message["self"]), default=-1)
     calling = [
         message
-        for message in window[last_self + 1 :]
+        for message in unanswered(window, last_sent)
         if not message["self"] and (remembered.get(message["msg_id"]) or {}).get("addressed")
     ]
     others = [message for message in window if not message["self"] and message["text"] != EMOTE_ONLY]
@@ -106,10 +114,12 @@ def add_member(store: Dict[str, Any], topic_id: Optional[int], message: Mapping[
     # 「話題串」頁的對話泡泡：誰、說了什麼、幾點；只留最後 TOPIC_ITEMS 則
     items = topic.setdefault("items", [])
     items.append({
+        "msg_id": message["msg_id"],
         "who": "你" if message.get("self") else str(message.get("user") or ""),
         "self": bool(message.get("self")),
         "text": hide_urls(line.split("：", 1)[-1])[:300],
         "time": clock(message.get("time")),
+        "at": float(message.get("time") or time.time()),
     })
     del items[:-TOPIC_ITEMS]
     topic["last"] = max(topic["last"], float(message.get("time") or time.time()))
@@ -240,6 +250,21 @@ def topic_members(store: Mapping[str, Any], msg_id: str) -> List[str]:
     """這則所在那串的 msg_id；還沒分配時是空清單。"""
     topic_id = store["of"].get(msg_id)
     return list(store["topics"][topic_id]["members"]) if topic_id in store["topics"] else []
+
+
+def earlier_items(topic: Mapping[str, Any], present: Sequence[str], before: Optional[float], limit: int = 12) -> List[Dict[str, Any]]:
+    """這串裡已經不在上下文的前文：MaiBot 壓縮上下文時把較早的訊息換成摘要，摘要常常漏掉這串開頭在問什麼。
+
+    Args:
+        present: 上下文裡還有的聊天 msg_id。
+        before: 上下文裡最早那則聊天的時間；只補比它早的（她說的話不是聊天訊息，比它晚的都還在工具結果裡）。
+    """
+    shown = set(present)
+    return [
+        item
+        for item in topic.get("items", [])
+        if item.get("msg_id") not in shown and (before is None or item.get("at", 0) < before)
+    ][-limit:]
 
 
 def focus_ids(store: Mapping[str, Any], msg_id: str, arrived: Sequence[str]) -> List[str]:

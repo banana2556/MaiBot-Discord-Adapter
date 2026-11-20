@@ -243,6 +243,15 @@ class EmoteMixin:
         # MaiBot 設定的暱稱與別名，和它的「被提及必回覆」用同一份
         self._bot_names: List[str] = []
         self._bot_names_at = 0.0
+        # 每個聊天她最後一次送出訊息的時間（epoch 秒）：在那之前叫她的，她已經回過了
+        self._last_sent: Dict[str, float] = {}
+        # 子代理：派出時那一輪焦點所在的串（planner 的 call_id -> 串 ID），派出後拿到任務 id（任務 id -> 串 ID）
+        self._subagent_calls: Dict[str, int] = {}
+        self._subagent_tasks: Dict[str, int] = {}
+        # 子代理的結論送回來時，那個任務當初的話題串也一起給 planner 看，直到下一次分析
+        self._extra_topic: Dict[str, int] = {}
+        # 每個聊天上一次 planner 補上的「這串前面說過的」，replyer 也用
+        self._earlier_notes: Dict[str, str] = {}
 
     # ===== 收訊與 planner =====
 
@@ -344,7 +353,7 @@ class EmoteMixin:
             else message
             for message in window
         ]
-        focus = focus_message(window, remembered)
+        focus = focus_message(window, remembered, self._last_sent.get(session_id, 0.0))
         if focus is None:
             self._focus.pop(session_id, None)
             return
@@ -371,6 +380,7 @@ class EmoteMixin:
         failed = answers is None
         topic_summary = apply_topics(store, keys, answers)
         self._focus[session_id] = focus["msg_id"]
+        self._extra_topic.pop(session_id, None)
         recall_summary, recall_detail, columns, view = await self._run_recall(
             decision, session_id, window, remembered, numbers, state, focus
         )
@@ -708,7 +718,7 @@ class EmoteMixin:
                     "count": len(topic["members"]),
                     "minutes": max(0, round((now - topic["last"]) / 60)),
                     "focus": topic_id == focus_topic,
-                    "messages": topic["items"],
+                    "messages": [{key: item.get(key) for key in ("who", "self", "text", "time")} for item in topic["items"]],
                 }
                 for topic_id, topic in reversed(store["topics"].items())
                 if topic.get("items")
