@@ -177,28 +177,32 @@ def test_compacted_start_of_thread_subagent_thread_and_answered_calls(monkeypatc
     alias = env.module.display_message_id
     plugin, store = env.plugin, topics.new_store()
     plugin._topics["s1"] = store
-    t0 = 1_795_000_000.0
+    t0 = __import__("time").time() - 600
     irys = topics.add_member(store, None, {"msg_id": "mq", "user": "CiKa", "self": False, "time": t0}, "[15:44] 「CiKa」：C醬你知道Irys是誰嗎")
     topics.add_member(store, irys, {"msg_id": "ms", "user": "", "self": True, "time": t0 + 60}, "[15:45] （你）：我搜搜")
     other = topics.add_member(store, None, {"msg_id": alias(FUNNY), "user": "小明", "self": False, "time": t0 + 120}, "[15:46] 「小明」：我剛剛跌倒了哈哈哈")
     plugin._focus["s1"] = "mq"
 
-    # 派子代理那輪記下焦點那串；之後焦點換到小明那串
-    asyncio.run(plugin.remember_subagent_topic(session_id="s1", output_items=[{"tool_call": {"call_id": "c1", "func_name": "subagent"}}]))
+    # 派子代理那輪記下焦點那串；之後焦點換到小明那串，Irys 那串只在待辦裡留一行
+    asyncio.run(plugin.after_planner_response(session_id="s1", output_items=[{"tool_call": {"call_id": "c1", "func_name": "subagent", "args": {}}}]))
+    assert "s1" not in plugin._round_over, "派子代理後 planner 還在這一輪"
     plugin._focus["s1"] = alias(FUNNY)
     funny = _stamp(_message_item(alias(FUNNY), "小明", "我剛剛跌倒了哈哈哈"), t0 + 120)
-    _, note, texts = _planner(env, funny, tools=("reply",))
-    assert "Irys" not in note, "子代理還沒回來：只看焦點那串"
-
-    # 結論送回：Irys 那串（已經被壓縮掉）補成前文，replyer 也拿得到
     output = {"item_type": "FunctionCallOutputItem", "call_id": "c1", "output": "子代理已在后台开始工作，任务 id：subagent-1。"}
+    _, note, texts = _planner(env, output, funny, tools=("reply",))
+    assert "你說要查的還在查（在聊「C醬你知道Irys是誰嗎」" in note and not any("Irys" in text for text in texts)
+
+    # 結論送回：記成 Irys 那串的待辦；新的一輪換到那串，被壓縮掉的前文補在聊天紀錄最前面，replyer 也拿得到
     result = {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": '<subagent_result id="subagent-1" status="completed">'}]}
-    items = _items(env, output, funny, result)
+    _, note, _ = _planner(env, funny, result, tools=("reply",))
+    assert "你派去查的結論回來了" in note
+    plugin._new_round_focus("s1")
+    assert plugin._focus["s1"] == "mq" and store["of"]["mq"] == irys != other
+    items = _items(env, funny, result)
     texts = [part.get("text", "") for item in items for part in item.get("parts", [])]
     earlier = next(index for index, text in enumerate(texts) if text.startswith("【這串前面的對話】"))
     assert "「CiKa」：C醬你知道Irys是誰嗎" in texts[earlier] and "（你）：我搜搜" in texts[earlier]
-    assert texts.index(next(t for t in texts if "我剛剛跌倒了" in t)) > earlier, "前文放在聊天紀錄最前面，不是系統提示詞"
-    assert set(plugin._focus_keep("s1")) >= {"mq", "ms", alias(FUNNY)} and plugin._extra_topic["s1"] == irys != other
+    assert not any("我剛剛跌倒了" in text for text in texts), "焦點換到 Irys 那串，小明那串不給看"
     reply = asyncio.run(plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=""))
     assert "C醬你知道Irys是誰嗎" in reply["modified_kwargs"]["extra_prompt"]
 

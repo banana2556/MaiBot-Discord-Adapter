@@ -31,6 +31,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from ..config import PAGE_FIELDS
 from ..constants import DEFAULT_PLATFORM_NAME
+from .agenda import mark_handled
 from .decision import TIMEOUT_SECONDS
 from .decision import ask as ask_decision
 from .life.common import load_state, save_state, short_time
@@ -260,11 +261,6 @@ class EmoteMixin:
         # 每個聊天她最後一次送出的時間，和最近一次會回話的 planner 請求開始的時間（replyer 的快照照它切）
         self._last_sent: Dict[str, float] = {}
         self._planner_at: Dict[str, float] = {}
-        # 子代理：派出時那一輪焦點所在的串（planner 的 call_id -> 串 ID），派出後拿到任務 id（任務 id -> 串 ID）
-        self._subagent_calls: Dict[str, int] = {}
-        self._subagent_tasks: Dict[str, int] = {}
-        # 子代理的結論送回來時，那個任務當初的話題串也一起給 planner 看，直到下一次分析
-        self._extra_topic: Dict[str, int] = {}
         # 每個聊天上一次 planner 補上的「這串前面說過的」，replyer 也用
         self._earlier_notes: Dict[str, str] = {}
 
@@ -355,11 +351,19 @@ class EmoteMixin:
             if random.random() < settings.chat.emote_chance:
                 self._append_system_text(kwargs, EMOTE_NUDGE)
             return result
-        # 同一回合後面的請求、沒有新訊息的回合（主動話題、提醒、逾時）照上次的焦點，不再分析
+        # 子代理派出、結論送回記成話題串的待辦（agenda），新一輪選焦點時用得到
+        self._track_subagents(session_id, kwargs.get("items") or [])
+        new_round = session_id in self._round_over
+        self._round_over.discard(session_id)
+        is_group = bool(self._latest_inbound.get(session_id, {}).get("group_id"))
+        # 有新訊息：分話題、照待辦選焦點；沒有新訊息的新一輪（子代理結論送回、叫醒她做下一件）照待辦換焦點；
+        # 同一輪後面的請求照這輪的焦點
         if session_id in self._unanalyzed:
             self._unanalyzed.discard(session_id)
-            if self._latest_inbound.get(session_id, {}).get("group_id"):
+            if is_group:
                 await self._analyze(decision, session_id, planner_messages(kwargs.get("items")))
+        elif new_round and is_group:
+            self._new_round_focus(session_id)
         return result
 
     async def _analyze(self, decision: Any, session_id: str, messages: Sequence[Mapping[str, Any]]) -> None:
@@ -369,8 +373,15 @@ class EmoteMixin:
         # 焦點只有網址、卡片還沒到時等一下（最多 recall.FOCUS_WAIT_SECONDS）；其他的照常，晚點再分話題
         await self._wait_for_focus_card(session_id, window)
         remembered = self._inbound.get(session_id, {})
-        # 卡片晚到時插件補記的文字接在正文後面
-        window = [{**message, "text": with_card(message, remembered.get(message["msg_id"]) or {})} for message in window]
+        # 卡片晚到時插件補記的文字接在正文後面；在叫她的記下來（話題串的待辦用）
+        window = [
+            {
+                **message,
+                "text": with_card(message, remembered.get(message["msg_id"]) or {}),
+                "addressed": bool((remembered.get(message["msg_id"]) or {}).get("addressed")),
+            }
+            for message in window
+        ]
         # 用回覆功能回的，正文前面標「[回覆「名字」：…]」：planner 看到的回覆標籤要等 quote_context 那個 late hook 才加，
         # 這裡不補的話決策模型和聯想不知道它在回誰
         window = [
@@ -405,9 +416,13 @@ class EmoteMixin:
         latency_ms = round((time.monotonic() - started) * 1000)
         failed = answers is None
         topic_summary = apply_topics(store, keys, answers)
+        # 待辦優先（叫她還沒回的、子代理查完還沒回的）；沒有就是上面挑的（叫她的、最新一則別人說的）
+        if item := self._agenda_focus(session_id, [message["msg_id"] for message in window if not message["self"]]):
+            focus = next(message for message in window if message["msg_id"] == item["msg_id"])
+        else:
+            mark_handled(store, store["of"].get(focus["msg_id"]), time.time())
         self._save_threads()
         self._focus[session_id] = focus["msg_id"]
-        self._extra_topic.pop(session_id, None)
         recall_summary, recall_detail, columns, view = await self._run_recall(
             decision, session_id, window, remembered, numbers, state, focus
         )

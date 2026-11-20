@@ -117,6 +117,8 @@ def add_member(store: Dict[str, Any], topic_id: Optional[int], message: Mapping[
         "msg_id": message["msg_id"],
         "who": "你" if message.get("self") else str(message.get("user") or ""),
         "self": bool(message.get("self")),
+        # 在叫她（@、回覆她、喊名字）：agenda 用來找「叫她還沒回」
+        "addressed": bool(message.get("addressed")),
         "text": hide_urls(line.split("：", 1)[-1])[:300],
         "time": clock(message.get("time")),
         "at": float(message.get("time") or time.time()),

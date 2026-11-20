@@ -17,7 +17,7 @@
   這串已經不在上下文的前文從話題串（存在 threads.json）補回來，放在聊天紀錄最前面。
 - MaiBot 在每批訊息前插的「时间：…」不送：每則訊息開頭已經有時間（不是今天的加上日期），只留最後一條當作現在時間。
   過濾掉別串後它們只剩空殼；焦點過濾時 MaiBot 的「[上下文恢复]」說明也拿掉（它說的那些恢復的訊息多半不在這串）。
-- 子代理在背景查，結論送回時焦點可能已經換到別串：派出時記下那串，結論回來那輪也給 planner 和 replyer 看那串。
+- 焦點以外她還沒做完的事（別串有人叫她、子代理查完了…，agenda.py）各給 planner 一行。
 - 快照：replyer 只看 planner 做決定那時已經到的訊息。replyer 寫得慢時新訊息會進來，它會順手回到 planner 沒看過的事
   （「搜完了啦」）；之後才到的留給下一輪，「她看過的截到哪」也照 planner 開始的時間算，下一輪還會提醒她。
 - 送出間隔：同一個聊天兩次回話至少隔 REPLY_GAP_SECONDS，不會上一則剛送出下一則又跟著噴出來。
@@ -50,8 +50,6 @@ EARLIER_ITEM_ID = "discord-thread-earlier"
 RESTORE_NOTE = "[上下文恢复]"
 _TIME_MARK = re.compile(r"时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 _HEAD_TIME = re.compile(r'time="(\d{2}:\d{2}(?::\d{2})?)"')
-_TASK_ID = re.compile(r"任务 id：([\w-]+)")
-_RESULT_ID = re.compile(r'<subagent_result id="([^"]+)"')
 
 
 def is_jargon(item: Mapping[str, Any]) -> bool:
@@ -135,28 +133,22 @@ class QuoteContextMixin:
     """需要主插件提供 ctx、_append_system_text、_add_recall_note，和 EmoteMixin 的 _inbound、_latest_inbound、_topics、_focus。"""
 
     def _focus_keep(self, session_id: str, msg_id: str = "") -> List[str]:
-        """要留的 msg_id：msg_id 所在那串（沒給或沒分到串就用這輪的焦點），加上之後才收到、還沒分的，
-        和子代理結論送回時它的那串；沒有焦點時是空清單。"""
+        """要留的 msg_id：msg_id 所在那串（沒給或沒分到串就用這輪的焦點），加上之後才收到、還沒分的；沒有焦點時是空清單。"""
         store = self._topics.get(session_id)
         focus = self._focus.get(session_id, "")
         if not store or not focus:
             return []
         anchor = msg_id if msg_id in store["of"] else focus
-        keep = focus_ids(store, anchor, list(self._inbound.get(session_id, {})))
-        extra = store["topics"].get(self._extra_topic.get(session_id)) or {}
-        if not keep:
-            return keep
-        return keep + [other for other in extra.get("members", []) if other not in keep]
+        return focus_ids(store, anchor, list(self._inbound.get(session_id, {})))
 
     def _kept_topics(self, session_id: str, msg_id: str = "") -> List[Dict[str, Any]]:
-        """要給模型看的話題串：子代理那串（有的話）在前，焦點那串在後。"""
+        """要給模型看的話題串：msg_id（沒給就是焦點）所在那串。"""
         store = self._topics.get(session_id)
         focus = self._focus.get(session_id, "")
         if not store or not focus:
             return []
-        anchor = msg_id if msg_id in store["of"] else focus
-        ids = [self._extra_topic.get(session_id), store["of"].get(anchor)]
-        return [store["topics"][tid] for tid in dict.fromkeys(ids) if tid in store["topics"]]
+        topic = store["topics"].get(store["of"].get(msg_id if msg_id in store["of"] else focus))
+        return [topic] if topic else []
 
     def _earlier_note(self, session_id: str, messages: Sequence[Mapping[str, Any]], msg_id: str = "") -> str:
         """要看的話題串裡，已經被 MaiBot 壓縮掉或重啟後不在上下文的前文（幾串的照時間合在一起）。"""
@@ -173,38 +165,6 @@ class QuoteContextMixin:
             for item in found
         ]
         return EARLIER_NOTE + "\n".join(lines) if lines else ""
-
-    def _track_subagents(self, session_id: str, items: Sequence[Mapping[str, Any]]) -> None:
-        """派出子代理那輪記下的串（_subagent_calls）對上任務 id；任務的結論第一次出現時，那串加進這輪要看的。"""
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            if item.get("item_type") == "FunctionCallOutputItem" and str(item.get("call_id")) in self._subagent_calls:
-                if found := _TASK_ID.search(str(item.get("output") or "")):
-                    self._subagent_tasks[found.group(1)] = self._subagent_calls.pop(str(item.get("call_id")))
-            parts = item.get("parts") if isinstance(item.get("parts"), list) else []
-            text = str(parts[0].get("text") or "") if parts and isinstance(parts[0], Mapping) else ""
-            if (found := _RESULT_ID.search(text)) and found.group(1) in self._subagent_tasks:
-                self._extra_topic[session_id] = self._subagent_tasks.pop(found.group(1))
-                self.ctx.logger.info(f"子代理 {found.group(1)} 的結論送回 [{session_id}]：一起看它當初那串")
-
-    @HookHandler(
-        "maisaka.planner.after_response",
-        name="discord_subagent_topic",
-        mode="observe",
-        order="late",
-        timeout_ms=1000,
-    )
-    async def remember_subagent_topic(self, **kwargs: Any) -> Dict[str, Any]:
-        """planner 派出子代理時記下這輪焦點所在的串，結論送回來時（可能已經換話題了）還能給它看當初在聊什麼。"""
-        session_id = str(kwargs.get("session_id") or "")
-        store = self._topics.get(session_id)
-        topic_id = store["of"].get(self._focus.get(session_id, "")) if store else None
-        for item in kwargs.get("output_items") or []:
-            call = item.get("tool_call") if isinstance(item, Mapping) else None
-            if topic_id is not None and isinstance(call, Mapping) and call.get("func_name") == "subagent":
-                self._subagent_calls[str(call.get("call_id"))] = topic_id
-        return {"action": "continue"}
 
     def _join_focus(self, message: Mapping[str, Any]) -> None:
         """她送出的話加進焦點那串（send_service.after_send）；同一回合後面的請求和 replyer 才看得到她剛說過什麼。"""
@@ -277,6 +237,8 @@ class QuoteContextMixin:
         if "reply" in tool_names(kwargs):
             self._planner_at[session_id] = time.time()
             if note := self._calling_note(session_id, messages, remembered):
+                self._append_system_text(kwargs, note)
+            if note := self._agenda_note(session_id):
                 self._append_system_text(kwargs, note)
             self._add_recall_note(kwargs, session_id)
         return {"action": "continue", "modified_kwargs": kwargs}

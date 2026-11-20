@@ -24,6 +24,7 @@ from .config import PAGE_FIELDS, PAGE_MANAGED_FIELDS, WEBUI_CONFIG_TABS, Discord
 from .constants import DEFAULT_PLATFORM_NAME, DISCORD_GATEWAY_NAME
 from .filters import DiscordChatFilter
 from .runtime_state import DiscordRuntimeStateManager
+from .src.agenda import AgendaMixin
 from .src.decision import DecisionStats
 from .src.emote import EmoteMixin, tool_names
 from .src.emote_library import EmoteLibrary
@@ -71,7 +72,7 @@ ON_OFF = {True: "開", False: "關"}
 VALUE_LABELS = {"replyer": "回覆模型（replyer）", "planner": "規劃模型（planner）"}
 
 
-class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, RecallMixin, ReminderMixin, MaiBotPlugin):
+class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, AgendaMixin, RecallMixin, ReminderMixin, MaiBotPlugin):
     """Discord 消息网关插件。
 
     负责注册双工消息网关、管理 discord.py 客户端生命周期，并将 Host 出站消息路由到
@@ -119,6 +120,7 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, RecallMixin, ReminderM
         self._emote_library: Optional[EmoteLibrary] = None
         self._init_emote_state()
         self._init_recall_state()
+        self._init_agenda_state()
 
     async def on_load(self) -> None:
         """插件加载时启动日常功能的后台轮询，并根据当前配置启动或保持 Discord 连接。"""
