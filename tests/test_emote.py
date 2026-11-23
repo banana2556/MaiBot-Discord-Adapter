@@ -381,11 +381,11 @@ def test_focus_thread_is_all_planner_selector_and_replyer_see(monkeypatch) -> No
     env.plugin._join_focus({"session_id": "s1", "message_id": "her-1", "raw_message": [{"type": "text", "data": "笑死我"}]})
     env.plugin._remember_inbound("s1", _inbound("1567799999999999999"))
     keep = env.plugin._focus_keep("s1")
-    assert keep == [alias(FUNNY), alias(LAUGH), "her-1", alias("1567799999999999999")]
+    assert keep == [alias(FUNNY), alias(LAUGH), "her-1"], "後到而未分配的訊息留給下一輪"
     assert env.plugin._topics["s1"]["topics"][2]["lines"][-1].endswith("（你）：笑死我")
 
 
-def test_failed_topic_request_keeps_the_full_chat(monkeypatch) -> None:
+def test_failed_topic_request_keeps_only_unassigned_messages(monkeypatch) -> None:
     env = _env(monkeypatch, answers=[None])
 
     async def scenario():
@@ -395,7 +395,9 @@ def test_failed_topic_request_keeps_the_full_chat(monkeypatch) -> None:
         return await env.plugin.keep_focus_thread(**kwargs)
 
     result = asyncio.run(scenario())
-    assert len(env.module.planner_messages(result["modified_kwargs"]["items"])) == 4, "焦點沒分到串就不過濾"
+    ids = [m["msg_id"] for m in env.module.planner_messages(result["modified_kwargs"]["items"])]
+    alias_id = env.module.display_message_id
+    assert ids == [alias_id(LATEST)], "模型失敗時只看待判定的焦點，不混入其他串"
     assert env.plugin._decision_stats.state["decisions"][0]["failed"] is True
 
 

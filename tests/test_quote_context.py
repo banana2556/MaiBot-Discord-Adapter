@@ -119,7 +119,7 @@ def test_keep_focus_items_drops_other_topics_but_not_newer_messages_or_tool_call
     reminder = {"item_type": "UserMessageItem", "meta": {"item_id": "link-reminder-ib"}, "parts": [{"type": "text", "text": "提醒"}]}
     call = {"item_type": "FunctionCallItem", "meta": {}, "tool_call": {}}
     kept, dropped = quote.keep_focus_items([system, a, b, reminder, call, c, d], {"ma"}, {"ma", "mb", "mc"})
-    assert kept == [system, a, call, d] and dropped == 2, "其他話題的 b、c 和 b 的連結提醒拿掉；分完話題之後才出現的 d 留著"
+    assert kept == [system, a, call] and dropped == 3, "未歸類的 d 留給下輪；只保留確定在焦點串的 a"
 
 
 def _items(env, *chat, tools=("reply",)):
@@ -208,7 +208,12 @@ def test_compacted_start_of_thread_subagent_thread_and_answered_calls(monkeypatc
 
     # 叫她的訊息在她送出之前就到了：她送出時 replyer 已經看過，不再列成「有人在找你」
     calling = _stamp(_message_item(alias(REPLY), "小美", "真的嗎"), t0 + 200)
-    assert "【有人在找你】" in _planner(env, calling, tools=("reply",))[1]
+    assert "【有人在找你】" in "".join(
+        part.get("text", "")
+        for item in _planner(env, calling, tools=("reply",))[0]["modified_kwargs"]["items"]
+        if item.get("item_type") == "SystemMessageItem"
+        for part in item.get("parts", [])
+    )
     plugin._seen_until["s1"] = t0 + 230
     assert "【有人在找你】" not in _planner(env, calling, tools=("reply",))[1]
 

@@ -29,6 +29,8 @@ TOPIC = "topic_"
 LIVE_TOPICS = 5
 ASSIGN_LIMIT = 6
 TOPIC_TTL_SECONDS = 12 * 3600
+# 一段對話最多延續兩小時；舊版沒有 created 的巨串只保留歷史，不再當候選。
+SEGMENT_SECONDS = 2 * 3600
 MAX_TOPICS = 60
 # 每串留給「話題串」頁顯示的最後幾則
 TOPIC_ITEMS = 30
@@ -140,7 +142,8 @@ def add_member(store: Dict[str, Any], topic_id: Optional[int], message: Mapping[
     if topic_id is None or topic_id not in store["topics"]:
         topic_id = store["next"]
         store["next"] += 1
-        store["topics"][topic_id] = {"members": [], "lines": [], "last": 0.0}
+        created = float(message.get("time") or time.time())
+        store["topics"][topic_id] = {"members": [], "lines": [], "last": 0.0, "created": created}
     topic = store["topics"][topic_id]
     topic["members"].append(message["msg_id"])
     topic["lines"].append(line)
@@ -172,6 +175,13 @@ def prune(store: Dict[str, Any], now: float) -> None:
     alive = set(store["topics"])
     store["of"] = {msg_id: tid for msg_id, tid in store["of"].items() if tid in alive}
     store["seen"] = {msg_id: at for msg_id, at in store["seen"].items() if now - at < TOPIC_TTL_SECONDS}
+
+
+def active_topic(topic: Mapping[str, Any], at: float) -> bool:
+    """對話段有建立時間、仍在活動期且沒有超過段長；舊格式僅供歷史查閱。"""
+    created = float(topic.get("created") or 0.0)
+    last = float(topic.get("last") or 0.0)
+    return bool(created and -1 <= at - created < SEGMENT_SECONDS and -1 <= at - last < TOPIC_TTL_SECONDS)
 
 
 def describe_topic(topic: Mapping[str, Any], at: Optional[float]) -> str:
@@ -216,7 +226,6 @@ def topic_questions(
         index
         for index, message in enumerate(window)
         if not message["self"] and message["text"] != EMOTE_ONLY and message["msg_id"] not in store["of"]
-        and message["quote"] not in store["of"]
     ]
     skipped = set(unasked[:-ASSIGN_LIMIT])
     for index, message in enumerate(window):
@@ -228,24 +237,34 @@ def topic_questions(
         entry = remembered.get(msg_id) or {}
         line = topic_line(message, entry)
         if message["self"]:
-            add_member(store, own_topic(window, index, store, remembered), message, line)
-            continue
-        if message["quote"] in store["of"]:
-            add_member(store, store["of"][message["quote"]], message, line)
+            own = own_topic(window, index, store, remembered)
+            if own is None:
+                add_member(store, None, message, line)
+            elif active_topic(store["topics"][own], now):
+                add_member(store, own, message, line)
             continue
         first = store["seen"].setdefault(msg_id, now)
         if (lacks_content(with_card(message, entry)) or waiting_image(entry)) and now - first < PENDING_SECONDS:
             continue  # 卡片可能還沒到、圖片還沒識別完，下一輪再分
         options: Dict[str, Tuple[str, Any]] = {}
         criteria: Dict[str, str] = {}
-        for topic_id, topic in list(store["topics"].items())[-LIVE_TOPICS:]:
+        active = [tid for tid, topic in store["topics"].items() if active_topic(topic, now)]
+        quoted_topic = store["of"].get(message["quote"])
+        candidates = active[-LIVE_TOPICS:]
+        if quoted_topic in active and quoted_topic not in candidates:
+            candidates.insert(0, quoted_topic)
+        for topic_id in candidates:
+            topic = store["topics"][topic_id]
             options[f"t{topic_id}"] = ("topic", topic_id)
             criteria[f"t{topic_id}"] = describe_topic(topic, message.get("time"))
+        # 回覆是一條明確的關係線索，但內容轉題時仍可選新串。
+        if quoted_topic in store["topics"] and f"t{quoted_topic}" in criteria:
+            criteria[f"t{quoted_topic}"] += "（這則回覆了本串中的訊息；仍要依內容判斷是否轉題）"
         for earlier in asked:  # 這輪前面剛問的，可能跟它開了同一串新話題
             key = f"m{numbers[id(earlier)]}"
             options[key] = ("msg", earlier["msg_id"])
             criteria[key] = f"跟這輪的 #{numbers[id(earlier)]} 同一串：{topic_line(earlier, remembered.get(earlier['msg_id']) or {})}"
-        if not options:  # 還沒有任何話題串：直接開一串（選擇題至少要兩個選項，只有「新話題」會被回 422）
+        if not options:  # 沒有活躍話題：第一則直接開串；同批後續訊息可選它
             add_member(store, None, message, line)
             continue
         criteria[NONE] = NEW_TOPIC
@@ -274,7 +293,12 @@ def apply_topics(store: Dict[str, Any], keys: Mapping[str, Mapping[str, Any]], a
         answer = (answers or {}).get(question_id)
         if not isinstance(answer, Mapping):
             continue
-        kind, target = key["options"].get(str(answer.get("choice") or ""), ("new", None))
+        choice = str(answer.get("choice") or "")
+        if choice not in key["options"] and choice != NONE:
+            continue  # 模型回了無效選項，保持未分配，下一輪重試
+        kind, target = key["options"].get(choice, ("new", None))
+        if kind == "msg" and target not in store["of"]:
+            continue  # 同批的前一則仍未判定，不能憑空開新串
         topic_id = target if kind == "topic" else store["of"].get(target) if kind == "msg" else None
         topic_id = add_member(store, topic_id, key["message"], key["line"])
         parts.append(f"#{question_id[len(TOPIC):]}→串{topic_id}")
@@ -303,19 +327,15 @@ def earlier_items(topic: Mapping[str, Any], present: Sequence[str], before: Opti
 
 
 def focus_ids(store: Mapping[str, Any], msg_id: str, arrived: Sequence[str]) -> List[str]:
-    """planner、表達方式選擇和 replyer 只看的 msg_id：msg_id 那串，加上最後一則分過話題的之後才收到、還沒分的。
-
-    Args:
-        arrived: 這個聊天收訊的順序（msg_id）。
-
-    Returns:
-        那則還沒分到話題串時是空清單（呼叫端就不過濾）。
+    """planner、表達方式選擇和 replyer 的 msg_id 快照：只包含已確認同段的成員；
+    焦點未判定時僅保留焦點本身，避免將其他話題硬併進來。
+    arrived 是這輪已收到的 msg_id，用於確認待判定的焦點在上下文中。
     """
     members = topic_members(store, msg_id)
+    # 已有確定的歸類時，不把尚未判定的其他串混進焦點。
     if not members:
-        return []
-    last = max((index for index, other in enumerate(arrived) if other in store["of"]), default=len(arrived) - 1)
-    return [*members, *(other for other in arrived[last + 1 :] if other not in members)]
+        return [msg_id] if msg_id in arrived else []
+    return members
 
 
 def dump_stores(stores: Mapping[str, Mapping[str, Any]], seen_until: Mapping[str, float]) -> Dict[str, Any]:

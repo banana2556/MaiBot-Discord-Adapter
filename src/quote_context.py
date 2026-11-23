@@ -114,8 +114,7 @@ def keep_focus_items(items: List[Dict[str, Any]], keep: Set[str], assigned: Set[
         (留下的 items, 拿掉幾則聊天訊息)。
     """
     chat = [(index, found[0]["msg_id"]) for index, item in enumerate(items) if (found := planner_messages([item]))]
-    last = max((index for index, msg_id in chat if msg_id in assigned), default=-1)
-    gone = {index for index, msg_id in chat if index <= last and msg_id not in keep}
+    gone = {index for index, msg_id in chat if msg_id not in keep}
     def item_id(item: Mapping[str, Any]) -> str:
         return str((item.get("meta") or {}).get("item_id") or "")
 
@@ -133,7 +132,7 @@ class QuoteContextMixin:
     """需要主插件提供 ctx、_append_system_text、_add_recall_note，和 EmoteMixin 的 _inbound、_latest_inbound、_topics、_focus。"""
 
     def _focus_keep(self, session_id: str, msg_id: str = "") -> List[str]:
-        """要留的 msg_id：msg_id 所在那串（沒給或沒分到串就用這輪的焦點），加上之後才收到、還沒分的；沒有焦點時是空清單。"""
+        """要留的 msg_id：只留焦點已確定的段；未確定時只留焦點，不把後到的其他訊息默認併入。"""
         store = self._topics.get(session_id)
         focus = self._focus.get(session_id, "")
         if not store or not focus:
@@ -213,6 +212,7 @@ class QuoteContextMixin:
         # 表達方式選擇不經過話題分析那個 hook，表情 ID 和表情圖在這裡拿掉
         strip_emotes(items)
         self._track_subagents(session_id, items)
+        all_messages = planner_messages(items)
         if keep := self._focus_keep(session_id):
             store = self._topics[session_id]
             items, dropped = keep_focus_items(items, set(keep), set(store["of"]))
@@ -236,7 +236,7 @@ class QuoteContextMixin:
         # 有 reply 才是 planner 本身（表達方式選擇沒有工具；睡覺時段只剩 stop，不用叫她回）
         if "reply" in tool_names(kwargs):
             self._planner_at[session_id] = time.time()
-            if note := self._calling_note(session_id, messages, remembered):
+            if note := self._calling_note(session_id, all_messages, remembered):
                 self._append_system_text(kwargs, note)
             if note := self._agenda_note(session_id):
                 self._append_system_text(kwargs, note)

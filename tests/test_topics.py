@@ -28,13 +28,14 @@ def test_rules_pending_links_images_and_answers() -> None:
     store = topics.new_store()
     questions, keys, images = topics.topic_questions(store, window, numbers, remembered, now=1060.0)
 
-    assert store["of"]["a"] == store["of"]["me"] == store["of"]["e"], "第一則直接開串；她回叫她的那則；回覆跟被回覆的同一串"
-    assert list(questions) == ["topic_2", "topic_4"], "只有網址的先等卡片，不問"
+    assert store["of"]["a"] == store["of"]["me"]
+    assert list(questions) == ["topic_2", "topic_4", "topic_5"], "回覆也需判斷，只有網址先等卡片"
     assert "最後一則是 0 分鐘前" in questions["topic_2"]["criteria"]["t1"] and "none" in questions["topic_2"]["criteria"]
     assert "m2" in questions["topic_4"]["criteria"], "這輪前面剛問的那則也能選"
     assert images == ["data:image/png;base64," + "Q" * 200] and "附圖第 1 張" in questions["topic_4"]["instructions"]
 
-    summary = topics.apply_topics(store, keys, {"topic_2": {"choice": "none"}, "topic_4": {"choice": "m2"}})
+    summary = topics.apply_topics(store, keys, {"topic_2": {"choice": "none"}, "topic_4": {"choice": "m2"}, "topic_5": {"choice": "t1"}})
+    assert store["of"]["e"] == store["of"]["a"]
     assert store["of"]["b"] == store["of"]["d"] != store["of"]["a"] and summary.startswith("#2→串")
 
     # 卡片一直沒到：等過 PENDING_SECONDS 就照網址分
@@ -60,8 +61,61 @@ def test_newest_messages_are_assigned_first_and_focus_ids_keep_later_arrivals() 
         "最舊的 4 則不分；第 5 則還沒有任何串，直接開一串"
     )
     store = {"of": {"m8": 1, "m9": 1}, "topics": {1: {"members": ["m8", "m9"], "lines": [], "last": 0.0}}}
-    assert topics.focus_ids(store, "m9", ["m7", "m8", "m9", "x", "y"]) == ["m8", "m9", "x", "y"], "之後才收到、還沒分的也留"
-    assert topics.focus_ids(store, "m7", ["m8"]) == [], "沒分到串就不過濾"
+    assert topics.focus_ids(store, "m9", ["m7", "m8", "m9", "x", "y"]) == ["m8", "m9"], "未判定的後來訊息不能混入其他串"
+    assert topics.focus_ids(store, "m7", ["m8"]) == [], "焦點不在這輪上下文時不過濾"
+
+
+def test_reply_to_another_subject_must_be_judged_not_inherited() -> None:
+    store = topics.new_store()
+    original = _msg("t1", "甲", "T1 比賽", 1000.0)
+    topics.add_member(store, None, original, topics.topic_line(original, {}))
+    reply = _msg("sale", "乙", "遊戲特價", 1010.0, quote="t1")
+    questions, keys, _ = topics.topic_questions(store, [reply], {id(reply): "1"}, {}, 1010.0)
+    assert "topic_1" in questions and "t1" in questions["topic_1"]["criteria"]
+    topics.apply_topics(store, keys, {"topic_1": {"choice": "none"}})
+    assert store["of"]["sale"] != store["of"]["t1"]
+
+
+def test_legacy_giant_thread_is_not_an_active_candidate() -> None:
+    store = topics.new_store()
+    for i in range(60):
+        message = _msg(f"old{i}", "甲", f"不同舊消息 {i}", 1000.0 + i)
+        topics.add_member(store, 1 if i else None, message, topics.topic_line(message, {}))
+    # 線上資料由舊版本寫入，沒有建立時間；保持原歷史但不讓它繼續吸收新訊息。
+    del store["topics"][1]["created"]
+    incoming = _msg("new", "乙", "T1 比賽", 1070.0)
+    questions, _, _ = topics.topic_questions(store, [incoming], {id(incoming): "1"}, {}, 1070.0)
+    assert "t1" not in questions.get("topic_1", {}).get("criteria", {})
+    assert store["of"].get("new") != 1
+
+
+def test_unclassified_focus_is_isolated_not_all_chat() -> None:
+    store = topics.new_store()
+    old = _msg("old", "甲", "T1 比賽", 1000.0)
+    topics.add_member(store, None, old, topics.topic_line(old, {}))
+    assert topics.focus_ids(store, "new", ["old", "new"]) == ["new"]
+
+
+def test_invalid_or_missing_model_answer_does_not_create_a_thread() -> None:
+    store = topics.new_store()
+    old = _msg("old", "甲", "T1 比賽", 1000.0)
+    topics.add_member(store, None, old, topics.topic_line(old, {}))
+    newer = _msg("new", "乙", "遊戲特價", 1010.0)
+    questions, keys, _ = topics.topic_questions(store, [newer], {id(newer): "1"}, {}, 1010.0)
+    assert questions
+    assert topics.apply_topics(store, keys, {"topic_1": {"choice": "bad"}}) == ""
+    assert "new" not in store["of"]
+
+
+def test_candidate_count_is_bounded_and_quoted_thread_remains_eligible() -> None:
+    store = topics.new_store()
+    for i in range(12):
+        m = _msg(f"past{i}", "甲", f"話題 {i}", 1000.0 + i)
+        topics.add_member(store, None, m, topics.topic_line(m, {}))
+    msg = _msg("reply", "乙", "另一個問題", 1040.0, quote="past0")
+    questions, _, _ = topics.topic_questions(store, [msg], {id(msg): "1"}, {}, 1040.0)
+    candidate_ids = [key for key in questions["topic_1"]["criteria"] if key.startswith("t")]
+    assert "t1" in candidate_ids and len(candidate_ids) <= topics.LIVE_TOPICS + 1
 
 
 def test_recall_reads_the_focus_thread(monkeypatch) -> None:
@@ -87,7 +141,7 @@ def test_recall_reads_the_focus_thread(monkeypatch) -> None:
     prompt = next(kwargs["prompt"] for name, kwargs in calls if name == "llm.generate")
     assert "顯卡燒了" in prompt and "火鍋" not in prompt
     texts = [message["text"] for message in _load_adapter_module("src.emote").planner_messages(result["items"])]
-    assert texts == ["我顯卡燒了", "風扇有轉但沒畫面"], "planner 也只看這串"
+    assert texts == ["我顯卡燒了", "風扇有轉但沒畫面"], "planner 只看焦點所在串"
 
 
 def test_late_link_card_is_remembered_and_shown(monkeypatch) -> None:
@@ -100,7 +154,7 @@ def test_late_link_card_is_remembered_and_shown(monkeypatch) -> None:
 
 
 def test_topic_page_shows_thread_understanding_memory_and_current_settings(monkeypatch) -> None:
-    split = _topics(topic_1="none", topic_2="none", topic_3="m1")
+    split = _topics(topic_1="none", topic_2="none", topic_3="m2")
     understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
     env, _ = _setup(monkeypatch, [split, understood], {})
     planner = _planner()
