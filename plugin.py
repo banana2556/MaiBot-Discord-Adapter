@@ -105,6 +105,8 @@ class DiscordAdapterPlugin(EmoteMixin, QuoteContextMixin, AgendaMixin, RecallMix
             tuple[float, Optional[Dict[str, Dict[str, List[str]]]], str],
         ] = {}
         self._reminders: List[Dict[str, Any]] = []
+        # 主動提醒不沿用前一輪聊天焦點；送出的連續句子歸在提醒段。
+        self._reminder_delivery: Dict[str, Dict[str, Any]] = {}
         self._daily_life: Optional[DailyLife] = None
         self._topic_scout: Optional[TopicScout] = None
         self._daily_task: Optional[asyncio.Task[None]] = None

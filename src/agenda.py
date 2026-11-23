@@ -139,6 +139,8 @@ class AgendaMixin:
 
     def _new_round_focus(self, session_id: str) -> None:
         """沒有新訊息的新一輪（子代理結論送回、叫醒她做下一件）：照待辦換焦點。"""
+        if session_id in self._reminder_delivery:
+            return  # 定時提醒已取得這輪控制權；不能用上一輪聊天待辦蓋掉它
         if item := self._agenda_focus(session_id):
             self._focus[session_id] = item["msg_id"]
             self._save_threads()

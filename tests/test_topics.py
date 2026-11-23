@@ -133,6 +133,29 @@ def test_sent_reply_does_not_reactivate_legacy_giant(monkeypatch) -> None:
     assert "her-next" not in store["of"], "舊巨串不應因 Bot 發言又重新活化"
 
 
+def test_reminder_delivery_does_not_join_stale_cafe_focus(monkeypatch) -> None:
+    from test_emote import _env
+
+    env = _env(monkeypatch)
+    plugin = env.plugin
+    store = topics.new_store()
+    cafe = _msg("cafe", "甲", "咖啡店聯名活動", 1000.0)
+    cafe_id = topics.add_member(store, None, cafe, topics.topic_line(cafe, {}))
+    plugin._topics["s1"] = store
+    plugin._focus["s1"] = "cafe"
+    plugin._reminder_delivery["s1"] = {"content": "提醒五日第二場釣魚", "topic": None}
+    plugin._join_focus({"session_id": "s1", "message_id": "bot1", "raw_message": [{"type": "text", "data": "提醒五日第二場釣魚"}]})
+    reminder_id = store["of"]["bot1"]
+    assert reminder_id != cafe_id
+    assert store["topics"][reminder_id]["items"][0]["text"] == "提醒五日第二場釣魚"
+    plugin._join_focus({"session_id": "s1", "message_id": "bot2", "raw_message": [{"type": "text", "data": "還有五分鐘"}]})
+    assert store["of"]["bot2"] == reminder_id
+    assert store["topics"][cafe_id]["members"] == ["cafe"]
+    plugin._remember_inbound("s1", {"message_id": "human", "message_info": {"group_info": {"group_id": "g"}, "user_info": {"user_id": "u"}}, "raw_message": []})
+    plugin._join_focus({"session_id": "s1", "message_id": "bot3", "raw_message": [{"type": "text", "data": "回到舊話題"}]})
+    assert "s1" not in plugin._reminder_delivery, "有真人接話後不再將 Bot 的其他發言錯當同一次提醒"
+
+
 def test_model_failure_retries_unassigned_reply() -> None:
     store = topics.new_store()
     old = _msg("old", "甲", "T1 比賽", 1000.0)

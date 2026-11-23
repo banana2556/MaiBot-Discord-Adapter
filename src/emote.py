@@ -307,6 +307,8 @@ class EmoteMixin:
         user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
         message_id = str(message.get("message_id") or "")
         self._unanalyzed.add(session_id)
+        if message_id:
+            self._reminder_delivery.pop(session_id, None)
         self._latest_inbound[session_id] = {
             "group_id": str(group.get("group_id") or ""),
             "user_id": str(user.get("user_id") or ""),

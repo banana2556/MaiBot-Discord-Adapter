@@ -71,6 +71,7 @@ class ReminderMixin:
     ctx: Any
     config: Any
     _reminders: List[Dict[str, Any]]
+    _reminder_delivery: Dict[str, Dict[str, Any]]
 
     @property
     def _reminders_path(self) -> Path:
@@ -172,9 +173,13 @@ class ReminderMixin:
                     intent += f"\n原定 {describe(scheduled)}，已經晚了 {late_minutes} 分鐘。"
                 # 睡觉时段也要叫醒她来提醒，否则静默中的聊天会把这次触发吞掉
                 await self._wake_up()
+                self._reminder_delivery[reminder["stream_id"]] = {"content": reminder["content"], "topic": None}
+                self._focus.pop(reminder["stream_id"], None)
                 result = await self.ctx.maisaka.proactive.trigger(
                     reminder["stream_id"], intent, reason=FOLLOWUP if reminder["auto"] else "定時提醒"
                 )
+                if not result["success"]:
+                    self._reminder_delivery.pop(reminder["stream_id"], None)
             except Exception:
                 self.ctx.logger.exception(f"提醒 {reminder['id']} 触发异常，稍后重试")
                 continue

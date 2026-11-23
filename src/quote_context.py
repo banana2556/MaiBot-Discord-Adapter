@@ -176,7 +176,19 @@ class QuoteContextMixin:
             self._last_sent[session_id] = now
             # replyer 只看了 planner 開始前到的（快照），之後才到的還沒回
             self._seen_until[session_id] = self._planner_at.get(session_id, now)
-        if not store or focus not in store["of"] or not msg_id or msg_id in store["of"]:
+        if not store or not msg_id or msg_id in store["of"]:
+            return
+        pending = self._reminder_delivery.get(session_id)
+        if pending:
+            # 主動提醒另開一串；同次 reply 的後續短句留在同一串，不要塞進過期的聊天焦點。
+            topic_id = pending.get("topic")
+            line = f"[{clock(now)}] （你）：{sent_text(message)[:120]}"
+            reminder_topic = add_member(store, topic_id, {"msg_id": msg_id, "user": "", "self": True, "time": now}, line)
+            pending["topic"] = reminder_topic
+            self._focus[session_id] = msg_id
+            self._save_threads()
+            return
+        if focus not in store["of"]:
             return
         topic_id = store["of"][focus]
         if not active_topic(store["topics"][topic_id], now):

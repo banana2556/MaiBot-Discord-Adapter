@@ -231,6 +231,29 @@ def test_requested_reminder_requires_target_and_explicit_mention(tmp_path) -> No
     assert 'attach_at=["m1"]' in intent and "務必標注" in intent
 
 
+def test_fired_reminder_starts_own_thread_when_old_focus_is_unrelated(tmp_path) -> None:
+    from test_topics import _msg
+
+    topics = _load_adapter_module("src.topics")
+    plugin, ctx = _plugin(tmp_path)
+    plugin._load_reminders()
+    store = topics.new_store()
+    cafe = _msg("cafe", "甲", "咖啡店聯名", datetime.now().timestamp() - 100)
+    cafe["addressed"] = True
+    cafe_id = topics.add_member(store, None, cafe, topics.topic_line(cafe, {}))
+    plugin._topics["g1"] = store
+    plugin._focus["g1"] = "cafe"
+    at = (datetime.now() + timedelta(hours=1)).strftime("%H:%M")
+    assert _run(plugin.handle_reminder_followup("五日第二場釣魚", at, msg_id="m1", stream_id="g1"))["success"]
+    _run(plugin.fire_due_reminders(datetime.fromisoformat(plugin._reminders[0]["due"])))
+    assert len(ctx.triggered) == 1 and plugin._reminder_delivery["g1"]["topic"] is None
+    assert plugin._focus.get("g1") != "cafe", "提醒啟動時不得把舊的咖啡話題當成 Planner 焦點"
+    plugin._new_round_focus("g1")
+    assert plugin._focus.get("g1") != "cafe", "主動提醒的新一輪也不得被舊待辦拉回咖啡串"
+    plugin._join_focus({"session_id": "g1", "message_id": "bot1", "raw_message": [{"type": "text", "data": "五日第二場釣魚"}]})
+    assert store["of"]["bot1"] != cafe_id and store["topics"][cafe_id]["members"] == ["cafe"]
+
+
 def test_reminders_migrate_from_legacy_plugin(tmp_path) -> None:
     data_dir = tmp_path / "maibot-discord-adapter"
     legacy_dir = tmp_path / "luca.reminder"
