@@ -133,6 +133,67 @@ def test_sent_reply_does_not_reactivate_legacy_giant(monkeypatch) -> None:
     assert "her-next" not in store["of"], "舊巨串不應因 Bot 發言又重新活化"
 
 
+def test_model_failure_retries_unassigned_reply() -> None:
+    store = topics.new_store()
+    old = _msg("old", "甲", "T1 比賽", 1000.0)
+    topics.add_member(store, None, old, topics.topic_line(old, {}))
+    reply = _msg("reply", "乙", "遊戲特價", 1040.0, quote="old")
+    window = [old, reply]
+    numbers = {id(reply): "1", id(old): "0"}
+    questions, _, _ = topics.topic_questions(store, window, numbers, {}, 1040.0)
+    assert list(questions) == ["topic_1"]
+    assert "reply" not in store["of"]
+    retry, keys, _ = topics.topic_questions(store, window, numbers, {}, 1050.0)
+    assert list(retry) == ["topic_1"]
+    topics.apply_topics(store, keys, {"topic_1": {"choice": "none"}})
+    assert store["of"]["reply"] != store["of"]["old"]
+
+
+def test_expired_own_message_starts_new_segment() -> None:
+    store = topics.new_store()
+    old = _msg("old", "甲", "舊話題", 1000.0)
+    tid = topics.add_member(store, None, old, topics.topic_line(old, {}))
+    own = _msg("mine", "麥麥", "重新討論", 1000.0 + topics.SEGMENT_SECONDS + 1,
+               self_message=True, quote="old")
+    topics.topic_questions(store, [old, own], {}, {}, own["time"])
+    assert store["of"]["mine"] != tid
+    assert store["topics"][store["of"]["mine"]]["members"] == ["mine"]
+
+
+def test_expired_reply_opens_new_segment_without_extending_parent() -> None:
+    store = topics.new_store()
+    old = _msg("old", "甲", "舊話題", 1000.0)
+    parent = topics.add_member(store, None, old, topics.topic_line(old, {}))
+    reply = _msg("reply", "乙", "重新問", 1000.0 + topics.SEGMENT_SECONDS + 1, quote="old")
+    questions, _, _ = topics.topic_questions(store, [reply], {id(reply): "1"}, {}, reply["time"])
+    assert not questions, "沒有任何活躍候選時明確開新段，不重啟過期巨串"
+    assert store["of"]["reply"] != parent and store["topics"][parent]["members"] == ["old"]
+
+
+def test_legacy_own_message_is_preserved_in_new_segment() -> None:
+    store = topics.new_store()
+    old = _msg("legacy", "甲", "舊話題", 1000.0)
+    parent = topics.add_member(store, None, old, topics.topic_line(old, {}))
+    del store["topics"][parent]["created"]
+    own = _msg("mine", "麥麥", "回覆", 1010.0, self_message=True, quote="legacy")
+    topics.topic_questions(store, [old, own], {}, {}, own["time"])
+    assert store["of"]["mine"] != parent and store["topics"][parent]["members"] == ["legacy"]
+
+
+def test_apply_topics_is_idempotent() -> None:
+    store = topics.new_store()
+    old = _msg("old", "甲", "第一題", 1000.0)
+    topics.add_member(store, None, old, topics.topic_line(old, {}))
+    incoming = _msg("second", "乙", "第二題", 1010.0)
+    _, keys, _ = topics.topic_questions(store, [incoming], {id(incoming): "1"}, {}, 1010.0)
+    answers = {"topic_1": {"choice": "none"}}
+    topics.apply_topics(store, keys, answers)
+    tid = store["of"]["second"]
+    topics.apply_topics(store, keys, answers)
+    assert store["of"]["second"] == tid
+    assert sum(m == "second" for topic in store["topics"].values() for m in topic["members"]) == 1
+
+
 def test_recall_reads_the_focus_thread(monkeypatch) -> None:
     """分好話題後聯想直接拿焦點所在的串：火鍋那串不拿去寫關鍵字。"""
     split = _topics(topic_1="none", topic_2="none", topic_3="m1", topic_4="m2")

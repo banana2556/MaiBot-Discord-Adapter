@@ -208,12 +208,12 @@ def test_compacted_start_of_thread_subagent_thread_and_answered_calls(monkeypatc
 
     # 叫她的訊息在她送出之前就到了：她送出時 replyer 已經看過，不再列成「有人在找你」
     calling = _stamp(_message_item(alias(REPLY), "小美", "真的嗎"), t0 + 200)
-    assert "【有人在找你】" in "".join(
-        part.get("text", "")
-        for item in _planner(env, calling, tools=("reply",))[0]["modified_kwargs"]["items"]
-        if item.get("item_type") == "SystemMessageItem"
-        for part in item.get("parts", [])
+    result, _, _ = _planner(env, calling, tools=("reply",))
+    system_text = "".join(
+        part.get("text", "") for item in result["modified_kwargs"]["items"]
+        if item.get("item_type") == "SystemMessageItem" for part in item.get("parts", [])
     )
+    assert "真的嗎" not in system_text, "其他話題的叫人訊息不能經系統提示詞洩漏回焦點"
     plugin._seen_until["s1"] = t0 + 230
     assert "【有人在找你】" not in _planner(env, calling, tools=("reply",))[1]
 

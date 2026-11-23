@@ -215,7 +215,6 @@ class QuoteContextMixin:
         # 表達方式選擇不經過話題分析那個 hook，表情 ID 和表情圖在這裡拿掉
         strip_emotes(items)
         self._track_subagents(session_id, items)
-        all_messages = planner_messages(items)
         if keep := self._focus_keep(session_id):
             store = self._topics[session_id]
             items, dropped = keep_focus_items(items, set(keep), set(store["of"]))
@@ -239,7 +238,7 @@ class QuoteContextMixin:
         # 有 reply 才是 planner 本身（表達方式選擇沒有工具；睡覺時段只剩 stop，不用叫她回）
         if "reply" in tool_names(kwargs):
             self._planner_at[session_id] = time.time()
-            if note := self._calling_note(session_id, all_messages, remembered):
+            if note := self._calling_note(session_id, messages, remembered):
                 self._append_system_text(kwargs, note)
             if note := self._agenda_note(session_id):
                 self._append_system_text(kwargs, note)

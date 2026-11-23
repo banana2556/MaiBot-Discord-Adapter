@@ -238,9 +238,9 @@ def topic_questions(
         line = topic_line(message, entry)
         if message["self"]:
             own = own_topic(window, index, store, remembered)
-            if own is None:
+            if own is None or not active_topic(store["topics"][own], now):
                 add_member(store, None, message, line)
-            elif active_topic(store["topics"][own], now):
+            else:
                 add_member(store, own, message, line)
             continue
         first = store["seen"].setdefault(msg_id, now)
@@ -290,6 +290,8 @@ def apply_topics(store: Dict[str, Any], keys: Mapping[str, Mapping[str, Any]], a
     """照決策模型的答案分配；沒拿到答案的留著下一輪再問。回傳頁面摘要。"""
     parts = []
     for question_id, key in keys.items():
+        if key["msg_id"] in store["of"]:
+            continue  # 重試或重疊回合已分配，不能重複寫入甚至改串
         answer = (answers or {}).get(question_id)
         if not isinstance(answer, Mapping):
             continue
