@@ -118,6 +118,21 @@ def test_candidate_count_is_bounded_and_quoted_thread_remains_eligible() -> None
     assert "t1" in candidate_ids and len(candidate_ids) <= topics.LIVE_TOPICS + 1
 
 
+def test_sent_reply_does_not_reactivate_legacy_giant(monkeypatch) -> None:
+    from test_emote import _env
+
+    env = _env(monkeypatch)
+    plugin = env.plugin
+    store = topics.new_store()
+    msg = _msg("legacy", "甲", "老話題", 1000.0)
+    tid = topics.add_member(store, None, msg, topics.topic_line(msg, {}))
+    del store["topics"][tid]["created"]
+    plugin._topics["s1"] = store
+    plugin._focus["s1"] = "legacy"
+    plugin._join_focus({"session_id": "s1", "message_id": "her-next", "raw_message": [{"type": "text", "data": "好的"}]})
+    assert "her-next" not in store["of"], "舊巨串不應因 Bot 發言又重新活化"
+
+
 def test_recall_reads_the_focus_thread(monkeypatch) -> None:
     """分好話題後聯想直接拿焦點所在的串：火鍋那串不拿去寫關鍵字。"""
     split = _topics(topic_1="none", topic_2="none", topic_3="m1", topic_4="m2")

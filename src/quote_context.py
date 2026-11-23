@@ -33,7 +33,7 @@ from maibot_sdk import HookHandler
 
 from .emote import display_message_id, planner_messages, strip_emotes, tool_names
 from .life.common import sent_text
-from .topics import add_member, clock, earlier_items, focus_ids, unanswered
+from .topics import active_topic, add_member, clock, earlier_items, focus_ids, unanswered
 
 # 同一個聊天兩次回話（不是同一則回覆拆成幾段）之間至少隔幾秒
 REPLY_GAP_SECONDS = 8
@@ -178,8 +178,11 @@ class QuoteContextMixin:
             self._seen_until[session_id] = self._planner_at.get(session_id, now)
         if not store or focus not in store["of"] or not msg_id or msg_id in store["of"]:
             return
+        topic_id = store["of"][focus]
+        if not active_topic(store["topics"][topic_id], now):
+            return
         line = f"[{clock(now)}] （你）：{sent_text(message)[:120]}"
-        add_member(store, store["of"][focus], {"msg_id": msg_id, "user": "", "self": True, "time": now}, line)
+        add_member(store, topic_id, {"msg_id": msg_id, "user": "", "self": True, "time": now}, line)
         self._save_threads()
 
     def _calling_note(self, session_id: str, messages: Sequence[Mapping[str, Any]], remembered: Mapping[str, Any]) -> str:
