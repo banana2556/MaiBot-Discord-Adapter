@@ -918,7 +918,7 @@ class ReminderConfig(PluginConfigBase):
     )
     followup_enabled: bool = Field(
         default=True,
-        description="允許麥麥順手記下群友 24 小時內的安排，到時關心一下；關閉後麥麥看不到這個工具。",
+        description="允許麥麥順手記下群友未來一週內的安排（含模糊時間），到時關心一下；關閉後麥麥看不到這個工具。",
         json_schema_extra={"label": "順手記下", "order": 3},
     )
     followup_max_per_chat: int = Field(

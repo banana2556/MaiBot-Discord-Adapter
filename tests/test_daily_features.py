@@ -155,7 +155,7 @@ def test_reminder_set_fire_and_recurring(tmp_path) -> None:
     plugin, ctx = _plugin(tmp_path)
     plugin._load_reminders()
     once = _run(plugin.handle_reminder_set("小明請你提醒他開會", "0 9 1 1 *", False, msg_id="m1", stream_id="g1"))
-    daily = _run(plugin.handle_reminder_set("提醒大家喝水", "0 9 * * *", True, stream_id="g1"))
+    daily = _run(plugin.handle_reminder_set("提醒大家喝水", "0 9 * * *", True, msg_id="m1", stream_id="g1"))
     assert once["success"] and daily["success"]
     assert not _run(plugin.handle_reminder_cancel(once["id"], stream_id="g2"))["success"]
 
@@ -163,7 +163,7 @@ def test_reminder_set_fire_and_recurring(tmp_path) -> None:
     _run(plugin.fire_due_reminders(new_year))
 
     intents = [intent for _, intent, _ in ctx.triggered]
-    assert any("@ 小明" in intent for intent in intents)
+    assert any('attach_at=["m1"]' in intent for intent in intents)
     assert [r["content"] for r in plugin._reminders] == ["提醒大家喝水"]
     assert datetime.fromisoformat(plugin._reminders[0]["due"]) > new_year
     saved = json.loads((tmp_path / "reminders.json").read_text(encoding="utf-8"))
@@ -182,6 +182,53 @@ def test_followup_limits_and_switches(tmp_path) -> None:
     _run(plugin._apply_reminder_switches())
     assert ("maibot-discord-adapter.reminder_followup", False) in ctx.toggles
     assert ("maibot-discord-adapter.reminder_set", True) in ctx.toggles
+
+
+def test_requested_reminder_supersedes_same_source_followup(tmp_path) -> None:
+    plugin, _ = _plugin(tmp_path)
+    plugin._load_reminders()
+    at = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+    auto = _run(plugin.handle_reminder_followup("小明開會", at, msg_id="m1", stream_id="g1"))
+    assert auto["success"]
+    moment = datetime.fromisoformat(plugin._reminders[0]["due"])
+    scheduled = _run(plugin.handle_reminder_set("小明請提醒開會", f"{moment.minute} {moment.hour} {moment.day} {moment.month} *", False, msg_id="m1", stream_id="g1"))
+    assert scheduled["success"]
+    assert len(plugin._reminders) == 1 and not plugin._reminders[0]["auto"]
+    assert len(json.loads((tmp_path / "reminders.json").read_text())) == 1
+
+
+def test_followup_does_not_duplicate_existing_requested_reminder(tmp_path) -> None:
+    plugin, _ = _plugin(tmp_path)
+    plugin._load_reminders()
+    moment = datetime.now() + timedelta(hours=2)
+    cron = f"{moment.minute} {moment.hour} {moment.day} {moment.month} *"
+    requested = _run(plugin.handle_reminder_set("小明請提醒開會", cron, False, msg_id="m1", stream_id="g1"))
+    assert requested["success"]
+    at = datetime.fromisoformat(plugin._reminders[0]["due"]).strftime("%Y-%m-%d %H:%M")
+    followup = _run(plugin.handle_reminder_followup("小明開會", at, msg_id="m1", stream_id="g1"))
+    assert followup["success"] and followup.get("already_set")
+    assert len(plugin._reminders) == 1
+
+
+def test_followup_can_record_next_week_explicit_schedule(tmp_path) -> None:
+    plugin, _ = _plugin(tmp_path)
+    plugin._load_reminders()
+    at = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M")
+    assert _run(plugin.handle_reminder_followup("下週一看醫生", at, msg_id="m1", stream_id="g1"))["success"]
+
+
+def test_requested_reminder_requires_target_and_explicit_mention(tmp_path) -> None:
+    plugin, ctx = _plugin(tmp_path)
+    plugin._load_reminders()
+    moment = datetime.now() + timedelta(hours=2)
+    cron = f"{moment.minute} {moment.hour} {moment.day} {moment.month} *"
+    missing = _run(plugin.handle_reminder_set("小明請提醒開會", cron, False, stream_id="g1"))
+    assert not missing["success"], "指定提醒必須知道要標注誰，不能存一筆到點無人可標的提醒"
+    recorded = _run(plugin.handle_reminder_set("小明請提醒開會", cron, False, msg_id="m1", stream_id="g1"))
+    assert recorded["success"]
+    _run(plugin.fire_due_reminders(datetime.fromisoformat(plugin._reminders[0]["due"])))
+    intent = ctx.triggered[0][1]
+    assert 'attach_at=["m1"]' in intent and "務必標注" in intent
 
 
 def test_reminders_migrate_from_legacy_plugin(tmp_path) -> None:
@@ -207,7 +254,7 @@ def test_out_of_window_followups_are_dropped_on_load(tmp_path) -> None:
     (tmp_path / "reminders.json").write_text(json.dumps(reminders, ensure_ascii=False), encoding="utf-8")
     plugin, _ = _plugin(tmp_path)
     plugin._load_reminders()
-    assert [r["id"] for r in plugin._reminders] == ["ok1", "ask"], "只清掉超过 24 小时的顺手记下"
+    assert [r["id"] for r in plugin._reminders] == ["ok1", "ask"], "只清掉超過一週的順手記下"
     assert [r["id"] for r in json.loads((tmp_path / "reminders.json").read_text(encoding="utf-8"))] == ["ok1", "ask"]
 
 

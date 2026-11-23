@@ -62,7 +62,7 @@
   - 開啟「睡覺時不回覆」後，睡覺時段只靜默接收；被 @ 或收到私訊時有機率被吵醒，醒來後知道自己剛被吵醒。
 - **主動話題**：按 cron 排程，參考群的長期記憶和最近聊天挑幾個方向，喚醒她去找最近的熱門內容分享（預設會到 Bilibili、X、Threads 看大家在討論什麼）。插件不替她搜尋，所以 MaiBot 裡要有可用的聯網搜尋工具；兩段提示詞都能在頁面調整。她真的把連結發到群裡才算分享；寫回覆時漏了連結會自動補發，頁面紀錄會顯示每次是「已分享」還是「沒發出去」。
 - **定時提醒**：原 [maibot-reminder-plugin](https://github.com/banana2556/maibot-reminder-plugin) 併入。
-  - 工具：`reminder_set`、`reminder_followup`（順手記下 24 小時內的安排，到時關心一下）、`reminder_list`、`reminder_cancel`
+  - 工具：`reminder_set`、`reminder_followup`（順手記下未來一週內含模糊時間的安排，到時關心一下）、`reminder_list`、`reminder_cancel`
   - 指令：`/reminders`、`/reminder_cancel <id>`
   - 第一次啟動會把舊插件的 `reminders.json` 複製過來，**請停用舊的定時提醒插件**，不然提醒會重複觸發。
 

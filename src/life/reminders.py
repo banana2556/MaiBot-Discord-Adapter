@@ -23,7 +23,7 @@ from .common import save_state
 from .cron import describe, next_run, parse_at, parse_cron
 
 FOLLOWUP = "順手記下"
-FOLLOWUP_WINDOW = timedelta(hours=24)
+FOLLOWUP_WINDOW = timedelta(days=7)
 FOLLOWUP_TOOL = "reminder_followup"
 REMINDER_TOOLS = ("reminder_set", FOLLOWUP_TOOL, "reminder_list", "reminder_cancel")
 LEGACY_PLUGIN_ID = "luca.reminder"
@@ -33,7 +33,7 @@ COMMANDS = [
 ]
 TOOLS = [
     {"name": "reminder_set", "description": "有人請麥麥提醒時設定，可一次或重複"},
-    {"name": "reminder_followup", "description": "群友聊到 24 小時內的安排時麥麥順手記下，可在設定中關閉"},
+    {"name": "reminder_followup", "description": "群友聊到未來一週內的安排（含模糊時間）時順手記下；有人要求提醒則只用 reminder_set"},
     {"name": "reminder_list / reminder_cancel", "description": "麥麥查看、取消目前聊天的提醒"},
 ]
 
@@ -88,14 +88,14 @@ class ReminderMixin:
                     f"已从旧的定时提醒插件搬入提醒：{legacy}；请停用 {LEGACY_PLUGIN_ID}，否则提醒会重复触发"
                 )
         self._reminders = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-        # 旧版本（含搬过来的旧插件数据）没有 24 小时限制；合法的顺手记下不可能晚于现在 + 24 小时
+        # 舊版本可能保存超出目前順手記下範圍的記錄；只清理超過一週的順手記下。
         latest = datetime.now() + FOLLOWUP_WINDOW
         stale = [r for r in self._reminders if r.get("auto") and datetime.fromisoformat(r["due"]) > latest]
         if stale:
             self._reminders = [r for r in self._reminders if r not in stale]
             self._save_reminders()
             self.ctx.logger.warning(
-                f"順手記下只收 24 小時內，已移除 {len(stale)} 則超出範圍的舊紀錄："
+                f"順手記下只收一週內，已移除 {len(stale)} 則超出範圍的舊紀錄："
                 + "；".join(f"{r['due']} {r['content']}" for r in stale)
             )
 
@@ -161,10 +161,11 @@ class ReminderMixin:
                     if name:
                         intent += f"\n需要的話可以用 attach_at @ {name}（上面是對方之前的訊息）。"
                 else:
-                    # Maisaka 会自行决定是否回复，意图里要明确要求现在就提醒，并讲清是谁请提醒、为什么
+                    # 指定對象的正式提醒必須 @，使用真實來源訊息 ID，而非只寫名字。
                     intent = f"到了設定的提醒時間，請現在就在聊天裡發出這則提醒：{reminder['content']}"
                     if name:
-                        intent += f"\n用 reply 回覆上面 {name} 的那則訊息，並用 attach_at @ {name}。"
+                        intent += (f"\n務必標注 {name}：在 reply 工具使用 attach_at=[\"{reminder['target']['msg_id']}\"]，"
+                                   "不能只寫名字或只回覆訊息；上面已放回原訊息供解析。")
                     intent += "\n說清楚是誰請你提醒、提醒什麼、為什麼，別只丟一句沒頭沒腦的話。"
                 late_minutes = int((now - scheduled).total_seconds() // 60)
                 if late_minutes >= 1:
@@ -195,7 +196,26 @@ class ReminderMixin:
     def _save_reminders(self) -> None:
         save_state(self._reminders_path, self._reminders)
 
+    def _same_occurrence(self, stream_id: str, due: datetime, target: Optional[Dict[str, Any]], content: str) -> Optional[Dict[str, Any]]:
+        """同一聊天、同一到期時刻且同一來源訊息（或相同內容）就是同一件事。"""
+        msg_id = (target or {}).get("msg_id")
+        for existing in self._reminders:
+            if existing["stream_id"] != stream_id or existing["due"] != due.isoformat(timespec="seconds"):
+                continue
+            prior_id = (existing.get("target") or {}).get("msg_id")
+            if (msg_id and prior_id == msg_id) or existing["content"].strip() == content.strip():
+                return existing
+        return None
+
     def _add_reminder(self, reminder: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+        existing = self._same_occurrence(reminder["stream_id"], datetime.fromisoformat(reminder["due"]), reminder.get("target"), reminder["content"])
+        if existing:
+            # 正式要求優先；先順手記下後收到正式要求時原地升級，不產生兩次觸發。
+            if not reminder["auto"] and existing["auto"]:
+                existing.update({key: reminder[key] for key in ("auto", "content", "cron", "recurring", "target")})
+                self._save_reminders()
+            return {"success": True, "id": existing["id"], "already_set": True,
+                    "next_run": describe(datetime.fromisoformat(existing["due"])), "now": describe(now)}
         self._reminders.append(reminder)
         self._save_reminders()
         return {
@@ -235,7 +255,8 @@ class ReminderMixin:
 
     @Tool(
         "reminder_set",
-        description="有人請你提醒時使用，到時你會被喚醒，在目前聊天發出提醒。對方只給模糊時段時自己挑合理時刻；"
+        description="有人請你提醒時使用，到時你會被喚醒，在目前聊天發出提醒。指定提醒必須填要標注者的真實 msg_id；"
+        "如果有人請你提醒大家，填提出要求者的訊息。對方只給模糊時段時自己挑合理時刻；"
         "完全沒說時間就先問清楚再設，別亂猜。cron 是伺服器本地時間的 5 段表達式"
         "（分 時 日 月 星期），recurring=false 時只在下一次符合時提醒一次。",
         parameters={
@@ -271,6 +292,8 @@ class ReminderMixin:
             # 从当前这一分钟算起，模型按当前时刻写出的一次性 cron 也能立即触发
             due = next_run(parse_cron(cron), now.replace(second=0, microsecond=0))
             target = await self._target(msg_id, stream_id)
+            if not target:
+                raise ValueError("指定提醒必須提供要標注者的 msg_id；若是提醒大家，請選一則提出要求者的訊息")
             reminder = make_reminder(stream_id, content, due, cron=cron, recurring=recurring, target=target)
         except ValueError as exc:
             return {"success": False, "error": str(exc), "now": describe(now)}
@@ -278,11 +301,11 @@ class ReminderMixin:
 
     @Tool(
         FOLLOWUP_TOOL,
-        description="順手記下 24 小時內的未來安排，不必等群友說『提醒我』。文字、圖片或截圖提到有人之後要做的事"
-        "（例如活動截圖上的時間、『晚上要考試』、『等等去看醫生』），就呼叫 reminder_followup，不要只回覆而漏記；"
-        "同一件事已記下就不要重複。時間不必精確：只有模糊時段（下午、晚上、等等）時自己判斷一個合理時刻。"
-        "圖片上的聊天時間戳、已經過去的事不是安排；超過 24 小時的不記。覺得該提醒卻完全看不出時間時，先問對方大概幾點。"
-        "at 是伺服器本地時間 HH:MM 或 YYYY-MM-DD HH:MM，選事情開始或結束、適合關心的時刻。記下時照常回覆或不回覆，不必宣布提醒。",
+        description="順手記下未來一週內的安排，只用於沒有人明確要求提醒的閒聊；已經有人要求提醒就只用 reminder_set，兩個工具不可同時記同一件事。"
+        "對話文字、圖片或截圖有提及將來時間（明確時刻或明天、週末、下週、晚點等模糊時段）就判斷是否有值得關心的安排；"
+        "只要確有安排就呼叫，不必等『提醒我』，也不要因時間模糊而漏記。圖片上的聊天時間戳與已發生的事不是安排。"
+        "只有模糊時段時自己選合理時刻；完全無法推算時間時再詢問。at 用伺服器本地時間 HH:MM 或 YYYY-MM-DD HH:MM。"
+        "記下後照常回覆或不回覆，不必宣布提醒。",
         parameters={
             "type": "object",
             "properties": {
@@ -298,7 +321,7 @@ class ReminderMixin:
     async def handle_reminder_followup(
         self, content: str, at: str, msg_id: str = "", stream_id: str = "", **kwargs: Any
     ) -> Dict[str, Any]:
-        """顺手记下一件事；超过每个聊天的上限或不在 24 小时内时拒绝。"""
+        """順手記下一件事；超過每個聊天的上限或超出未來一週時拒絕。"""
         del kwargs
         now = datetime.now()
         reminder_config = self._load_settings().reminder
@@ -310,7 +333,7 @@ class ReminderMixin:
                 raise ValueError(f"這個聊天已經記了 {limit} 件事，先不要再記了")
             moment = parse_at(now, at)
             if moment - now > FOLLOWUP_WINDOW:
-                raise ValueError("超過 24 小時的事不記")
+                raise ValueError("超過一週的事不記")
             cron = f"{moment.minute} {moment.hour} {moment.day} {moment.month} *"
             target = await self._target(msg_id, stream_id)
             reminder = make_reminder(stream_id, content, moment, cron=cron, auto=True, target=target)
