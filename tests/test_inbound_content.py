@@ -244,6 +244,25 @@ def test_link_preview_images_reach_maibot(monkeypatch) -> None:
     assert {"type": "image", "data": "", "binary_data_base64": "img:https://p/a.jpg:None"} in raw
 
 
+def test_edit_event_keeps_late_preview_text_and_image_for_topic_analysis(monkeypatch) -> None:
+    client_module = _load_adapter_module("src.recv_handler.discord_client")
+    client = SimpleNamespace(event=lambda fn: setattr(client, fn.__name__, fn))
+    monkeypatch.setattr(client_module.discord, "Client", lambda **kwargs: client)
+    manager = _manager(client_module, [])
+    manager._thread_routing_manager.bind_client = lambda client: None
+    manager._intents_config = {}
+    manager._presence = (None, None)
+    manager._setup_client()
+    received = []
+    manager.on_card = lambda msg_id, text, image: received.append((msg_id, text, image))
+    before = _message(id=99, content="https://x/post", embeds=[])
+    after = _message(id=99, content="https://x/post", embeds=[discord.Embed.from_dict({
+        "type": "article", "title": "釣魚活動", "image": {"url": "https://p/boat.png"}
+    })])
+    asyncio.run(manager.client.on_message_edit(before, after))
+    assert received == [("99", "[链接预览: 釣魚活動]", "img:https://p/boat.png:None")]
+
+
 def test_link_wait_keeps_channel_order_and_skips_suppressed_links(monkeypatch) -> None:
     client_module = _load_adapter_module("src.recv_handler.discord_client")
     monkeypatch.setattr(client_module, "LINK_PREVIEW_POLL_SECONDS", 0.01)

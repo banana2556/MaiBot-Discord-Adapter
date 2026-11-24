@@ -66,8 +66,6 @@
     "emoji.get_by_description",
     "llm.embed",
     "config.get",
-    "person.get_id",
-    "person.get_profile",
     "jargon.match",
     "image.get_description"
   ],

@@ -244,8 +244,12 @@ def topic_questions(
                 add_member(store, own, message, line)
             continue
         first = store["seen"].setdefault(msg_id, now)
-        if (lacks_content(with_card(message, entry)) or waiting_image(entry)) and now - first < PENDING_SECONDS:
-            continue  # 卡片可能還沒到、圖片還沒識別完，下一輪再分
+        if (
+            (entry.get("preview_pending") and _URL.search(message["text"]) and not entry.get("card")
+             and not entry.get("preview_image") and not any(label in message["text"] for label in _CARD))
+            or ((lacks_content(with_card(message, entry)) or waiting_image(entry)) and now - first < PENDING_SECONDS)
+        ):
+            continue  # Discord 尚無預覽就不永久分串；沒有預覽的訊息保持待定
         options: Dict[str, Tuple[str, Any]] = {}
         criteria: Dict[str, str] = {}
         active = [tid for tid, topic in store["topics"].items() if active_topic(topic, now)]
@@ -269,8 +273,12 @@ def topic_questions(
             continue
         criteria[NONE] = NEW_TOPIC
         picture = ""
-        # 附圖只給自己上傳的圖；連結預覽的圖不附（預覽文字已經夠，也省得上傳）。表情和貼圖收訊時就不記
-        if entry.get("image") and not any(label in line for label in _CARD):
+        # 預覽有圖片時即使卡片有文字也附圖；文字不足以替代圖像內容。
+        preview_image = entry.get("preview_image") or ""
+        if preview_image:
+            images.append(f"data:image/png;base64,{preview_image}")
+            picture = f"（這則的連結預覽圖是附圖第 {len(images)} 張）"
+        elif entry.get("image") and not any(label in line for label in _CARD):
             images.append(f"data:image/png;base64,{entry['image']}")
             picture = f"（這則的圖片是附圖第 {len(images)} 張）"
         number = numbers[id(message)]

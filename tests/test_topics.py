@@ -14,6 +14,44 @@ def _msg(msg_id, user, text, time, self_message=False, quote=""):
     return {"msg_id": msg_id, "user": user, "text": text, "self": self_message, "quote": quote, "time": time}
 
 
+def test_preview_pending_is_carried_from_discord_to_topic_state(monkeypatch) -> None:
+    from test_inbound_content import _manager, _message
+    client_module = _load_adapter_module("src.recv_handler.discord_client")
+    monkeypatch.setattr(client_module, "LINK_PREVIEW_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(client_module, "LINK_PREVIEW_WAIT_SECONDS", 0.02)
+    routed = []
+    manager = _manager(client_module, routed)
+    asyncio.run(manager._on_message(_message(content="這個活動 https://example.com/post")))
+    assert routed[0]["message_info"]["additional_config"]["discord_preview_pending"] is True
+
+
+def test_link_with_caption_waits_for_preview_before_topic_assignment() -> None:
+    store = topics.new_store()
+    first = _msg("first", "甲", "今天約釣魚", 1000.0)
+    topics.add_member(store, None, first, topics.topic_line(first, {}))
+    linked = _msg("linked", "乙", "這個活動 https://example.com/post", 1010.0)
+    numbers = {id(linked): "1"}
+    questions, keys, _ = topics.topic_questions(store, [linked], numbers, {"linked": {"preview_pending": True}}, 1010.0 + topics.PENDING_SECONDS + 1)
+    assert not questions and not keys and "linked" not in store["of"]
+    card = {"linked": {"preview_pending": True, "card": "[卡片: 釣魚活動]"}}
+    questions, keys, _ = topics.topic_questions(store, [linked], numbers, card, 1011.0)
+    assert "釣魚活動" in questions["topic_1"]["instructions"]
+
+
+def test_preview_image_waits_for_description_even_with_caption() -> None:
+    store = topics.new_store()
+    first = _msg("first", "甲", "聊遊戲", 1000.0)
+    topics.add_member(store, None, first, topics.topic_line(first, {}))
+    image = _msg("image", "乙", "這張圖 [圖片]", 1010.0)
+    numbers = {id(image): "1"}
+    entry = {"image": "Q" * 200, "image_hash": "h1"}
+    questions, _, _ = topics.topic_questions(store, [image], numbers, {"image": entry}, 1010.0)
+    assert not questions and "image" not in store["of"]
+    entry["image_desc"] = "釣魚活動現場"
+    questions, _, _ = topics.topic_questions(store, [image], numbers, {"image": entry}, 1011.0)
+    assert "釣魚活動現場" in questions["topic_1"]["instructions"]
+
+
 def test_rules_pending_links_images_and_answers() -> None:
     window = [
         _msg("a", "小明", "週六吃火鍋嗎", 1000.0),
@@ -38,7 +76,12 @@ def test_rules_pending_links_images_and_answers() -> None:
     assert store["of"]["e"] == store["of"]["a"]
     assert store["of"]["b"] == store["of"]["d"] != store["of"]["a"] and summary.startswith("#2→串")
 
-    # 卡片一直沒到：等過 PENDING_SECONDS 就照網址分
+    # 已知預覽仍待到：不能把裸網址當成最後內容
+    remembered["c"] = {"preview_pending": True}
+    later, _, _ = topics.topic_questions(store, window, numbers, remembered, now=1060.0 + topics.PENDING_SECONDS)
+    assert list(later) == [], "已知 Discord 預覽待到時不能拿裸網址永久分串"
+    # 無法確定會有預覽的舊資料走原本 20 秒保底
+    remembered["c"] = {}
     later, _, _ = topics.topic_questions(store, window, numbers, remembered, now=1060.0 + topics.PENDING_SECONDS)
     assert list(later) == ["topic_3"]
     # 卡片晚到補記後就有內容
@@ -241,6 +284,23 @@ def test_recall_reads_the_focus_thread(monkeypatch) -> None:
     assert "顯卡燒了" in prompt and "火鍋" not in prompt
     texts = [message["text"] for message in _load_adapter_module("src.emote").planner_messages(result["items"])]
     assert texts == ["我顯卡燒了", "風扇有轉但沒畫面"], "planner 只看焦點所在串"
+
+
+def test_late_image_preview_is_preserved_for_topic_analysis(monkeypatch) -> None:
+    env, _ = _setup(monkeypatch, [], {})
+    env.plugin._inbound["s1"][alias(LATEST)]["preview_pending"] = True
+    env.plugin._remember_card(LATEST, "", "Q" * 200)
+    entry = env.plugin._inbound["s1"][alias(LATEST)]
+    assert entry["preview_image"] == "Q" * 200
+    env.plugin._remember_card(LATEST, "[链接预览: 釣魚活動]")
+    window = [_msg(alias(LATEST), "小美", "看這個 https://x.com/post", 1010.0)]
+    store = topics.new_store()
+    first = _msg("first", "甲", "舊話題", 1000.0)
+    topics.add_member(store, None, first, topics.topic_line(first, {}))
+    assert entry["card"] == "[链接预览: 釣魚活動]"
+    questions, _, images = topics.topic_questions(store, window, {id(window[0]): "1"}, {alias(LATEST): entry}, 1011.0)
+    assert "釣魚活動" in questions["topic_1"]["instructions"]
+    assert len(images) == 1 and images[0].endswith("Q" * 200)
 
 
 def test_late_link_card_is_remembered_and_shown(monkeypatch) -> None:

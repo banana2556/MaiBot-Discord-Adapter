@@ -1,25 +1,10 @@
-"""聯想：回話之前先讀懂這串在聊什麼，像人一樣：看到對話 → 找出它所在的話題串 → 想起這串裡的人、詞和相關的事。
+"""話題串聯想：只比對這串的詞彙和群記憶，交決策模型挑選後提供給 planner。
 
-每輪話題分析（emote._analyze）分完話題、選好焦點之後做：
-
-1. 話題：焦點所在的話題串（topics.py）；還沒分到串時只有焦點那一則。
-2. 理解這串，三件事同時查：
-   - 人物：這串的參與者（發話的、被 @ 的）的人物畫像（person.get_profile，和 planner 內建 query_person_profile 同一個來源）。
-     畫像變得慢，每人快取 PROFILE_TTL_SECONDS。
-   - 詞彙：只拿這串的文字比對這個群學過的黑話（jargon.match）；英數詞要整個詞對上（「FF14」裡的 FF 不算 FF）。
-     MaiBot 原本拿整段上下文比對的 <jargon> 由 quote_context 拿掉，免得兩份。
-   - 記憶：請小模型把這串寫成檢索關鍵字（整段原文向量比對分數過不了門檻），查群記憶。
-3. 整合：問決策模型：看得懂這段在聊什麼嗎、哪一筆記憶最有關（可選都無關）。
-   記憶只當候選、讓上下文挑（Kintsch 的 construction-integration），沒選中就不給。
-4. 整理成一段「這串的理解」：人物、詞彙、選中的記憶；看不懂時提醒她可以先查（給關鍵字）或用問的。
-   要不要上網查由 planner 自己決定。接在 planner 系統提示詞後面，同一回合每次請求都帶，換了焦點才換；replyer 也看得到。
-
-person.get_profile、jargon.match 是 banana2556/MaiBot custom 分支加的能力；原版 MaiBot 沒有時那兩段就是空的。
+不主動查詢或注入人物畫像；人物資訊由 MaiBot 原生機制按需處理。
 """
 
 import asyncio
 import re
-import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from maibot_sdk import HookHandler
@@ -39,15 +24,10 @@ from .topics import (
     with_card,
 )
 
-# 群記憶取幾筆、最多看幾個人、最多給幾個詞
+# 群記憶取幾筆、最多給幾個詞
 MEMORY_HITS = 3
-MAX_PEOPLE = 4
 JARGON_LIMIT = 8
-# 人物畫像快取多久；給 planner 的單人畫像最多幾個字。reply 只附目標訊息相關的人物與詞彙。
-PROFILE_TTL_SECONDS = 1800
-PROFILE_CHARS = 400
-# 人物畫像取哪幾段（照 MaiBot 自己注入畫像時的段落）；黑話的意思最多幾個字
-PROFILE_SECTIONS = ("身份设定", "关系设定", "稳定了解", "相处偏好")
+# 黑話的意思最多幾個字
 TERM_CHARS = 60
 NOTE_MEMORY_CHARS = 160
 # 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
@@ -114,8 +94,7 @@ def tidy(memory: str, limit: int = NOTE_MEMORY_CHARS) -> str:
 
 
 def whole_terms(jargons: Sequence[Mapping[str, str]], texts: Sequence[str], names: Sequence[str] = ()) -> List[Dict[str, str]]:
-    """黑話比對是字串包含：英數詞要整個詞對上才算（「FF14」裡的 FF、「T1000」裡的 T1 不算）；
-    參與者的暱稱（「五星」是「五星爛卡」）不算，人物那段已經有。意思只留第一句。"""
+    """這串文字中命中的黑話；英數詞須完整匹配，暱稱不當成詞。"""
     joined = "\n".join(texts)
     kept = []
     for item in jargons:
@@ -127,34 +106,6 @@ def whole_terms(jargons: Sequence[Mapping[str, str]], texts: Sequence[str], name
         meaning = re.split(r"(?<=[。！？!?])", str(item.get("meaning") or "").strip(), maxsplit=1)[0]
         kept.append({"content": term, "meaning": clip(meaning, TERM_CHARS)})
     return kept
-
-
-def profile_brief(profile: str) -> str:
-    """人物畫像縮成完整的長期事實：只取身份、關係、穩定了解、相處偏好，
-    跳過近期互動、不確定和維護備註；非結構化摘要也不截斷半句。"""
-    text = str(profile or "").strip()
-    if not text.startswith("# 人物画像"):
-        if len(text) <= PROFILE_CHARS:
-            return text
-        portion = text[:PROFILE_CHARS]
-        endings = [portion.rfind(mark) for mark in "。！？!?；;"]
-        end = max(endings)
-        return portion[:end + 1] if end >= PROFILE_CHARS // 3 else ""
-    sections: Dict[str, List[str]] = {}
-    title = ""
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("## "):
-            title = line[3:].strip()
-        elif title and line.startswith("- ") and line != "- 暂无":
-            sections.setdefault(title, []).append(line[2:].strip())
-    facts = [fact for section in PROFILE_SECTIONS for fact in sections.get(section, [])]
-    kept = []
-    for fact in facts:
-        if len("；".join([*kept, fact])) > PROFILE_CHARS:
-            continue  # 完整保留有意義的事實，不把一句人物資料切成半句
-        kept.append(fact)
-    return "；".join(kept)
 
 
 def thread_messages(window: Sequence[Mapping[str, Any]], members: Sequence[str]) -> List[Mapping[str, Any]]:
@@ -170,31 +121,6 @@ def thread_messages(window: Sequence[Mapping[str, Any]], members: Sequence[str])
     ]
 
 
-def participants(
-    window: Sequence[Mapping[str, Any]],
-    focus: Mapping[str, Any],
-    context: Sequence[str],
-    remembered: Mapping[str, Mapping[str, Any]],
-    bot_id: str,
-) -> List[Dict[str, str]]:
-    """這串的參與者：要回那則的發話人、那則 @ 的人、這串其他發話人（新的先）；不含她自己，最多 MAX_PEOPLE 個。"""
-    by_id = {message["msg_id"]: message for message in window}
-    people: Dict[str, Dict[str, str]] = {}
-
-    def add(msg_id: str) -> None:
-        message, entry = by_id.get(msg_id), remembered.get(msg_id) or {}
-        if message and not message["self"] and entry.get("user_id"):
-            people.setdefault(entry["user_id"], {"user_id": entry["user_id"], "name": plain(message["user"]), "platform": entry["platform"]})
-
-    add(focus["msg_id"])
-    entry = remembered.get(focus["msg_id"]) or {}
-    for user_id, name in (entry.get("mentioned") or {}).items():
-        people.setdefault(user_id, {"user_id": user_id, "name": plain(name), "platform": entry["platform"]})
-    for msg_id in reversed(context):
-        add(msg_id)
-    return [person for user_id, person in people.items() if user_id != bot_id][:MAX_PEOPLE]
-
-
 def probability(answer: Mapping[str, Any], option: str) -> float:
     """決策模型給某個選項的機率；沒給機率時只信它選的那個（用 confidence）。"""
     probabilities = answer.get("probabilities")
@@ -205,18 +131,15 @@ def probability(answer: Mapping[str, Any], option: str) -> float:
 
 
 def understanding_lines(recall: Mapping[str, Any]) -> List[str]:
-    """人物和詞彙那兩段（planner、replyer 和決策模型都看這一份）。"""
+    """這串相關的詞彙（planner、replyer 和決策模型都看這一份）。"""
     lines = []
-    people = [person for person in recall["people"] if person.get("profile")]
-    if people:
-        lines += ["人物：", *(f"- {person['name']}：{person['profile']}" for person in people)]
     if recall["terms"]:
         lines += ["詞彙：", *(f"- {term['content']}：{term['meaning']}" for term in recall["terms"])]
     return lines
 
 
 def recall_state(recall: Mapping[str, Any], number: str) -> str:
-    """接在決策模型 state 後面：要回的是哪則、這串、這串的人物和詞彙，和想起的記憶（m 編號）。"""
+    """接在決策模型 state 後面：要回的是哪則、這串、相關詞彙與候選記憶。"""
     lines = [f"\n\n【聯想】#{number} 是你要回的那則，它和這幾則在聊同一件事：\n{recall['thread_text']}", *understanding_lines(recall)]
     if recall["hits"]:
         lines.append("你想起的群聊記憶（可能不對）：" + "".join(f"\nm{index}. {tidy(hit, 300)}" for index, hit in enumerate(recall["hits"], 1)))
@@ -228,9 +151,9 @@ def recall_questions(recall: Mapping[str, Any], number: str) -> Dict[str, Dict[s
     questions = {
         UNDERSTAND: {
             "type": "choice",
-            "instructions": f"#{number} 和上面跟它在聊同一件事的那幾則，加上你對這些人和詞的了解，你看得懂在聊什麼嗎？",
+            "instructions": f"#{number} 和上面跟它在聊同一件事的那幾則，加上你對相關詞彙的了解，你看得懂在聊什麼嗎？",
             "criteria": {
-                "yes": "看得懂：靠常識、對這些人和詞的了解或想起的記憶就知道在聊什麼",
+                "yes": "看得懂：靠常識、相關詞彙或想起的記憶就知道在聊什麼",
                 "no": "看不懂：有不認識的遊戲、作品、人物、新聞、梗或術語，要先查",
             },
         }
@@ -243,7 +166,7 @@ def recall_questions(recall: Mapping[str, Any], number: str) -> Dict[str, Dict[s
 
 
 def recall_note(recall: Mapping[str, Any], picked: str, pick_confidence: float, understood: float) -> str:
-    """給 planner（和 replyer）的「這串的理解」：人物、詞彙、選中的記憶、看不懂時的提醒；都沒有時是空字串。
+    """給 planner（和 replyer）的「這串的理解」：詞彙、選中的記憶與不確定提醒。
 
     Args:
         pick_confidence: 選中那筆記憶的機率。
@@ -259,23 +182,13 @@ def recall_note(recall: Mapping[str, Any], picked: str, pick_confidence: float, 
 
 
 def recall_detail(recall: Mapping[str, Any], note: str) -> str:
-    """判斷詳情裡的聯想經過，分段給人看：話題串、人物、詞彙、記憶、最後給 planner 的那段。"""
-    people = []
-    for person in recall["people"]:
-        if person.get("profile"):
-            state = person["profile"]
-        else:
-            state = MISSED if person.get("missed") else "沒有畫像" if person.get("person_id") else "找不到這個人的人物 ID"
-        people.append(f"- {person['name']}：{state}")
+    """判斷詳情：話題串、詞彙、記憶、最後給 planner 的內容。"""
     terms = "、".join(term["content"] for term in recall["terms"])
     how = "" if recall.get("keywords") else "（小模型沒寫出關鍵字，改用這串的原文）"
     hits = [f"- m{index}. {tidy(hit, 120)}" for index, hit in enumerate(recall["hits"], 1)]
     lines = [
         f"【話題串】{recall.get('topic_label', '')}",
         *(hide_urls(line) for line in recall["walk"]),
-        "",
-        "【人物】",
-        *(people or ["- 沒有"]),
         "",
         f"【詞彙】{terms or '沒有比對到'}",
         "",
@@ -291,7 +204,7 @@ def recall_detail(recall: Mapping[str, Any], note: str) -> str:
 def recall_view(
     recall: Mapping[str, Any], picked: str, pick_confidence: float, understand: Mapping[str, Any], note: str
 ) -> Dict[str, Any]:
-    """「話題串」頁畫泡泡用的結構：這串的對話（焦點標出來）、人物、詞彙、選中的記憶、看不看得懂。"""
+    """「話題串」頁泡泡：這串對話、詞彙、選中的記憶與理解程度。"""
     focus = recall["focus"]["msg_id"]
     verdict = str(understand.get("choice") or "")
     return {
@@ -306,14 +219,6 @@ def recall_view(
             for message in recall["said"]
         ],
         "topic": recall.get("topic_label", ""),
-        "people": [
-            {
-                "name": person["name"],
-                "profile": person.get("profile") or "",
-                "state": "" if person.get("profile") else MISSED if person.get("missed") else "沒有畫像",
-            }
-            for person in recall["people"]
-        ],
         "terms": list(recall["terms"]),
         "memory": {"text": tidy(picked), "p": round(pick_confidence, 2)} if picked else None,
         "understood": {"verdict": verdict, "p": round(probability(understand, verdict), 2) if verdict else None},
@@ -327,10 +232,8 @@ class RecallMixin:
     """需要主插件提供 ctx、_append_system_text、_client_manager，和 EmoteMixin 的 _topics、_focus、_inbound。"""
 
     def _init_recall_state(self) -> None:
-        # 每個聊天最近一次聯想：{"focus": msg_id, "note": 給 planner / replyer 的那段}
+        # 每個聊天最近一次聯想：{"focus": msg_id, "note": 給 planner 的那段}
         self._recalls: Dict[str, Dict[str, Any]] = {}
-        # 人物畫像快取：person_id -> (查的時間 time.monotonic, 畫像文字)
-        self._profiles: Dict[str, tuple[float, str]] = {}
 
     async def _search_memory(self, session_id: str, query: str) -> Optional[List[str]]:
         """查這個群看得到的記憶（和 planner 內建 query_memory 一樣限定這個聊天）。
@@ -356,40 +259,6 @@ class RecallMixin:
             self.ctx.logger.warning(f"聯想：讀取記憶失敗或逾時（最多等 {SEARCH_TIMEOUT_SECONDS} 秒）：{result.get('error')}")
             return None
         return parse_hits(result)
-
-    async def _person_id(self, person: Mapping[str, str]) -> str:
-        try:
-            result = await self.ctx.call_capability("person.get_id", platform=person["platform"], user_id=person["user_id"])
-        except Exception:  # 換不到人物 ID 就不查這個人
-            return ""
-        return result if isinstance(result, str) else ""
-
-    async def _profile(self, session_id: str, person: Dict[str, str]) -> None:
-        """這個人的人物畫像（摘要＋特徵），寫進 person["profile"]；查不到時留空，逾時或失敗另外標 missed。"""
-        person_id = person.get("person_id") or ""
-        cached = self._profiles.get(person_id)
-        if not person_id:
-            return
-        if cached and time.monotonic() - cached[0] < PROFILE_TTL_SECONDS:
-            person["profile"] = cached[1]
-            return
-        try:
-            result = await asyncio.wait_for(
-                self.ctx.call_capability("person.get_profile", person_id=person_id, chat_id=session_id), SEARCH_TIMEOUT_SECONDS
-            )
-        except Exception as exc:  # 讀不到畫像這輪就少這個人
-            result = {"success": False, "error": repr(exc)}
-        if not isinstance(result, Mapping) or not result.get("success"):
-            person["missed"] = "1"
-            return
-        summary = str(result.get("summary") or "").strip()
-        traits = "、".join(str(trait) for trait in result.get("traits") or [] if str(trait).strip())
-        if summary.startswith("# 人物画像"):
-            text = profile_brief(summary)  # 結構化畫像已經包含特徵
-        else:
-            text = clip(summary + (f"（{traits}）" if traits else ""), PROFILE_CHARS)
-        self._profiles[person_id] = (time.monotonic(), text)
-        person["profile"] = text
 
     async def _terms(self, session_id: str, texts: Sequence[str], names: Sequence[str]) -> List[Dict[str, str]]:
         """這串的文字裡出現的、這個群學過的黑話；能力不存在或失敗時是空清單。"""
@@ -441,9 +310,8 @@ class RecallMixin:
         numbers: Mapping[int, str],
         focus: Mapping[str, Any],
     ) -> Dict[str, Any]:
-        """焦點所在的這串和參與者，同時查人物畫像、這串的黑話和群記憶。"""
+        """焦點所在的話題串，檢索這串的黑話和群記憶；人物畫像交由 MaiBot 原生功能按需查。"""
         said, walk, topic_label = self._thread(session_id, window, numbers, focus)
-        context = [message["msg_id"] for message in said if message["msg_id"] != focus["msg_id"]]
         # 叫她的 @ 換成「@你」：她的 Discord 暱稱會被小模型當成要查的詞
         bot = self._bot_name()
         chat = "\n".join(
@@ -452,20 +320,13 @@ class RecallMixin:
             + message["text"].replace(f"@「{bot}」", "@你").replace(f"@{bot}", "@你")
             for message in said
         )
-        user = getattr(getattr(self._client_manager, "client", None), "user", None)
-        people = participants(window, focus, context, remembered, str(getattr(user, "id", "") or ""))
-        query, person_ids = await asyncio.gather(
-            self._recall_query(chat), asyncio.gather(*(self._person_id(person) for person in people))
-        )
+        query = await self._recall_query(chat)
         keywords = bool(query)
         # 寫不出關鍵字時用原文查，網址拿掉（向量比對時一長串網址只會變成雜訊）
         query = query or " ".join(_URL.sub(" ", message["text"]).strip() for message in said).strip()
-        for person, person_id in zip(people, person_ids, strict=True):
-            person["person_id"] = person_id
-        hits, terms, *_ = await asyncio.gather(
+        hits, terms = await asyncio.gather(
             self._search_memory(session_id, query),
-            self._terms(session_id, [message["text"] for message in said], [person["name"] for person in people]),
-            *(self._profile(session_id, person) for person in people),
+            self._terms(session_id, [message["text"] for message in said], []),
         )
         return {
             "focus": focus,
@@ -476,26 +337,27 @@ class RecallMixin:
             "topic_label": topic_label,
             "query": query,
             "keywords": keywords,
-            "people": people,
+            "people": [],
             "terms": terms,
             "hits": hits or [],
             "missed": hits is None,
         }
 
     async def _wait_for_focus_content(self, session_id: str, window: Sequence[Mapping[str, Any]]) -> None:
-        """要回的那則只有網址時等 Discord 補上連結卡片（_remember_card），最多 FOCUS_WAIT_SECONDS 秒；
-        有圖片還沒識別完時等 MaiBot 寫好描述，最多 IMAGE_WAIT_SECONDS 秒。其他圖片已經好的描述順便取回來。"""
+        """要回的那則預覽或圖片尚未到時稍候，已拿到的描述即時補進話題資料。"""
         remembered = self._inbound.get(session_id, {})
         await self._fetch_image_descriptions(session_id, window)
         focus = focus_message(window, remembered, self._seen_until.get(session_id, 0.0))
         if focus is None:
             return
         loop = asyncio.get_running_loop()
-        image = waiting_image(remembered.get(focus["msg_id"]) or {})
+        entry = remembered.get(focus["msg_id"]) or {}
+        image = waiting_image(entry)
         deadline = loop.time() + (IMAGE_WAIT_SECONDS if image else FOCUS_WAIT_SECONDS)
         while loop.time() < deadline:
             entry = remembered.get(focus["msg_id"]) or {}
-            if not lacks_content(with_card(focus, entry)) and not waiting_image(entry):
+            pending_preview = entry.get("preview_pending") and _URL.search(focus["text"]) and not (entry.get("card") or entry.get("preview_image"))
+            if not pending_preview and not lacks_content(with_card(focus, entry)) and not waiting_image(entry):
                 return
             await asyncio.sleep(1.0 if image else 0.5)
             await self._fetch_image_descriptions(session_id, [focus])
@@ -519,12 +381,15 @@ class RecallMixin:
                 if store:
                     describe_member(store, message["msg_id"], description)
 
-    def _remember_card(self, message_id: str, card: str) -> None:
-        """Discord 晚一點才展開連結預覽（訊息編輯事件，正文沒變）：把卡片文字補記在那則訊息上，分話題和聯想用得到。"""
+    def _remember_card(self, message_id: str, card: str, image: str = "") -> None:
+        """預覽延遲到達時補上卡片文字或圖片，供未分配的話題使用。"""
         key = display_message_id(message_id)
         for remembered in self._inbound.values():
             if key in remembered:
-                remembered[key]["card"] = card
+                if card:
+                    remembered[key]["card"] = card
+                if image:
+                    remembered[key]["preview_image"] = image
 
     async def _recall_query(self, chat: str) -> str:
         """請小模型把這段聊天寫成檢索關鍵字；失敗或它看不出在聊什麼時回傳空字串（改用原文查）。"""
@@ -560,19 +425,13 @@ class RecallMixin:
         understood = probability(understand, "yes") if understand else 1.0
         note = recall_note(recall, picked, probability(pick, choice), understood)
         said = [message for message in recall["said"] if not message["self"]]
-        source = self._inbound.get(session_id, {})
         targets = {
-            message["msg_id"]: {
-                "user_ids": [str((source.get(message["msg_id"]) or {}).get("user_id") or ""),
-                             *((source.get(message["msg_id"]) or {}).get("mentioned") or {})],
-                "text": message["text"],
-            }
+            message["msg_id"]: {"text": message["text"]}
             for message in said
         }
         self._recalls[session_id] = {"focus": recall["focus"]["msg_id"], "note": note,
-                                     "people": recall["people"], "terms": recall["terms"], "targets": targets}
+                                     "terms": recall["terms"], "targets": targets}
         verdict = str(understand.get("choice") or "")
-        known = sum(1 for person in recall["people"] if person.get("profile"))
         parts = [
             f"{'看不懂' if lost else '看得懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "沒拿到判斷",
             f"想到 m{index}（{probability(pick, choice):.2f}）"
@@ -580,13 +439,12 @@ class RecallMixin:
             else "群記憶沒等到（逾時或失敗）"
             if recall["missed"]
             else f"記憶 {len(recall['hits'])} 筆都沒選",
-            f"人 {known}/{len(recall['people'])}",
             f"詞 {len(recall['terms'])}",
         ]
         columns = {
             "topic": recall.get("topic_label", ""),
             "understood": f"{'不懂' if lost else '懂'} {probability(understand, verdict):.2f}" if verdict in ("yes", "no") else "—",
-            "memory": "檢索逾時" if recall["missed"] else f"{len(recall['hits'])} 筆・人 {known}/{len(recall['people'])}・詞 {len(recall['terms'])}",
+            "memory": "檢索逾時" if recall["missed"] else f"{len(recall['hits'])} 筆・詞 {len(recall['terms'])}",
         }
         return "・".join(parts), recall_detail(recall, note), columns, recall_view(recall, picked, probability(pick, choice), understand, note)
 
@@ -616,12 +474,8 @@ class RecallMixin:
         if target not in recall.get("targets", {}):
             return {"action": "continue"}
         details = recall["targets"][target]
-        people = [person for person in recall.get("people", [])
-                  if person.get("profile") and person.get("user_id") in details["user_ids"]]
         terms = [term for term in recall.get("terms", []) if term["content"] in details["text"]]
         lines = []
-        if people:
-            lines += ["人物：", *(f"- {person['name']}：{person['profile']}" for person in people)]
         if terms:
             lines += ["詞彙：", *(f"- {term['content']}：{term['meaning']}" for term in terms)]
         note = NOTE_HEAD + "\n" + "\n".join(lines) if lines else ""

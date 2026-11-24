@@ -305,6 +305,8 @@ class EmoteMixin:
         info = message.get("message_info") if isinstance(message.get("message_info"), Mapping) else {}
         group = info.get("group_info") if isinstance(info.get("group_info"), Mapping) else {}
         user = info.get("user_info") if isinstance(info.get("user_info"), Mapping) else {}
+        extra = (info or {}).get("additional_config") or {}
+        extra = extra if isinstance(extra, Mapping) else {}
         message_id = str(message.get("message_id") or "")
         self._unanalyzed.add(session_id)
         if message_id:
@@ -323,6 +325,7 @@ class EmoteMixin:
             "platform": str(message.get("platform") or DEFAULT_PLATFORM_NAME),
             "user_id": str(user.get("user_id") or ""),
             "mentioned": mentioned_people(message),
+            "preview_pending": bool(extra.get("discord_preview_pending")),
             # 第一張圖片（base64）：分話題時直接附給決策模型看，不等主程式寫圖片描述
             "image": first_image(message),
             # 圖片的 sha256：向 MaiBot 拿識圖寫好的描述（image.get_description）

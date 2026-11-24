@@ -110,8 +110,8 @@ class DiscordClientManager:
         self._gateway_name = gateway_name
         self._gateway_capability = gateway_capability
         self._message_handler = message_handler
-        # 連結預覽晚到時呼叫：(Discord 訊息 ID, 卡片文字)；插件啟動後設定
-        self.on_card: Optional[Callable[[str, str], None]] = None
+        # 連結預覽晚到時呼叫：(Discord 訊息 ID, 卡片文字, 預覽圖 base64)；插件啟動後設定
+        self.on_card: Optional[Callable[[str, str, str], None]] = None
         self._thread_routing_manager = thread_routing_manager
         self._chat_filter = chat_filter
         self._filter_config = filter_config
@@ -193,10 +193,14 @@ class DiscordClientManager:
             if before.content != after.content:
                 await self._on_message_change(after, before)
             elif len(after.embeds) > len(before.embeds) and self.on_card is not None:
-                cards = [self._message_handler._embed_text_segment(embed) for embed in after.embeds[len(before.embeds) :]]
+                new_embeds = after.embeds[len(before.embeds) :]
+                cards = [self._message_handler._embed_text_segment(embed) for embed in new_embeds]
                 text = " ".join(str(seg.data) for seg in cards if seg is not None)
-                if text:
-                    self.on_card(str(after.id), text)
+                images = [segment for embed in new_embeds for segment in await self._message_handler._embed_segments(embed)
+                          if segment.type == "image"]
+                image = str(images[0].data) if images else ""
+                if text or image:
+                    self.on_card(str(after.id), text, image)
 
         @client.event
         async def on_message_delete(message: discord.Message) -> None:
@@ -374,7 +378,12 @@ class DiscordClientManager:
                 message_dict = await self._message_handler.handle_discord_message(message)
                 if message_dict is None:
                     return
-
+                if (
+                    not message.embeds
+                    and not message.flags.suppress_embeds
+                    and _PREVIEWABLE_LINK.search(message.content or "")
+                ):
+                    message_dict["message_info"]["additional_config"]["discord_preview_pending"] = True
                 await self._gateway_capability.route_message(
                     self._gateway_name,
                     message_dict,

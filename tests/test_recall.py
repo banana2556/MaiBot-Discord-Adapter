@@ -89,6 +89,17 @@ def _run(env, planner=None):
     return asyncio.run(run())
 
 
+def test_plugin_does_not_fetch_or_inject_profiles(monkeypatch) -> None:
+    picked = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, calls = _setup(monkeypatch, [SAME_THREAD, picked], {})
+    result = _run(env)
+    assert not any(name in ("person.get_id", "person.get_profile") for name, _ in calls)
+    note = result["items"][0]["parts"][-1]["text"]
+    assert "阿華主玩 R6" not in note and "人物：" not in note
+    reply = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LAUGH))
+    assert "人物：" not in str(reply)
+
+
 def test_pieces() -> None:
     assert recall.parse_hits("你知道这些知识: 1. A 常玩 R6\n2. 上週在排位") == ["A 常玩 R6", "上週在排位"]
     assert recall.parse_hits("你不太了解有关x的知识") == [] and recall.parse_hits({"success": False}) == []
@@ -101,15 +112,6 @@ def test_pieces() -> None:
     long = [{"content": "T1", "meaning": "「T1」指韓國英雄聯盟戰隊。上下文在討論選手與陣容，例如宙斯、Oner。"}, {"content": "五星", "meaning": "某人的暱稱"}]
     terms = recall.whole_terms(long, ["T1 又換人", "五星說的"], ["五星爛卡"])
     assert terms == [{"content": "T1", "meaning": "「T1」指韓國英雄聯盟戰隊。"}], "意思只留第一句；參與者的暱稱不當黑話"
-    profile = (
-        "# 人物画像\n人物ID: 01e0bd\n主称呼: 糖奶\n别名: 「糖奶」、糖奶\n\n## 身份设定\n- 糖奶从事优化工程方法相关工作。\n\n"
-        "## 关系设定\n- 糖奶要求资讯科全员通过其面试。\n\n## 稳定了解\n- 暂无\n\n## 相处偏好\n- 暂无\n\n"
-        "## 近期互动\n- 一\n- 二\n- 三\n\n## 不确定信息\n- 可能是学生\n\n## 维护备注\n- 自动画像仅供内部参考。"
-    )
-    assert recall.profile_brief(profile) == "糖奶从事优化工程方法相关工作。；糖奶要求资讯科全员通过其面试。", (
-        "只保留身份、關係等長期有效事實；跳過最近互動、不確定和維護備註"
-    )
-    assert recall.profile_brief("# 人物画像\n人物ID: x\n## 身份设定\n- 暂无") == "", "全部暂无就當沒有畫像"
     window = [
         {"msg_id": "a", "user": "「A」", "self": False, "text": "x"},
         {"msg_id": "b", "user": "「B」", "self": False, "text": "x"},
@@ -125,24 +127,6 @@ def test_pieces() -> None:
     }
     assert topics.focus_message(window, remembered)["msg_id"] == "c", "她說話之後叫她的優先"
     assert topics.focus_message(window, {})["msg_id"] == "d", "沒人叫她就是最新一則"
-    people = recall.participants(window, window[4], ["a", "b"], remembered, "bot")
-    assert [person["name"] for person in people] == ["D", "E", "B", "A"], "發話人、@ 的人、這串其他人（新的先）；不含她自己"
-
-
-def test_unstructured_profile_does_not_end_mid_sentence() -> None:
-    summary = "小明經常參加釣魚活動。" * 50 + "這句是長段的開頭，還沒交代完畢。"
-    brief = recall.profile_brief(summary)
-    assert len(brief) <= recall.PROFILE_CHARS
-    assert brief.endswith("。") and not brief.endswith("…")
-
-
-def test_profile_brief_keeps_complete_relevant_facts_across_sections() -> None:
-    identity = "這個人經營遊戲活動並負責協調提醒安排，" + "熟悉每週活動時程和參加者分工。" * 5
-    relation = "與群友小明約定釣魚場次，提醒時應提及小明。"
-    profile = f"# 人物画像\n## 身份设定\n- {identity}\n## 关系设定\n- {relation}\n## 近期互动\n- 昨天討論舊商品"
-    brief = recall.profile_brief(profile)
-    assert relation in brief and "昨天討論舊商品" not in brief
-    assert all(part.endswith(("。", "！", "？")) for part in brief.split("；")), "不能將人物事實截成半句"
 
 
 def test_reply_without_explicit_target_does_not_inherit_entire_thread_recall(monkeypatch) -> None:
@@ -152,17 +136,15 @@ def test_reply_without_explicit_target_does_not_inherit_entire_thread_recall(mon
     assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id="")) == {"action": "continue"}
 
 
-def test_reply_note_only_has_people_from_the_message_being_replied_to(monkeypatch) -> None:
+def test_reply_only_gets_terms_used_in_target_without_profiles(monkeypatch) -> None:
     picked = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
     env, _ = _setup(monkeypatch, [SAME_THREAD, picked], {})
     _run(env)
-    result = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LAUGH, extra_prompt="前面"))
+    result = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LATEST, extra_prompt="前面"))
     note = result["modified_kwargs"]["extra_prompt"]
-    assert "阿華主玩 R6" in note
-    assert "人物：" in note and "@你" not in note
-    assert "小美：" not in note and "小明：" not in note, "其他同串參與者不是這則的回覆對象"
-    assert "詞彙：" not in note, "要回的那則沒提及 MP5 / 羚羊，就不要灌入無關術語"
-    assert "群裡以前聊過" not in note, "不把整串的檢索記憶當成對這則的已知事實"
+    assert "MP5：一把衝鋒槍" in note and "羚羊：R6 幹員 Thermite" in note
+    assert "人物：" not in note and "群裡以前聊過" not in note
+    assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LAUGH)) == {"action": "continue"}
 
 
 def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
@@ -179,15 +161,14 @@ def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
     assert (
         "【聯想】#3 是你要回的那則，它和這幾則在聊同一件事：\n"
         "#1 「小明」：今天好累\n#2 「阿華」：晚上要打R6嗎\n#3 「小美」：羚羊拿MP5打盾牌\n"
-        "人物：\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）\n詞彙：\n- MP5：一把衝鋒槍\n- 羚羊：R6 幹員 Thermite\n"
+        "詞彙：\n- MP5：一把衝鋒槍\n- 羚羊：R6 幹員 Thermite\n"
     ) in state, "決策模型判斷看不看得懂時也知道這些人和詞"
     assert "m1. 2026-08-28 阿華：晚上R6／小明：（連結）" in state
     assert list(questions["recall_pick"]["criteria"]) == ["m1", "m2", "none"]
 
     jargon = next(kwargs for name, kwargs in calls if name == "jargon.match")
     assert jargon["session_id"] == "s1" and jargon["texts"] == ["今天好累", "晚上要打R6嗎", "羚羊拿MP5打盾牌"], "只比對這串"
-    profiles = [kwargs for name, kwargs in calls if name == "person.get_profile"]
-    assert {kwargs["person_id"] for kwargs in profiles} == {"p-u1", "p-u2", "p-u3"} and profiles[0]["chat_id"] == "s1"
+    assert not any(name in ("person.get_id", "person.get_profile") for name, _ in calls)
     searches = [kwargs for name, kwargs in calls if name == "knowledge.search"]
     assert [(kwargs["query"], kwargs["group_id"], "person_id" in kwargs) for kwargs in searches] == [("R6 羚羊 MP5 盾牌", "10", False)], (
         "只用關鍵字查一次群記憶，不再一個個人去撈聊天原文"
@@ -197,18 +178,17 @@ def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
     note = result["items"][0]["parts"][-1]["text"]
     assert note == (
         f"{NOTE_HEAD}\n"
-        "人物：\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）\n"
         "詞彙：\n- MP5：一把衝鋒槍\n- 羚羊：R6 幹員 Thermite\n"
         "記憶：\n- 群裡以前聊過（把握 0.70）：2026-08-28 阿華：晚上R6／小明：（連結）"
     )
     assert not any("<jargon>" in str(item) for item in result["items"]), "MaiBot 整段上下文比對的黑話拿掉"
 
-    summary = "看得懂 0.90・想到 m1（0.70）・人 1/3・詞 2"
+    summary = "看得懂 0.90・想到 m1（0.70）・詞 2"
     record = env.plugin._decision_stats.state["decisions"][0]
-    assert record["recall"] == summary and record["columns"]["memory"] == "2 筆・人 1/3・詞 2"
+    assert record["recall"] == summary and record["columns"]["memory"] == "2 筆・詞 2"
     detail = record["recall_detail"]
     assert detail.startswith("【話題串】串 2「今天好累」・3 則\n→ #3 「小美」：羚羊拿MP5打盾牌（焦點，話題串 2）\n"), "分段給人看"
-    assert "\n\n【人物】\n- 小美：沒等到（逾時或失敗）\n- 小明：沒有畫像\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）\n" in detail
+    assert "【人物】" not in detail
     assert "\n\n【詞彙】MP5、羚羊\n" in detail and "\n\n【記憶】關鍵字：R6 羚羊 MP5 盾牌\n- m1. " in detail
     assert detail.endswith(f"【給 planner 的】\n{note}")
 
@@ -216,14 +196,9 @@ def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
     later = _run(env)
     assert later["items"][0]["parts"][-1]["text"] == note and len(env.asked) == 2
     replied = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LAUGH, extra_prompt="前面"))
-    assert replied["modified_kwargs"]["extra_prompt"] == f"前面\n{NOTE_HEAD}\n人物：\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）"
-    assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=FUNNY)) == {"action": "continue"}, "沒畫像的目標不應拿別人的資料填充"
+    assert replied == {"action": "continue"}
+    assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=FUNNY)) == {"action": "continue"}
     assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id="mother")) == {"action": "continue"}
-
-    # 人物畫像變得慢：快取期間不再查
-    before = len(calls)
-    asyncio.run(env.plugin._profile("s1", person := {"person_id": "p-u2"}))
-    assert len(calls) == before and person["profile"] == "阿華主玩 R6 防守方（鑽石牌位）"
 
 
 def test_not_understanding_asks_her_to_look_it_up_herself(monkeypatch) -> None:
@@ -234,7 +209,7 @@ def test_not_understanding_asks_her_to_look_it_up_herself(monkeypatch) -> None:
     env, calls = _setup(monkeypatch, [SAME_THREAD, lost], {})
     note = _run(env)["items"][0]["parts"][-1]["text"]
     assert note.endswith("沒把握：" + recall.UNSURE.format(query="R6 羚羊 MP5 盾牌")), "給她可以查的關鍵字，查不查她自己決定"
-    assert "記憶：" not in note and "人物：" in note, "選了「都無關」不給記憶；人和詞照樣給"
+    assert "記憶：" not in note and "人物：" not in note and "詞彙：" in note, "選了都無關時只保留相關詞"
     assert not any(name == "api.call" for name, _ in calls)
 
     # 寫不出關鍵字時改用原文查
@@ -259,13 +234,13 @@ def test_not_understanding_asks_her_to_look_it_up_herself(monkeypatch) -> None:
 
 
 def test_missing_capabilities_and_timeouts_leave_their_part_out(monkeypatch) -> None:
-    """原版 MaiBot 沒有 person.get_profile、jargon.match；記憶檢索逾時。三段都缺時只剩把握的判斷。"""
+    """黑話或記憶不存在／逾時時，只保留可信的理解判斷。"""
     understood = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
     env, calls = _setup(monkeypatch, [SAME_THREAD, understood], {})
     original = env.ctx.call_capability
 
     async def bare(name, **kwargs):
-        if name in ("person.get_profile", "jargon.match", "knowledge.search"):
+        if name in ("jargon.match", "knowledge.search"):
             calls.append((name, kwargs))
             return {"success": False, "error": f"沒有 {name}"}
         return await original(name, **kwargs)
@@ -273,7 +248,7 @@ def test_missing_capabilities_and_timeouts_leave_their_part_out(monkeypatch) -> 
     env.ctx.call_capability = bare
     result = _run(env)
     record = env.plugin._decision_stats.state["decisions"][0]
-    assert record["recall"] == "看得懂 0.90・群記憶沒等到（逾時或失敗）・人 0/3・詞 0"
+    assert record["recall"] == "看得懂 0.90・群記憶沒等到（逾時或失敗）・詞 0"
     assert "【記憶】關鍵字：R6 羚羊 MP5 盾牌\n- 沒等到（逾時或失敗）" in record["recall_detail"]
     assert "【這串的理解】" not in result["items"][0]["parts"][-1]["text"], "看得懂又沒東西可補：不加"
 
