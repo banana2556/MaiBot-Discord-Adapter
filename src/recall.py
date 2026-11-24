@@ -43,11 +43,11 @@ from .topics import (
 MEMORY_HITS = 3
 MAX_PEOPLE = 4
 JARGON_LIMIT = 8
-# 人物畫像快取多久；給 planner 的畫像、記憶最多幾個字
+# 人物畫像快取多久；給 planner 的單人畫像最多幾個字。reply 只附目標訊息相關的人物與詞彙。
 PROFILE_TTL_SECONDS = 1800
-PROFILE_CHARS = 160
+PROFILE_CHARS = 400
 # 人物畫像取哪幾段（照 MaiBot 自己注入畫像時的段落）；黑話的意思最多幾個字
-PROFILE_SECTIONS = ("身份设定", "关系设定", "稳定了解", "相处偏好", "近期互动")
+PROFILE_SECTIONS = ("身份设定", "关系设定", "稳定了解", "相处偏好")
 TERM_CHARS = 60
 NOTE_MEMORY_CHARS = 160
 # 要回的那則只有網址、Discord 卡片還沒補到時最多等幾秒
@@ -130,11 +130,16 @@ def whole_terms(jargons: Sequence[Mapping[str, str]], texts: Sequence[str], name
 
 
 def profile_brief(profile: str) -> str:
-    """人物畫像（A_memorix 的結構化畫像「# 人物画像 / 人物ID / 别名 / ## 段落」）縮成一行：
-    只取身份、關係、穩定了解、相處偏好和最近兩筆互動，跳過「暂无」和開頭的 ID、別名；不是結構化的就整段截短。"""
+    """人物畫像縮成完整的長期事實：只取身份、關係、穩定了解、相處偏好，
+    跳過近期互動、不確定和維護備註；非結構化摘要也不截斷半句。"""
     text = str(profile or "").strip()
     if not text.startswith("# 人物画像"):
-        return clip(text, PROFILE_CHARS)
+        if len(text) <= PROFILE_CHARS:
+            return text
+        portion = text[:PROFILE_CHARS]
+        endings = [portion.rfind(mark) for mark in "。！？!?；;"]
+        end = max(endings)
+        return portion[:end + 1] if end >= PROFILE_CHARS // 3 else ""
     sections: Dict[str, List[str]] = {}
     title = ""
     for line in text.splitlines():
@@ -143,8 +148,13 @@ def profile_brief(profile: str) -> str:
             title = line[3:].strip()
         elif title and line.startswith("- ") and line != "- 暂无":
             sections.setdefault(title, []).append(line[2:].strip())
-    facts = [fact for section in PROFILE_SECTIONS for fact in sections.get(section, [])[: 2 if section == "近期互动" else None]]
-    return clip("；".join(facts), PROFILE_CHARS)
+    facts = [fact for section in PROFILE_SECTIONS for fact in sections.get(section, [])]
+    kept = []
+    for fact in facts:
+        if len("；".join([*kept, fact])) > PROFILE_CHARS:
+            continue  # 完整保留有意義的事實，不把一句人物資料切成半句
+        kept.append(fact)
+    return "；".join(kept)
 
 
 def thread_messages(window: Sequence[Mapping[str, Any]], members: Sequence[str]) -> List[Mapping[str, Any]]:
@@ -549,7 +559,18 @@ class RecallMixin:
         # 請求失敗沒拿到判斷時不當作看不懂，免得每次失敗都叫她別把話說死
         understood = probability(understand, "yes") if understand else 1.0
         note = recall_note(recall, picked, probability(pick, choice), understood)
-        self._recalls[session_id] = {"focus": recall["focus"]["msg_id"], "note": note}
+        said = [message for message in recall["said"] if not message["self"]]
+        source = self._inbound.get(session_id, {})
+        targets = {
+            message["msg_id"]: {
+                "user_ids": [str((source.get(message["msg_id"]) or {}).get("user_id") or ""),
+                             *((source.get(message["msg_id"]) or {}).get("mentioned") or {})],
+                "text": message["text"],
+            }
+            for message in said
+        }
+        self._recalls[session_id] = {"focus": recall["focus"]["msg_id"], "note": note,
+                                     "people": recall["people"], "terms": recall["terms"], "targets": targets}
         verdict = str(understand.get("choice") or "")
         known = sum(1 for person in recall["people"] if person.get("profile"))
         parts = [
@@ -588,7 +609,23 @@ class RecallMixin:
         recall = self._recalls.get(session_id) or {}
         target = display_message_id(str(kwargs.get("reply_message_id") or ""))
         store = getattr(self, "_topics", {}).get(session_id) or {"of": {}, "topics": {}}
-        if not recall.get("note") or (target and target not in topic_members(store, recall["focus"]) and target != recall["focus"]):
+        if target and target != recall.get("focus") and target not in topic_members(store, recall.get("focus", "")):
             return {"action": "continue"}
-        kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{recall['note']}".strip()
+        if not target:
+            return {"action": "continue"}
+        if target not in recall.get("targets", {}):
+            return {"action": "continue"}
+        details = recall["targets"][target]
+        people = [person for person in recall.get("people", [])
+                  if person.get("profile") and person.get("user_id") in details["user_ids"]]
+        terms = [term for term in recall.get("terms", []) if term["content"] in details["text"]]
+        lines = []
+        if people:
+            lines += ["人物：", *(f"- {person['name']}：{person['profile']}" for person in people)]
+        if terms:
+            lines += ["詞彙：", *(f"- {term['content']}：{term['meaning']}" for term in terms)]
+        note = NOTE_HEAD + "\n" + "\n".join(lines) if lines else ""
+        if not note:
+            return {"action": "continue"}
+        kwargs["extra_prompt"] = f"{kwargs.get('extra_prompt') or ''}\n{note}".strip()
         return {"action": "continue", "modified_kwargs": kwargs}

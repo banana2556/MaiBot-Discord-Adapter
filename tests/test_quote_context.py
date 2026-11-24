@@ -95,14 +95,22 @@ def test_planner_is_told_who_is_calling_her_until_she_answers(monkeypatch) -> No
     chatting = _message_item(alias(FUNNY), "小明", "我剛剛跌倒了哈哈哈")
 
     _, note, _ = _planner(env, mine, replying, chatting, tools=("reply", "stop"))
-    assert note.startswith("【有人在找你】")
-    assert f"msg_id={alias(REPLY)}（小美）：[回覆你：好啊，明天見]真的嗎" in note
+    assert "【有人在找你】" not in note
+    assert f"msg_id={alias(REPLY)}（小美）：[回覆你：好啊，明天見]真的嗎" not in note
     assert "跌倒" not in note and "【被回覆的舊訊息】" not in note and calls["get_by_id"] == [], "被回覆的舊訊息不再另外補"
 
     # 她回過話之後就不再提；睡覺時段只剩 stop 也不提
     answered = _message_item("mself", "麥麥", "對啊", self_message=True)
     assert _planner(env, mine, replying, answered, chatting, tools=("reply", "stop"))[1] == ""
     assert _planner(env, mine, replying, chatting, tools=("stop",))[1] == ""
+
+
+def test_calling_note_does_not_repeat_single_visible_mention(monkeypatch) -> None:
+    env, _ = _setup(monkeypatch)
+    alias = env.module.display_message_id
+    result, note, _ = _planner(env, _message_item(alias(REPLY), "小美", "@麥麥 你好"), tools=("reply", "stop"))
+    assert result["action"] == "continue"
+    assert "【有人在找你】" not in note, "焦點訊息已有 @ 和回覆標籤，不應再重複提醒被叫的事實"
 
 
 def test_nothing_remembered_leaves_the_request_alone(monkeypatch) -> None:

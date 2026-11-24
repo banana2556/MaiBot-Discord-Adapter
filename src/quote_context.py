@@ -33,16 +33,11 @@ from maibot_sdk import HookHandler
 
 from .emote import display_message_id, planner_messages, strip_emotes, tool_names
 from .life.common import sent_text
-from .topics import active_topic, add_member, clock, earlier_items, focus_ids, unanswered
+from .topics import active_topic, add_member, clock, earlier_items, focus_ids
 
 # 同一個聊天兩次回話（不是同一則回覆拆成幾段）之間至少隔幾秒
 REPLY_GAP_SECONDS = 8
-# 叫她的訊息最多列幾則（取最新的）
-CALLING_LIMIT = 3
-CALLING_NOTE = (
-    "【有人在找你】你上次說話之後，下面這幾則在叫你（@ 你、回覆你的訊息或喊你名字），這輪就是因為它們才開始的。"
-    "先回應它們（reply 帶那則的 msg_id）：\n"
-)
+# replyer 不重複敘述「被 @」；焦點已由話題分析選定，跨串待辦由 agenda 補充。
 # linux 沙盒電腦插件在含連結的訊息後面插的提醒（item_id 是「這個前綴＋那則訊息的 item_id」）
 LINK_REMINDER = "link-reminder-"
 EARLIER_NOTE = "【這串前面的對話】（比下面的紀錄更早、已經不在紀錄裡的部分，照時間排；這幾則不能用 msg_id 回覆）\n"
@@ -197,18 +192,6 @@ class QuoteContextMixin:
         add_member(store, topic_id, {"msg_id": msg_id, "user": "", "self": True, "time": now}, line)
         self._save_threads()
 
-    def _calling_note(self, session_id: str, messages: Sequence[Mapping[str, Any]], remembered: Mapping[str, Any]) -> str:
-        """她上次說話之後叫她的訊息；私訊每則都在跟她說話，不用特別提。"""
-        if not self._latest_inbound.get(session_id, {}).get("group_id"):
-            return ""
-        lines = []
-        for message in unanswered(messages, self._seen_until.get(session_id, 0.0)):
-            entry = remembered.get(message["msg_id"])
-            if entry and entry["addressed"]:
-                label = f"[{entry['quote_label']}]" if entry.get("quote_label") else ""
-                lines.append(f"- msg_id={message['msg_id']}（{message['user']}）：{label}{message['text']}")
-        return CALLING_NOTE + "\n".join(lines[-CALLING_LIMIT:]) if lines else ""
-
     @HookHandler(
         "maisaka.planner.before_request",
         name="discord_focus_thread",
@@ -250,8 +233,6 @@ class QuoteContextMixin:
         # 有 reply 才是 planner 本身（表達方式選擇沒有工具；睡覺時段只剩 stop，不用叫她回）
         if "reply" in tool_names(kwargs):
             self._planner_at[session_id] = time.time()
-            if note := self._calling_note(session_id, messages, remembered):
-                self._append_system_text(kwargs, note)
             if note := self._agenda_note(session_id):
                 self._append_system_text(kwargs, note)
             self._add_recall_note(kwargs, session_id)

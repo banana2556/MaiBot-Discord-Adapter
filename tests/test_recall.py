@@ -106,8 +106,8 @@ def test_pieces() -> None:
         "## 关系设定\n- 糖奶要求资讯科全员通过其面试。\n\n## 稳定了解\n- 暂无\n\n## 相处偏好\n- 暂无\n\n"
         "## 近期互动\n- 一\n- 二\n- 三\n\n## 不确定信息\n- 可能是学生\n\n## 维护备注\n- 自动画像仅供内部参考。"
     )
-    assert recall.profile_brief(profile) == "糖奶从事优化工程方法相关工作。；糖奶要求资讯科全员通过其面试。；一；二", (
-        "不要開頭的人物 ID 和別名，跳過暂无、不確定和維護備註，近期互動只取兩筆"
+    assert recall.profile_brief(profile) == "糖奶从事优化工程方法相关工作。；糖奶要求资讯科全员通过其面试。", (
+        "只保留身份、關係等長期有效事實；跳過最近互動、不確定和維護備註"
     )
     assert recall.profile_brief("# 人物画像\n人物ID: x\n## 身份设定\n- 暂无") == "", "全部暂无就當沒有畫像"
     window = [
@@ -127,6 +127,42 @@ def test_pieces() -> None:
     assert topics.focus_message(window, {})["msg_id"] == "d", "沒人叫她就是最新一則"
     people = recall.participants(window, window[4], ["a", "b"], remembered, "bot")
     assert [person["name"] for person in people] == ["D", "E", "B", "A"], "發話人、@ 的人、這串其他人（新的先）；不含她自己"
+
+
+def test_unstructured_profile_does_not_end_mid_sentence() -> None:
+    summary = "小明經常參加釣魚活動。" * 50 + "這句是長段的開頭，還沒交代完畢。"
+    brief = recall.profile_brief(summary)
+    assert len(brief) <= recall.PROFILE_CHARS
+    assert brief.endswith("。") and not brief.endswith("…")
+
+
+def test_profile_brief_keeps_complete_relevant_facts_across_sections() -> None:
+    identity = "這個人經營遊戲活動並負責協調提醒安排，" + "熟悉每週活動時程和參加者分工。" * 5
+    relation = "與群友小明約定釣魚場次，提醒時應提及小明。"
+    profile = f"# 人物画像\n## 身份设定\n- {identity}\n## 关系设定\n- {relation}\n## 近期互动\n- 昨天討論舊商品"
+    brief = recall.profile_brief(profile)
+    assert relation in brief and "昨天討論舊商品" not in brief
+    assert all(part.endswith(("。", "！", "？")) for part in brief.split("；")), "不能將人物事實截成半句"
+
+
+def test_reply_without_explicit_target_does_not_inherit_entire_thread_recall(monkeypatch) -> None:
+    picked = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, _ = _setup(monkeypatch, [SAME_THREAD, picked], {})
+    _run(env)
+    assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id="")) == {"action": "continue"}
+
+
+def test_reply_note_only_has_people_from_the_message_being_replied_to(monkeypatch) -> None:
+    picked = {"recall_understand": {"choice": "yes", "probabilities": {"yes": 0.9}}}
+    env, _ = _setup(monkeypatch, [SAME_THREAD, picked], {})
+    _run(env)
+    result = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LAUGH, extra_prompt="前面"))
+    note = result["modified_kwargs"]["extra_prompt"]
+    assert "阿華主玩 R6" in note
+    assert "人物：" in note and "@你" not in note
+    assert "小美：" not in note and "小明：" not in note, "其他同串參與者不是這則的回覆對象"
+    assert "詞彙：" not in note, "要回的那則沒提及 MP5 / 羚羊，就不要灌入無關術語"
+    assert "群裡以前聊過" not in note, "不把整串的檢索記憶當成對這則的已知事實"
 
 
 def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
@@ -179,8 +215,9 @@ def test_planner_gets_the_threads_people_terms_and_memory(monkeypatch) -> None:
     # 同一回合後面的請求（不再問決策模型）也帶著；replyer 回的是這串（或沒指定回哪則）才給
     later = _run(env)
     assert later["items"][0]["parts"][-1]["text"] == note and len(env.asked) == 2
-    replied = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=FUNNY, extra_prompt="前面"))
-    assert replied["modified_kwargs"]["extra_prompt"] == f"前面\n{note}"
+    replied = asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=LAUGH, extra_prompt="前面"))
+    assert replied["modified_kwargs"]["extra_prompt"] == f"前面\n{NOTE_HEAD}\n人物：\n- 阿華：阿華主玩 R6 防守方（鑽石牌位）"
+    assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id=FUNNY)) == {"action": "continue"}, "沒畫像的目標不應拿別人的資料填充"
     assert asyncio.run(env.plugin.add_recall_to_replyer(session_id="s1", reply_message_id="mother")) == {"action": "continue"}
 
     # 人物畫像變得慢：快取期間不再查
