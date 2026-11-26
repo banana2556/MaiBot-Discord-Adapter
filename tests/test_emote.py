@@ -367,7 +367,7 @@ def test_focus_thread_is_all_planner_selector_and_replyer_see(monkeypatch) -> No
 
     planner, selector, no_target, other = asyncio.run(scenario())
     assert env.plugin._focus["s1"] == alias(LAUGH), "叫她的優先"
-    assert [m["msg_id"] for m in env.module.planner_messages(planner["items"])] == [alias(FUNNY), alias(LAUGH)]
+    assert [m["msg_id"] for m in env.module.planner_messages(planner["items"])] == [alias(FUNNY), alias(LAUGH), alias(LATEST)], "Planner 看得到新到但不屬於焦點串的觸發訊息"
     assert all(item["meta"].get("item_id") != "link-reminder-x3" for item in planner["items"])
     assert "【有人在找你】" not in planner["items"][0]["parts"][-1]["text"], "焦點訊息已在聊天紀錄裡，勿重複提示"
     assert [m["msg_id"] for m in env.module.planner_messages(selector["items"])] == [alias(FUNNY), alias(LAUGH)], (

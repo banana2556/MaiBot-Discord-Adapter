@@ -119,6 +119,22 @@ def test_nothing_remembered_leaves_the_request_alone(monkeypatch) -> None:
     assert _planner(env)[0] == {"action": "continue"}
 
 
+def test_focus_filter_keeps_latest_inbound_when_agenda_focus_is_old(monkeypatch) -> None:
+    env, _ = _setup(monkeypatch)
+    topics = _load_adapter_module("src.topics")
+    store = topics.new_store()
+    old_id, latest_id = "mold11", "mnew11"
+    topics.add_member(store, None, {"msg_id": old_id, "user": "x", "self": False, "time": 1}, "old")
+    topics.add_member(store, None, {"msg_id": latest_id, "user": "y", "self": False, "time": 2}, "new")
+    env.plugin._topics["s1"] = store
+    env.plugin._focus["s1"] = old_id  # pending agenda work on a previous topic
+    env.plugin._inbound["s1"][latest_id] = {"at": 2}
+    env.plugin._latest_inbound["s1"] = {"msg_id": latest_id, "group_id": "g"}
+    result, _, _ = _planner(env, _message_item(old_id, "x", "old"), _message_item(latest_id, "y", "new"), tools=("reply", "wait"))
+    text = " ".join(str(part.get("text", "")) for item in result["modified_kwargs"]["items"] for part in item.get("parts", []))
+    assert f'msg_id="{latest_id}"' in text, "Planner 不能因待辦舊串漏掉最後到的訊息而 wait"
+
+
 def test_keep_focus_items_drops_other_topics_and_their_tool_calls(monkeypatch) -> None:
     quote = _load_adapter_module("src.quote_context")
     system = {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]}

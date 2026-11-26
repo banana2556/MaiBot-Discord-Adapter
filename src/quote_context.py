@@ -241,6 +241,20 @@ class QuoteContextMixin:
                     self._focus[session_id] = latest["msg_id"]
                     keep = self._focus_keep(session_id)
             items, dropped = keep_focus_items(items, set(keep), set(store["of"]))
+            # 待辦選了舊串時，這次觸發 Planner 的新訊息仍須讓 Planner 親眼看到。
+            # 舊串與新訊息分開呈現，不改焦點，也不讓 replyer 誤把新訊息歸入舊串。
+            trigger_id = str(self._latest_inbound.get(session_id, {}).get("msg_id") or "")
+            focus_positions = [i for i, message in enumerate(visible) if message["msg_id"] in keep]
+            trigger_positions = [i for i, message in enumerate(visible) if message["msg_id"] == trigger_id]
+            if "reply" in tool_names(kwargs) and trigger_id and trigger_id not in keep and trigger_positions and (
+                not focus_positions or trigger_positions[-1] > focus_positions[-1]
+            ):
+                trigger_item = next(
+                    (item for item in kwargs["items"] if any(m["msg_id"] == trigger_id for m in planner_messages([item]))),
+                    None,
+                )
+                if trigger_item is not None:
+                    items.insert(next((i for i, item in enumerate(items) if _TIME_MARK.fullmatch(first_text(item).strip())), len(items)), trigger_item)
             # MaiBot 拿整段上下文比對的黑話（<jargon>）拿掉：這串用得到的詞已經在聯想的「這串的理解」裡
             items = [item for item in items if not is_jargon(item) and not first_text(item).startswith(RESTORE_NOTE)]
             if dropped:

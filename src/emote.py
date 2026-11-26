@@ -314,6 +314,7 @@ class EmoteMixin:
         self._latest_inbound[session_id] = {
             "group_id": str(group.get("group_id") or ""),
             "user_id": str(user.get("user_id") or ""),
+            "msg_id": display_message_id(message_id) if message_id else "",
         }
         if not message_id:
             return
