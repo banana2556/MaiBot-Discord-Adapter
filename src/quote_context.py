@@ -229,6 +229,17 @@ class QuoteContextMixin:
         self._track_subagents(session_id, items)
         if keep := self._focus_keep(session_id):
             store = self._topics[session_id]
+            # 焦點串已被壓縮出上下文時，要保留最後一則仍看得到的真實聊天；
+            # 但待辦或子代理結果可能刻意回到舊串，不能把它們改成另一串。
+            visible = planner_messages(items)
+            has_pending_result = any(first_text(item).startswith("<subagent_result") for item in items)
+            if "reply" in tool_names(kwargs) and visible and not has_pending_result and not any(
+                message["msg_id"] in keep for message in visible
+            ):
+                latest = next((message for message in reversed(visible) if not message["self"]), None)
+                if latest:
+                    self._focus[session_id] = latest["msg_id"]
+                    keep = self._focus_keep(session_id)
             items, dropped = keep_focus_items(items, set(keep), set(store["of"]))
             # MaiBot 拿整段上下文比對的黑話（<jargon>）拿掉：這串用得到的詞已經在聯想的「這串的理解」裡
             items = [item for item in items if not is_jargon(item) and not first_text(item).startswith(RESTORE_NOTE)]

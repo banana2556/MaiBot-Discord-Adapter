@@ -164,6 +164,19 @@ def test_removed_topic_drops_its_delayed_tool_result(monkeypatch) -> None:
     assert kept == [current]
 
 
+def test_focus_filter_never_sends_only_an_old_thread_summary(monkeypatch) -> None:
+    env, _ = _setup(monkeypatch)
+    topics = _load_adapter_module("src.topics")
+    store = topics.new_store()
+    topics.add_member(store, None, {"msg_id": "mold", "user": "甲", "self": False, "time": 1}, "舊串")
+    topics.add_member(store, None, {"msg_id": "mlatest", "user": "乙", "self": False, "time": 2}, "最新串")
+    env.plugin._topics["s1"] = store
+    env.plugin._focus["s1"] = "mold"
+    env.plugin._inbound["s1"] = {"mlatest": {"at": 2}}
+    items = _items(env, _message_item("mlatest", "乙", "最新串"))
+    assert [m["msg_id"] for m in env.module.planner_messages(items)] == ["mlatest"]
+
+
 def _items(env, *chat, tools=("reply",)):
     """跑一次 planner hook，回傳送出去的 items。"""
     kwargs = {
