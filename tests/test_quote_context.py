@@ -119,7 +119,7 @@ def test_nothing_remembered_leaves_the_request_alone(monkeypatch) -> None:
     assert _planner(env)[0] == {"action": "continue"}
 
 
-def test_keep_focus_items_drops_other_topics_but_not_newer_messages_or_tool_calls(monkeypatch) -> None:
+def test_keep_focus_items_drops_other_topics_and_their_tool_calls(monkeypatch) -> None:
     quote = _load_adapter_module("src.quote_context")
     system = {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]}
     a, b, c, d = (_message_item(f"m{n}", "x", "t") for n in "abcd")
@@ -127,7 +127,41 @@ def test_keep_focus_items_drops_other_topics_but_not_newer_messages_or_tool_call
     reminder = {"item_type": "UserMessageItem", "meta": {"item_id": "link-reminder-ib"}, "parts": [{"type": "text", "text": "提醒"}]}
     call = {"item_type": "FunctionCallItem", "meta": {}, "tool_call": {}}
     kept, dropped = quote.keep_focus_items([system, a, b, reminder, call, c, d], {"ma"}, {"ma", "mb", "mc"})
-    assert kept == [system, a, call] and dropped == 3, "未歸類的 d 留給下輪；只保留確定在焦點串的 a"
+    assert kept == [system, a] and dropped == 3, "別串聊天與其工具呼叫一併拿掉，不能留下沒有錨點的呼叫"
+
+
+def test_mention_focus_does_not_send_orphan_tool_call_to_planner(monkeypatch) -> None:
+    env, _ = _setup(monkeypatch)
+    topics = _load_adapter_module("src.topics")
+    alias = env.module.display_message_id
+    store = topics.new_store()
+    old = alias(FUNNY)
+    mention = alias(REPLY)
+    topics.add_member(store, None, {"msg_id": old, "user": "小明", "self": False, "time": 1}, "舊話題")
+    topics.add_member(store, None, {"msg_id": mention, "user": "小美", "self": False, "time": 2, "addressed": True}, "@Bot 新話題")
+    env.plugin._topics["s1"] = store
+    env.plugin._focus["s1"] = mention
+    system = {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]}
+    call = {"item_type": "FunctionCallItem", "meta": {}, "tool_call": {"call_id": "old-call", "func_name": "reply", "args": {}}}
+    output = {"item_type": "FunctionCallOutputItem", "meta": {}, "call_id": "old-call", "output": "舊話題的工具結果"}
+    old_message = _message_item(old, "小明", "舊話題")
+    new_message = _message_item(mention, "小美", "@Bot 新話題")
+    kwargs = {"items": [system, old_message, call, output, new_message], "tool_definitions": [{"type": "function", "function": {"name": "reply"}}], "session_id": "s1"}
+    result = asyncio.run(env.plugin.keep_focus_thread(**kwargs))
+    items = result["modified_kwargs"]["items"]
+    assert [m["msg_id"] for m in env.module.planner_messages(items)] == [mention]
+    assert not any(item.get("item_type") in ("FunctionCallItem", "FunctionCallOutputItem") for item in items)
+    assert "舊話題的工具結果" not in str(items)
+
+
+def test_removed_topic_drops_its_delayed_tool_result(monkeypatch) -> None:
+    quote = _load_adapter_module("src.quote_context")
+    old = _message_item("mold", "甲", "其他串")
+    current = _message_item("mnew", "乙", "@Bot 這串")
+    call = {"item_type": "FunctionCallItem", "tool_call": {"call_id": "old-call"}}
+    output = {"item_type": "FunctionCallOutputItem", "call_id": "old-call", "output": "其他串結果"}
+    kept, _ = quote.keep_focus_items([old, call, current, output], {"mnew"}, {"mold", "mnew"})
+    assert kept == [current]
 
 
 def _items(env, *chat, tools=("reply",)):

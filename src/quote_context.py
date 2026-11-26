@@ -103,7 +103,7 @@ def insert_earlier(items: List[Dict[str, Any]], text: str, now: datetime) -> Lis
 
 
 def keep_focus_items(items: List[Dict[str, Any]], keep: Set[str], assigned: Set[str]) -> Tuple[List[Dict[str, Any]], int]:
-    """聊天訊息只留 keep 裡的，和最後一則分過話題的之後才出現的；其他 item（系統、工具呼叫與結果、時間標記…）照留。
+    """聊天訊息只留 keep 裡的；刪除別串訊息時，也刪掉失去該訊息錨點的工具呼叫與結果。
 
     Returns:
         (留下的 items, 拿掉幾則聊天訊息)。
@@ -114,12 +114,29 @@ def keep_focus_items(items: List[Dict[str, Any]], keep: Set[str], assigned: Set[
         return str((item.get("meta") or {}).get("item_id") or "")
 
     gone_items = {item_id(items[index]) for index in gone} - {""}
-    kept = [
-        item
-        for index, item in enumerate(items)
-        if index not in gone
-        and not (item_id(item).startswith(LINK_REMINDER) and item_id(item)[len(LINK_REMINDER) :] in gone_items)
-    ]
+    chat_positions = {position for position, _ in chat}
+    kept = []
+    anchor_kept = False
+    dropped_calls: Set[str] = set()
+    for index, item in enumerate(items):
+        if index in gone:
+            anchor_kept = False
+            continue
+        if item_id(item).startswith(LINK_REMINDER) and item_id(item)[len(LINK_REMINDER):] in gone_items:
+            continue
+        if index in chat_positions:
+            anchor_kept = True
+        kind = item.get("item_type")
+        if kind == "FunctionCallItem":
+            call_id = str((item.get("tool_call") or {}).get("call_id") or "")
+            if not anchor_kept:
+                if call_id:
+                    dropped_calls.add(call_id)
+                continue
+        elif kind == "FunctionCallOutputItem":
+            if str(item.get("call_id") or "") in dropped_calls or not anchor_kept:
+                continue
+        kept.append(item)
     return kept, len(gone)
 
 
