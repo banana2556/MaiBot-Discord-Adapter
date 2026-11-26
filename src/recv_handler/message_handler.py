@@ -15,13 +15,14 @@ from typing import Any, Dict, List, Optional
 import discord
 from maim_message import BaseMessageInfo, FormatInfo, GroupInfo, MessageBase, Seg, UserInfo
 
-from ..emoji_grid import build_numbered_grid, still_image
+from ..emoji_grid import animation_sheet, build_numbered_grid, still_image
 from ..native_emoji import NativeEmojiRegistry
 from ..utils import run_ffmpeg
 
 STICKER_FETCH_SIZE = 128  # 收到的貼圖下載多大（Discord CDN 的 size 用 2 的冪）
 VIDEO_MAX_FRAMES = 9  # 3x3，再多每格就太小，识图看不清
 VIDEO_FRAME_TILE = 320
+GIF_LINK_FRAMES = 4  # 動圖連結從 mp4 截幾格，和附件的動圖一樣
 VIDEO_FFMPEG_TIMEOUT_SECONDS = 8.0
 # 只准 FFmpeg 走 HTTPS：伪装成影片的 HLS 播放列表可以叫它读本机文件、画进截图里
 _FFMPEG_REMOTE_INPUT = ("-protocol_whitelist", "https,tls,tcp")
@@ -631,13 +632,8 @@ class DiscordMessageHandler:
         interval = float(getattr(self._chat_config, "video_frame_interval_sec", 2.0) or 0)
         if interval <= 0:
             return [label]
-        probe = await self._run_ffmpeg(
-            "ffprobe", "-v", "error", *_FFMPEG_REMOTE_INPUT, "-show_entries", "format=duration",
-            "-of", "default=nw=1:nk=1", attachment.url,
-        )
-        try:
-            duration = float(probe.decode().strip())
-        except ValueError:
+        duration = await self._video_duration(attachment.url)
+        if not duration:
             return [label]
         count = max(1, math.ceil(duration / interval))  # 不截贴着结尾的那格，那里常常读不到画面
         if count > VIDEO_MAX_FRAMES:
@@ -652,6 +648,7 @@ class DiscordMessageHandler:
             [frame for _, frame in shots],
             [f"{int(at) // 60}:{int(at) % 60:02d}" for at, _ in shots],
             VIDEO_FRAME_TILE,
+            "Video frames in time order",
         )
         return [
             Seg(
@@ -660,6 +657,29 @@ class DiscordMessageHandler:
             ),
             Seg(type="image", data=base64.b64encode(sheet).decode("utf-8")),
         ]
+
+    async def _video_duration(self, url: str) -> float:
+        """影片長度（秒）；沒裝 FFmpeg、讀不到或格式不支援時回傳 0。"""
+        probe = await self._run_ffmpeg(
+            "ffprobe", "-v", "error", *_FFMPEG_REMOTE_INPUT, "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", url,
+        )
+        try:
+            return float(probe.decode().strip())
+        except ValueError:
+            return 0.0
+
+    async def _gif_link_segment(self, url: str) -> Optional[Seg]:
+        """動圖連結附的 mp4 平均截幾格拼成動圖格；預覽圖只有第一格，看不出動作。做不到時回傳 None。"""
+        duration = await self._video_duration(url)
+        if not duration:
+            return None
+        times = [index * duration / GIF_LINK_FRAMES for index in range(GIF_LINK_FRAMES)]
+        frames = [frame for frame in await asyncio.gather(*(self._video_frame(url, at) for at in times)) if frame]
+        if not frames:
+            return None
+        sheet = await asyncio.to_thread(animation_sheet, frames)
+        return Seg(type="image", data=base64.b64encode(sheet).decode("utf-8"))
 
     async def _video_frame(self, url: str, at: float) -> bytes:
         """取影片某个时间点的一格画面（JPEG）；-ss 放在 -i 前面，FFmpeg 会直接跳过去读，不从头读起。"""
@@ -716,13 +736,17 @@ class DiscordMessageHandler:
         return [*segments, Seg(type="emoji", data=image_b64)]
 
     async def _embed_segments(self, embed: discord.Embed) -> List[Seg]:
-        """動圖連結（Klipy、Tenor、Giphy，預覽類型 gifv）和圖片連結只有預覽圖，一律當圖片交給 MaiBot；
+        """動圖連結（Klipy、Tenor、Giphy，預覽類型 gifv）從附的 mp4 截幾格，沒有 mp4 或截不到時和圖片連結一樣用預覽圖，一律當圖片交給 MaiBot；
         其餘取標題、描述和欄位轉成文字，卡片帶圖（X、Pixiv、新聞縮圖等）時也附上圖片。
 
         動圖不當表情包：MaiBot 的圖片記憶只收圖片，當表情包就進不了記憶。
         """
         self._logger.debug(f"連結預覽 type={embed.type} provider={embed.provider.name}")
         if embed.type in ("gifv", "image"):
+            video = embed.video.proxy_url or embed.video.url
+            sheet = await self._gif_link_segment(str(video)) if embed.type == "gifv" and video else None
+            if sheet is not None:
+                return [sheet]
             preview = embed.thumbnail.proxy_url or embed.thumbnail.url or embed.image.proxy_url or embed.image.url
             image_b64 = await self._fetch_emoji_bytes(str(preview), size=None) if preview else None
             return [await self._image_segment(image_b64)] if image_b64 else []

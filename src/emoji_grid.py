@@ -1,4 +1,4 @@
-"""把多張圖拼成帶標籤的網格圖（影片截圖標時間點），比格子小的圖會放大填滿。"""
+"""把多張圖拼成帶標籤的網格圖（影片截圖標時間點），比格子小的圖會放大填滿；動圖、影片的格子最上面加一行說明。"""
 
 import io
 import math
@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 # 視覺模型多半要求短邊至少 64px，格子取寬鬆一點
 _TILE = 160
 _GAP = 8
+_CAPTION = 32  # 說明列高度；預設字型沒有中文字，說明用英文
 
 
 def grid_shape(count: int) -> Tuple[int, int]:
@@ -40,16 +41,27 @@ def still_image(data: bytes, frames: int = 4, tile: int = 256) -> bytes:
             buffer = io.BytesIO()
             image.convert("RGBA").save(buffer, format="PNG")
             shots.append(buffer.getvalue())
-    return shots[0] if len(shots) == 1 else build_numbered_grid(shots, tile=tile)
+    return shots[0] if len(shots) == 1 else animation_sheet(shots, tile)
 
 
-def build_numbered_grid(images: List[bytes], labels: Optional[List[str]] = None, tile: int = _TILE) -> bytes:
+def animation_sheet(frames: List[bytes], tile: int = 256) -> bytes:
+    """動圖的幾格畫面拼成一張，最上面寫明是動圖依時間排的格子。
+
+    MaiBot 識圖的提示詞只說「描述這張圖」，不寫明的話會當成四格漫畫，把序號和格線當成圖的內容。
+    """
+    return build_numbered_grid(frames, tile=tile, caption=f"Animated GIF: frames 1-{len(frames)} in time order")
+
+
+def build_numbered_grid(
+    images: List[bytes], labels: Optional[List[str]] = None, tile: int = _TILE, caption: str = ""
+) -> bytes:
     """每张图缩放进白底方格，左上角标上标签（默认从 1 开始的序号），输出 PNG 字节。
 
     Args:
         images: 图片字节，顺序即格子顺序。
         labels: 每格的标签；不传时用序号。
         tile: 每格边长（像素）；比格子小的圖會放大填滿。
+        caption: 最上面黑底白字的一行說明；空字串時不加。
 
     Returns:
         拼好的 PNG 图片字节。
@@ -57,11 +69,15 @@ def build_numbered_grid(images: List[bytes], labels: Optional[List[str]] = None,
     labels = labels or [str(index + 1) for index in range(len(images))]
     rows, columns = grid_shape(len(images))
     step = tile + _GAP
-    canvas = Image.new("RGB", (columns * step - _GAP, rows * step - _GAP), "white")
+    top = _CAPTION + _GAP if caption else 0
+    canvas = Image.new("RGB", (columns * step - _GAP, top + rows * step - _GAP), "white")
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default(size=24)
+    if caption:
+        draw.rectangle((0, 0, canvas.width, _CAPTION), fill="black")
+        draw.text((8, 6), caption, fill="white", font=ImageFont.load_default(size=20))
     for index, data in enumerate(images):
-        x, y = (index % columns) * step, (index // columns) * step
+        x, y = (index % columns) * step, top + (index // columns) * step
         try:
             with Image.open(io.BytesIO(data)) as raw:
                 image = _fit(raw.convert("RGBA"), tile)

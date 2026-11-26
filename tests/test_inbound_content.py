@@ -331,7 +331,7 @@ def test_video_frames_become_one_contact_sheet() -> None:
     assert raw["is_picture"] is True
     assert raw["raw_message"][0]["data"] == "[视频: cat.mp4，约 7 秒；下图是每 2 秒一格的画面，左上角是时间点]"
     sheet = Image.open(BytesIO(base64.b64decode(raw["raw_message"][1]["binary_data_base64"])))
-    assert sheet.size == (648, 648), "读不到的那格跳过，剩 3 格拼成 2x2"
+    assert sheet.size == (648, 688), "讀不到的那格跳過，剩 3 格拼成 2x2，上面加說明列"
 
     # 太长就平均分布成 9 格
     handler, calls = _video_handler("60")
@@ -345,6 +345,30 @@ def test_video_frames_become_one_contact_sheet() -> None:
         raw = _convert(handler, _message(attachments=[_attachment("x.mp4", "video/mp4")]))
         assert raw["processed_plain_text"] == "[视频: x.mp4]"
     assert off_calls == [], "關掉時不跑 FFmpeg"
+
+
+def test_gif_links_use_mp4_frames_not_the_still_preview() -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    video = "https://images-ext-1.discordapp.net/external/x.mp4"
+    gif = discord.Embed.from_dict({
+        "type": "gifv",
+        "thumbnail": {"url": "https://t/x.png", "proxy_url": "https://p/x.png"},
+        "video": {"url": "https://v/x.mp4", "proxy_url": video},
+    })
+    handler, calls = _video_handler("4.0")
+    raw = _convert(handler, _message(embeds=[gif]))["raw_message"]
+    seeks = [args[args.index("-ss") + 1] for args in calls if args[0] == "ffmpeg"]
+    assert seeks == ["0.00", "1.00", "2.00", "3.00"], "預覽圖只有第一格，從 mp4 平均截 4 格才看得出動作"
+    assert all(args[-1] in ("pipe:1", video) for args in calls)
+    sheet = Image.open(BytesIO(base64.b64decode(raw[0]["binary_data_base64"])))
+    assert sheet.size == (520, 560) and sheet.getpixel((519, 0)) == (0, 0, 0), "2x2 加上最上面寫明是動圖的說明列"
+
+    # 沒裝 FFmpeg 或截不到時退回預覽圖
+    raw = _convert(_video_handler("")[0], _message(embeds=[gif]))["raw_message"]
+    assert raw == [{"type": "image", "data": "", "binary_data_base64": "img:https://p/x.png:None"}]
 
 
 def _tool_plugin(target: object):
@@ -484,6 +508,7 @@ def test_animated_images_become_still_so_image_memory_accepts_them() -> None:
     sheet = grid.still_image(animated)
     with Image.open(io.BytesIO(sheet)) as image:
         assert image.format == "PNG" and getattr(image, "n_frames", 1) == 1, "動圖拼成一張靜態 PNG"
+        assert image.getpixel((image.width - 1, 0))[:3] == (0, 0, 0), "最上面寫明是動圖，識圖才不會當成四格漫畫"
     with Image.open(io.BytesIO(grid.still_image(single_gif))) as image:
         assert image.format == "PNG", "MaiBot 圖片記憶不收 GIF，一格的也要轉"
     assert grid.still_image(png) is png, "靜態圖原樣送"
