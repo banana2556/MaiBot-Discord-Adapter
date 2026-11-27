@@ -15,7 +15,7 @@
   她說的話在 MaiBot 上下文裡只是 reply 的工具結果，所以「上次說話」用她最後一次送出的時間算，回過的不再列。
 - MaiBot 壓縮上下文時較早的訊息換成摘要，摘要常漏掉這串開頭在問什麼；重啟恢復的上下文也可能不在這串：
   這串已經不在上下文的前文從話題串（存在 threads.json）補回來，放在聊天紀錄最前面。
-- MaiBot 在每批訊息前插的「时间：…」不送：每則訊息開頭已經有時間（不是今天的加上日期），只留最後一條當作現在時間。
+- MaiBot 在每批訊息前插的「时间：…」不送：每則訊息開頭已有時間（不是今天的加上日期），不另留現在時間標記。
   過濾掉別串後它們只剩空殼；焦點過濾時 MaiBot 的「[上下文恢复]」說明也拿掉（它說的那些恢復的訊息多半不在這串）。
 - 焦點以外她還沒做完的事（別串有人叫她、子代理查完了…，agenda.py）各給 planner 一行。
 - 快照：replyer 只看 planner 做決定那時已經到的訊息。replyer 寫得慢時新訊息會進來，它會順手回到 planner 沒看過的事
@@ -61,14 +61,11 @@ def first_text(item: Mapping[str, Any]) -> str:
 
 
 def drop_time_marks(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """拿掉 MaiBot 的「时间：…」，只留最後一條（現在時間）。"""
-    marks = [
-        index
-        for index, item in enumerate(items)
-        if item.get("item_type") == "UserMessageItem" and _TIME_MARK.fullmatch(first_text(item).strip())
+    """群聊每則訊息已有時間，去掉 MaiBot 另外插入的獨立時間訊息。"""
+    return [
+        item for item in items
+        if not (item.get("item_type") == "UserMessageItem" and _TIME_MARK.fullmatch(first_text(item).strip()))
     ]
-    drop = set(marks[:-1])
-    return [item for index, item in enumerate(items) if index not in drop]
 
 
 def stamp(at: float, today: date) -> str:

@@ -208,7 +208,7 @@ def _mark(text):
     return {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": text}]}
 
 
-def test_time_marks_dropped_except_now_and_older_messages_get_a_date(monkeypatch) -> None:
+def test_time_marks_dropped_including_now_and_older_messages_get_a_date(monkeypatch) -> None:
     # 2026-11-20 重啟後的 ping：前面恢復的訊息都不在這串，只剩一串「时间：…」空殼
     env, _ = _setup(monkeypatch)
     alias = env.module.display_message_id
@@ -216,7 +216,7 @@ def test_time_marks_dropped_except_now_and_older_messages_get_a_date(monkeypatch
     items = _items(env, _mark("时间：2026-11-15 19:04:48"), _mark("时间：2026-11-18 12:44:06"), yesterday,
                    _mark("时间：2026-11-20 16:12:38"), _mark("请分析后决定下一步"))
     texts = [item["parts"][0]["text"] for item in items[1:]]
-    assert [text for text in texts if text.startswith("时间：")] == ["时间：2026-11-20 16:12:38"], "只留現在時間"
+    assert [text for text in texts if text.startswith("时间：")] == [], "聊天訊息已有時間，連現在時間也不另送一則"
     day = __import__("datetime").date.fromtimestamp(__import__("time").time() - 86400 * 2).strftime("%m-%d")
     assert f'time="{day} 15:11:30"' in texts[0], "不是今天的訊息開頭加上月日"
 
