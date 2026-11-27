@@ -146,7 +146,7 @@ class QuoteContextMixin:
         focus = self._focus.get(session_id, "")
         if not store or not focus:
             return []
-        anchor = msg_id if msg_id in store["of"] else focus
+        anchor = msg_id if msg_id and msg_id in store["of"] else focus
         return focus_ids(store, anchor, list(self._inbound.get(session_id, {})))
 
     def _kept_topics(self, session_id: str, msg_id: str = "") -> List[Dict[str, Any]]:
@@ -155,7 +155,7 @@ class QuoteContextMixin:
         focus = self._focus.get(session_id, "")
         if not store or not focus:
             return []
-        topic = store["topics"].get(store["of"].get(msg_id if msg_id in store["of"] else focus))
+        topic = store["topics"].get(store["of"].get(msg_id if msg_id and msg_id in store["of"] else focus))
         return [topic] if topic else []
 
     def _earlier_note(self, session_id: str, messages: Sequence[Mapping[str, Any]], msg_id: str = "") -> str:

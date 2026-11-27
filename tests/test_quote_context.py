@@ -135,6 +135,25 @@ def test_focus_filter_keeps_latest_inbound_when_agenda_focus_is_old(monkeypatch)
     assert f'msg_id="{latest_id}"' in text, "Planner 不能因待辦舊串漏掉最後到的訊息而 wait"
 
 
+def test_empty_member_id_cannot_override_current_focus_or_hide_new_message(monkeypatch) -> None:
+    env, _ = _setup(monkeypatch)
+    topics = _load_adapter_module("src.topics")
+    store = topics.new_store()
+    old_topic = topics.add_member(store, None, {"msg_id": "", "user": "舊", "self": False, "time": 1}, "舊串空 ID")
+    old_id = "mold196"
+    topics.add_member(store, old_topic, {"msg_id": old_id, "user": "舊", "self": False, "time": 2}, "舊話")
+    focus_id = "mnew208"
+    topics.add_member(store, None, {"msg_id": focus_id, "user": "新", "self": False, "time": 3}, "新話")
+    env.plugin._topics["s1"] = store
+    env.plugin._focus["s1"] = focus_id
+    env.plugin._inbound["s1"][focus_id] = {"at": 3}
+    items = _items(env, _message_item(old_id, "舊", "舊話"), _message_item(focus_id, "新", "新話"))
+    assert [m["msg_id"] for m in env.module.planner_messages(items)] == [focus_id]
+    assert env.plugin._kept_topics("s1") == [store["topics"][store["of"][focus_id]]]
+    result = asyncio.run(env.plugin.add_quote_context_to_replyer(session_id="s1", reply_message_id=""))
+    assert result["modified_kwargs"]["reply_tool_args"]["_keep_message_ids"] == [focus_id]
+
+
 def test_keep_focus_items_drops_other_topics_and_their_tool_calls(monkeypatch) -> None:
     quote = _load_adapter_module("src.quote_context")
     system = {"item_type": "SystemMessageItem", "meta": {}, "parts": [{"type": "text", "text": "人設"}]}
